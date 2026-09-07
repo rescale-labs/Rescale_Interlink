@@ -163,7 +163,9 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 	}
 
 	// Read parts from file and queue them for upload
+	producerDone := make(chan struct{})
 	go func() {
+		defer close(producerDone)
 		defer close(jobChan)
 
 		// One buffer for the whole producer, sized to the part size the plan
@@ -200,10 +202,14 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 				copy(partData, buffer[:n])
 			}
 
-			// Queue this part for upload
-			jobChan <- partJob{
-				index: partIndex,
-				data:  partData,
+			// Queue this part for upload. The send watches the context because
+			// the workers are the only readers: once a staging failure cancels
+			// the operation they exit, and an unguarded send here would park
+			// forever on a queue nobody will drain again.
+			select {
+			case jobChan <- partJob{index: partIndex, data: partData}:
+			case <-opCtx.Done():
+				return
 			}
 
 			partIndex++
@@ -212,6 +218,16 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 				break
 			}
 		}
+	}()
+
+	// Join the producer before returning. The wait group above covers the
+	// workers only, so without this the pipeline could return while the producer
+	// and the part buffers it holds stayed alive — one leak per attempt, and a
+	// retried upload runs the attempt again. Cancelling first releases a
+	// producer parked on a send.
+	defer func() {
+		cancelOp()
+		<-producerDone
 	}()
 
 	// Collect results and update progress

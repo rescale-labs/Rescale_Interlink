@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -370,5 +372,137 @@ func TestDownloadJob_RetryDoesNotInheritEarlierFailures(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Errorf("distinct batch IDs = %d, want 2 (%v)", len(seen), seen)
+	}
+}
+
+// sha512Of returns the checksum the API would carry for these bytes.
+func sha512Of(t *testing.T, data []byte) []models.FileChecksum {
+	t.Helper()
+	sum := sha512.Sum512(data)
+	return []models.FileChecksum{{HashFunction: "sha512", FileHash: hex.EncodeToString(sum[:])}}
+}
+
+// The daemon adopted any file whose length matched the remote file's, which is
+// exactly what a failed download leaves behind: a pre-allocated or partly
+// written file is full-size and holed. Once that file is adopted, no later poll
+// ever fetches the real bytes — the job is permanently recorded as downloaded
+// with a corrupt file in place. When the remote file carries a checksum, that
+// checksum is the test.
+func TestDownloadJob_ReDownloadsAnExistingFileThatFailsItsChecksum(t *testing.T) {
+	const jobID = "checksum1"
+	dir := t.TempDir()
+
+	// The remote file's checksum belongs to different bytes of the same length.
+	files := []models.JobFile{{
+		ID:            "f1",
+		Name:          "out1.txt",
+		DecryptedSize: 5,
+		FileChecksums: sha512Of(t, []byte("hello")),
+	}}
+	srv := fakeJobFilesServer(t, jobID, files, nil)
+	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+
+	outDir := ComputeOutputDir(dir, jobID, "job", false)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "out1.txt"), []byte("world"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// File info 404s, so the re-download this must trigger fails fast — and a
+	// failure is itself the proof that the file was not adopted.
+	outcome := runDownloadJob(t, d, &CompletedJob{ID: jobID, Name: "job"}, 60*time.Second)
+	if outcome != OutcomePartialFailure {
+		t.Fatalf("outcome = %q, want %q: the wrong-content file was adopted instead of re-downloaded",
+			outcome, OutcomePartialFailure)
+	}
+}
+
+// The other half: a file that does hash to the remote checksum is adopted, and
+// the next poll must not hash it again. Auto-download polls every few minutes
+// over job output directories that can run to many gigabytes, so re-reading
+// every adopted file each cycle is not a cost the daemon can carry.
+func TestDownloadJob_DoesNotRehashAVerifiedFile(t *testing.T) {
+	const jobID = "checksum2"
+	dir := t.TempDir()
+
+	payload := []byte("hello")
+	files := []models.JobFile{{
+		ID:            "f1",
+		Name:          "out1.txt",
+		DecryptedSize: int64(len(payload)),
+		FileChecksums: sha512Of(t, payload),
+	}}
+	srv := fakeJobFilesServer(t, jobID, files, nil)
+	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+
+	outDir := ComputeOutputDir(dir, jobID, "job", false)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "out1.txt"), payload, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var hashCalls int
+	d.hashLocalFile = func(path string) (string, error) {
+		hashCalls++
+		return sha512File(path)
+	}
+
+	job := &CompletedJob{ID: jobID, Name: "job"}
+	for poll := 1; poll <= 2; poll++ {
+		if outcome := runDownloadJob(t, d, job, 20*time.Second); outcome != OutcomeDownloaded {
+			t.Fatalf("poll %d outcome = %q, want %q: the verified file was not adopted", poll, outcome, OutcomeDownloaded)
+		}
+	}
+
+	if hashCalls != 1 {
+		t.Errorf("the file was hashed %d times over two polls, want once", hashCalls)
+	}
+}
+
+// A file whose bytes change after it was verified has to be checked again: the
+// cache is a shortcut past the hash, not a substitute for the file.
+func TestDownloadJob_RehashesAFileThatChangedAfterVerification(t *testing.T) {
+	const jobID = "checksum3"
+	dir := t.TempDir()
+
+	payload := []byte("hello")
+	files := []models.JobFile{{
+		ID:            "f1",
+		Name:          "out1.txt",
+		DecryptedSize: int64(len(payload)),
+		FileChecksums: sha512Of(t, payload),
+	}}
+	srv := fakeJobFilesServer(t, jobID, files, nil)
+	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+
+	outDir := ComputeOutputDir(dir, jobID, "job", false)
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	localPath := filepath.Join(outDir, "out1.txt")
+	if err := os.WriteFile(localPath, payload, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	job := &CompletedJob{ID: jobID, Name: "job"}
+	if outcome := runDownloadJob(t, d, job, 20*time.Second); outcome != OutcomeDownloaded {
+		t.Fatalf("first outcome = %q, want %q", outcome, OutcomeDownloaded)
+	}
+
+	// Same length, different bytes, and a modification time the cache can see.
+	if err := os.WriteFile(localPath, []byte("world"), 0o644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := os.Chtimes(localPath, time.Now().Add(time.Hour), time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if outcome := runDownloadJob(t, d, job, 60*time.Second); outcome != OutcomePartialFailure {
+		t.Errorf("second outcome = %q, want %q: the cached verification outlived the file it described",
+			outcome, OutcomePartialFailure)
 	}
 }

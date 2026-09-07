@@ -12,13 +12,30 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
 )
+
+// waitFor blocks until want reports true, failing the test if it never does.
+// Used where the assertion is about what a running download has NOT done yet,
+// so the test has to let it get as far as it will before looking.
+func waitFor(t *testing.T, what string, want func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if want() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
 
 // mockCloudTransferDownload is a bare CloudTransfer: the capability interfaces
 // the mocks below add are what the downloader actually reaches for.
@@ -570,4 +587,269 @@ func TestDownloadStreamingConcurrentRenamesIntoPlace(t *testing.T) {
 	if !strings.EqualFold(prep.ComputedHash, hex.EncodeToString(want[:])) {
 		t.Errorf("computed hash = %q, want %q", prep.ComputedHash, hex.EncodeToString(want[:]))
 	}
+}
+
+// stallingCBCPartDownloader serves a CBC (v2) object one range at a time and
+// holds the range at offset 0 until the test releases it, which is the shape of
+// a stalled or repeatedly retried first part. It records how many ranges were
+// started so a test can see how far ahead of that part the download ran.
+type stallingCBCPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	release    chan struct{}
+
+	mu      sync.Mutex
+	started int
+}
+
+func (m *stallingCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
+	return int64(len(m.ciphertext)), nil
+}
+
+func (m *stallingCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+	m.mu.Lock()
+	m.started++
+	m.mu.Unlock()
+
+	if offset == 0 {
+		select {
+		case <-m.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, nil
+}
+
+func (m *stallingCBCPartDownloader) rangesStarted() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.started
+}
+
+// The v2 path decrypts in order because CBC chains, so a part that arrives
+// before the one ahead of it waits in partBuffer. Every part used to be queued
+// up front, which meant a stalled part 0 did not slow the other workers down at
+// all: they fetched the rest of the object and the buffer held every one of
+// those ranges at once, with nothing capping it. On a large object that is the
+// whole file in RAM.
+//
+// Part 0 stalls here while the rest of the object is available. The fetchers
+// must not run further ahead than the reorder window, and the download must
+// still finish once part 0 is released.
+func TestDownloadCBCStreamingBoundsTheReorderWindow(t *testing.T) {
+	const partSize = int64(64)
+	// 40 whole parts of plaintext, so the object is far larger than the window.
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4*40)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	// One sealed stream: the driver splits it into partSize ranges itself, and
+	// CBC decryption chains across those boundaries.
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	mock := &stallingCBCPartDownloader{ciphertext: ciphertext, release: make(chan struct{})}
+	mock.formatVersion = 2
+	mock.partSize = partSize
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 2,
+		PartSize:      partSize,
+		EncryptionKey: enc.GetKey(),
+		IV:            enc.GetInitialIV(),
+		EncryptedSize: int64(len(ciphertext)),
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- NewDownloader(mock).downloadCBCStreaming(context.Background(), prep)
+	}()
+
+	// No transfer handle means the default concurrency of 4, and the window is
+	// twice that.
+	const window = 8
+	waitFor(t, "the fetchers to fill the reorder window",
+		func() bool { return mock.rangesStarted() >= window })
+	// Long enough for an unbounded dispatcher to fetch the rest of the object.
+	time.Sleep(150 * time.Millisecond)
+	if got := mock.rangesStarted(); got > window {
+		t.Errorf("%d ranges were fetched while part 0 stalled, want at most the %d-part reorder window", got, window)
+	}
+
+	close(mock.release)
+	if err := <-done; err != nil {
+		t.Fatalf("downloadCBCStreaming after part 0 was released: %v", err)
+	}
+
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read downloaded file: %v", readErr)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want the original %d", len(got), len(plaintext))
+	}
+}
+
+// cancellingHKDFPartDownloader serves an HKDF (v1) object and cancels the
+// download's own context once the first range is in hand, which is what a user
+// pressing Ctrl-C or a shutdown between two part requests looks like from
+// inside the driver.
+type cancellingHKDFPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	cancel     context.CancelFunc
+
+	mu     sync.Mutex
+	served int
+}
+
+func (m *cancellingHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
+	return int64(len(m.ciphertext)), nil
+}
+
+func (m *cancellingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+
+	m.mu.Lock()
+	m.served++
+	first := m.served == 1
+	m.mu.Unlock()
+	if first {
+		m.cancel()
+	}
+	return out, nil
+}
+
+func (m *cancellingHKDFPartDownloader) rangesServed() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.served
+}
+
+// The v1 workers return silently on a cancelled context, and the driver counted
+// the results it received without ever checking the count. A cancellation
+// between two part requests therefore ran straight on to truncation, hashing
+// and the rename: a file of the right length, holed wherever a part never
+// arrived, published as a finished download. Cancelling is not failing, but it
+// is not succeeding either.
+func TestDownloadStreamingConcurrentRefusesToCallCancellationSuccess(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4*8) // eight whole parts
+
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	mock := &cancellingHKDFPartDownloader{ciphertext: ciphertext, cancel: cancel}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	err := NewDownloader(mock).downloadStreamingConcurrent(ctx, prep, 1, mock, fileID)
+	if err == nil {
+		t.Fatal("a cancelled download returned success, so a file with holes in it is now the download")
+	}
+	if served := mock.rangesServed(); int64(served) >= int64(len(plaintext))/partSize {
+		t.Fatalf("test setup: all %d parts were served, so nothing was actually cut short", served)
+	}
+
+	if info, statErr := os.Stat(localPath); statErr == nil {
+		t.Errorf("a cancelled download left a %d-byte file at the destination", info.Size())
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("stat %s: %v", localPath, statErr)
+	}
+}
+
+// slowFailHKDFPartDownloader refuses every range, but only after a pause long
+// enough for the producer to have filled the job queue and parked on a send it
+// cannot complete — the state the leak this test is about needs.
+type slowFailHKDFPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+}
+
+func (m *slowFailHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, error) {
+	return int64(len(m.ciphertext)), nil
+}
+
+func (m *slowFailHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, progressCallback func(int64)) ([]byte, error) {
+	time.Sleep(50 * time.Millisecond)
+	return nil, fmt.Errorf("range at %d: connection reset by peer", offset)
+}
+
+// The v1 driver's producer sent into the job queue without watching the
+// context, and the wait group covered the workers only. A failed part cancelled
+// the operation, the workers exited, and nothing was left to drain the queue —
+// so the producer stayed parked on its send while the driver returned. Each
+// retried attempt left another one, along with the buffers it held.
+func TestDownloadStreamingConcurrentJoinsProducerOnFailure(t *testing.T) {
+	const partSize = int64(64)
+	// More parts than the queue is deep, so the producer is certain to be
+	// blocked on a send when the first part's failure cancels the operation.
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4*8)
+
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	mock := &slowFailHKDFPartDownloader{ciphertext: ciphertext}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	baseline := goroutineBaseline(t)
+
+	err := NewDownloader(mock).downloadStreamingConcurrent(context.Background(), prep, 1, mock, fileID)
+	if err == nil {
+		t.Fatal("expected the refused range to fail the download")
+	}
+
+	waitForGoroutines(t, baseline)
 }

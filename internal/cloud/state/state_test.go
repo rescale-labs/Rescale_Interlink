@@ -29,8 +29,8 @@ func TestUploadState_FilePermissions(t *testing.T) {
 		LocalPath:     localPath,
 		ObjectKey:     "test/object",
 		EncryptionKey: "dGVzdC1lbmNyeXB0aW9uLWtleS1iYXNlNjQ=", // Simulated base64 key
-		IV:            "dGVzdC1pdi1iYXNlNjQ=",                   // Simulated base64 IV
-		MasterKey:     "dGVzdC1tYXN0ZXIta2V5LWJhc2U2NA==",       // Simulated base64 master key
+		IV:            "dGVzdC1pdi1iYXNlNjQ=",                 // Simulated base64 IV
+		MasterKey:     "dGVzdC1tYXN0ZXIta2V5LWJhc2U2NA==",     // Simulated base64 master key
 		CreatedAt:     time.Now(),
 		LastUpdate:    time.Now(),
 		TotalSize:     1024,
@@ -73,7 +73,7 @@ func TestDownloadState_FilePermissions(t *testing.T) {
 		LocalPath:       localPath,
 		RemotePath:      "test/object",
 		MasterKey:       "dGVzdC1tYXN0ZXIta2V5LWJhc2U2NA==", // Simulated base64 master key
-		StreamingFileId: "dGVzdC1maWxlLWlk",                  // Simulated base64 file ID
+		StreamingFileId: "dGVzdC1maWxlLWlk",                 // Simulated base64 file ID
 		CreatedAt:       time.Now(),
 		LastUpdate:      time.Now(),
 		TotalSize:       1024,
@@ -259,5 +259,78 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 	}
 	if loaded.FormatVersion != original.FormatVersion {
 		t.Errorf("FormatVersion: expected %d, got %d", original.FormatVersion, loaded.FormatVersion)
+	}
+}
+
+// TestValidateDownloadStateRejectsClaimsPastEOF covers the half of the sidecar
+// check that was missing. Validation rejected a partial file LARGER than the
+// object, but accepted one smaller than the bytes the sidecar claimed were in
+// it — the shape a crash leaves when the state update outlives the data, or
+// when the partial file is truncated between attempts while its sidecar
+// survives. Resuming from such a state skips ranges that are not on disk, and
+// the pre-allocation puts zeros in their place: a hole that only a checksum
+// would ever catch, and files without one carry no such check.
+func TestValidateDownloadStateRejectsClaimsPastEOF(t *testing.T) {
+	const chunkSize = int64(8)
+	const totalSize = int64(32) // four chunks
+
+	tests := []struct {
+		name       string
+		fileSize   int64
+		chunks     []int64
+		ranges     []ByteRange
+		wantReject bool
+	}{
+		{
+			name:     "claims are covered by the file",
+			fileSize: totalSize,
+			chunks:   []int64{0, 1},
+		},
+		{
+			name:       "a chunk claim reaches past the end of the file",
+			fileSize:   chunkSize, // only chunk 0 could be in here
+			chunks:     []int64{0, 1},
+			wantReject: true,
+		},
+		{
+			name:       "a byte range claim reaches past the end of the file",
+			fileSize:   chunkSize,
+			ranges:     []ByteRange{{Start: 0, End: 24}},
+			wantReject: true,
+		},
+		{
+			name:     "an empty claim needs nothing on disk",
+			fileSize: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			localPath := filepath.Join(t.TempDir(), "results.dat")
+			if err := os.WriteFile(localPath, make([]byte, tt.fileSize), 0600); err != nil {
+				t.Fatalf("seed partial file: %v", err)
+			}
+
+			now := time.Now()
+			st := &DownloadResumeState{
+				LocalPath:       localPath,
+				EncryptedPath:   localPath,
+				RemotePath:      "bucket/results.dat",
+				TotalSize:       totalSize,
+				ChunkSize:       chunkSize,
+				CompletedChunks: tt.chunks,
+				CompletedRanges: tt.ranges,
+				CreatedAt:       now,
+				LastUpdate:      now,
+			}
+
+			err := ValidateDownloadState(st, localPath)
+			if tt.wantReject && err == nil {
+				t.Fatalf("state claiming bytes the %d-byte file does not hold was accepted", tt.fileSize)
+			}
+			if !tt.wantReject && err != nil {
+				t.Fatalf("ValidateDownloadState: %v", err)
+			}
+		})
 	}
 }

@@ -36,11 +36,11 @@ type DownloadResumeState struct {
 	CompletedRanges []ByteRange `json:"completed_ranges,omitempty"` // Exact byte ranges written to disk
 
 	// Streaming decryption fields (FormatVersion=1)
-	FormatVersion   int     `json:"format_version"`               // 0=legacy, 1=streaming
-	MasterKey       string  `json:"master_key,omitempty"`         // Base64-encoded master key (v1 only)
-	StreamingFileId string  `json:"streaming_file_id,omitempty"`  // Base64-encoded file ID from metadata (v1 only)
-	PartSize        int64   `json:"part_size,omitempty"`          // Plaintext part size (v1 only)
-	CompletedParts  []int64 `json:"completed_parts,omitempty"`    // Completed part indices (v1 only)
+	FormatVersion   int     `json:"format_version"`              // 0=legacy, 1=streaming
+	MasterKey       string  `json:"master_key,omitempty"`        // Base64-encoded master key (v1 only)
+	StreamingFileId string  `json:"streaming_file_id,omitempty"` // Base64-encoded file ID from metadata (v1 only)
+	PartSize        int64   `json:"part_size,omitempty"`         // Plaintext part size (v1 only)
+	CompletedParts  []int64 `json:"completed_parts,omitempty"`   // Completed part indices (v1 only)
 }
 
 // =============================================================================
@@ -134,6 +134,16 @@ func ValidateDownloadState(state *DownloadResumeState, localPath string) error {
 			if encInfo.Size() > state.TotalSize {
 				return fmt.Errorf("encrypted file size exceeds total size")
 			}
+			// A state is a claim about bytes in the file, so a file too short to
+			// hold the last chunk it claims cannot back that claim: the file was
+			// truncated, or the state update outlived the data it described.
+			// Resuming would skip exactly the ranges that are missing, and the
+			// resumed download's own pre-allocation restores the expected length
+			// with zeros in their place — a hole no size check notices and only a
+			// checksum would catch, which files without one do not carry.
+			if claimed := state.claimedEnd(); claimed > encInfo.Size() {
+				return fmt.Errorf("resume state claims %d bytes but the file holds %d", claimed, encInfo.Size())
+			}
 		} else {
 			if encInfo.Size() != state.DownloadedBytes {
 				return fmt.Errorf("encrypted file size mismatch")
@@ -173,6 +183,31 @@ func (s *DownloadResumeState) MarkChunkCompleted(chunkIndex int64, chunkSize int
 		s.DownloadedBytes += chunkSize
 	}
 	s.LastUpdate = time.Now()
+}
+
+// claimedEnd returns the offset one past the last byte this state claims is on
+// disk, taking the furthest of its completed chunks and its recorded byte
+// ranges. A chunk's claim ends at the chunk boundary or at TotalSize, whichever
+// comes first, because the last chunk of an object is short.
+func (s *DownloadResumeState) claimedEnd() int64 {
+	var end int64
+	if s.ChunkSize > 0 {
+		for _, idx := range s.CompletedChunks {
+			chunkEnd := (idx + 1) * s.ChunkSize
+			if s.TotalSize > 0 && chunkEnd > s.TotalSize {
+				chunkEnd = s.TotalSize
+			}
+			if chunkEnd > end {
+				end = chunkEnd
+			}
+		}
+	}
+	for _, r := range s.CompletedRanges {
+		if r.End > end {
+			end = r.End
+		}
+	}
+	return end
 }
 
 // GetMissingChunks returns a list of chunk indices that still need to be downloaded.

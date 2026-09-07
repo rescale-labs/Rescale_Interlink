@@ -114,23 +114,40 @@ func (p *Provider) downloadChunkedWithProgress(ctx context.Context, azureClient 
 	}
 
 	// DownloadRangeOnce is the non-retrying variant, so the shared helper's
-	// per-chunk retry is the only retry.
+	// per-chunk retry is the only retry. This download has no properties call of
+	// its own, so the first range's ETag is what the rest are pinned to.
 	return transfer.DownloadChunkedToFile(ctx, azureClient.RetryWithBackoff, localPath, totalSize, progressCallback,
-		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		})
+		transfer.PinObjectVersion(rangeReaderWithETag(azureClient, remotePath), ""))
+}
+
+// rangeReaderWithETag opens one byte range and reports the ETag Azure answered
+// with, which is what pins a download made of many ranges to one version of the
+// blob.
+func rangeReaderWithETag(azureClient *AzureClient, remotePath string) transfer.OpenRangeVersioned {
+	return func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, string, error) {
+		// Per-request If-Match is deliberately not sent: intercepting proxies
+		// (see the open ITAR issue) can mangle ETag headers into spurious 412s.
+		// Comparing the ETag that comes back detects the same replacement
+		// without putting a condition on the wire.
+		resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
+		if err != nil {
+			return nil, "", err
+		}
+		etag := ""
+		if resp.ETag != nil {
+			etag = string(*resp.ETag)
+		}
+		return resp.Body, etag, nil
+	}
 }
 
 // downloadChunkedConcurrent downloads a blob using concurrent range requests.
 // The shared driver owns the chunking, resume state, worker pool and writes; this
 // wrapper supplies only the Azure calls.
 func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *AzureClient, remotePath, localPath string, totalSize int64, progressCallback func(float64), transferHandle *internaltransfer.Transfer) error {
-	// The ETag pins the blob for resume validation: a resume state naming a
-	// different one is discarded. Range requests do not send it (see below).
+	// The ETag pins the blob twice over: a resume state naming a different one
+	// is discarded, and every range this attempt fetches has to come back
+	// carrying it (see below).
 	props, err := azureClient.GetBlobProperties(ctx, remotePath)
 	if err != nil {
 		return fmt.Errorf("failed to get blob properties: %w", err)
@@ -151,15 +168,10 @@ func (p *Provider) downloadChunkedConcurrent(ctx context.Context, azureClient *A
 		Retry:            azureClient.RetryWithBackoff,
 		ProgressCallback: progressCallback,
 		// DownloadRangeOnce is the non-retrying variant, so the driver's
-		// per-chunk retry is the only retry.
-		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			// Per-request If-Match deliberately omitted (proxy ETag-mangling
-			// risk); staleness is caught by resume-state validation + checksums.
-			resp, err := azureClient.DownloadRangeOnce(attemptCtx, remotePath, offset, length, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		},
+		// per-chunk retry is the only retry. Every range has to come back
+		// carrying the ETag the properties call above reported, so a blob
+		// replaced while this download is running aborts it instead of
+		// producing a file stitched from two versions.
+		Open: transfer.PinObjectVersion(rangeReaderWithETag(azureClient, remotePath), props.ETag),
 	})
 }

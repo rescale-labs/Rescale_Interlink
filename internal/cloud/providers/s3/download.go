@@ -101,15 +101,31 @@ func (p *Provider) downloadSingleWithProgress(ctx context.Context, s3Client *S3C
 // Wraps request+read+close in single retry to handle mid-transfer proxy failures.
 func (p *Provider) downloadChunkedWithProgress(ctx context.Context, s3Client *S3Client, objectKey, localPath string, totalSize int64, progressCallback func(float64)) error {
 	// GetObjectRangeOnce is the non-retrying variant, so the shared helper's
-	// per-chunk retry is the only retry.
+	// per-chunk retry is the only retry. This download has no HEAD of its own,
+	// so the first range's ETag is what the rest are pinned to.
 	return transfer.DownloadChunkedToFile(ctx, s3Client.RetryWithBackoff, localPath, totalSize, progressCallback,
-		func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, objectKey, offset, offset+length-1, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		})
+		transfer.PinObjectVersion(rangeReaderWithETag(s3Client, objectKey), ""))
+}
+
+// rangeReaderWithETag opens one byte range and reports the ETag S3 answered
+// with, which is what pins a download made of many ranges to one version of the
+// object.
+func rangeReaderWithETag(s3Client *S3Client, objectKey string) transfer.OpenRangeVersioned {
+	return func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, string, error) {
+		// Per-request If-Match is deliberately not sent: intercepting proxies
+		// (see the open ITAR issue) can mangle ETag headers into spurious 412s.
+		// Comparing the ETag that comes back detects the same replacement
+		// without putting a condition on the wire.
+		resp, err := s3Client.GetObjectRangeOnce(attemptCtx, objectKey, offset, offset+length-1, "")
+		if err != nil {
+			return nil, "", err
+		}
+		etag := ""
+		if resp.ETag != nil {
+			etag = *resp.ETag
+		}
+		return resp.Body, etag, nil
+	}
 }
 
 // downloadChunkedConcurrent downloads a file using concurrent range requests.
@@ -129,8 +145,9 @@ func (p *Provider) downloadChunkedConcurrent(
 	}
 	defer transferHandle.Complete()
 
-	// The ETag pins the object for resume validation: a resume state naming a
-	// different one is discarded. Range requests do not send it (see below).
+	// The ETag pins the object twice over: a resume state naming a different one
+	// is discarded, and every range this attempt fetches has to come back
+	// carrying it (see below).
 	var etag string
 	headResp, err := s3Client.HeadObject(ctx, objectKey)
 	if err != nil {
@@ -150,17 +167,10 @@ func (p *Provider) downloadChunkedConcurrent(
 		Retry:            s3Client.RetryWithBackoff,
 		ProgressCallback: progressCallback,
 		// GetObjectRangeOnce is the non-retrying variant, so the driver's
-		// per-chunk retry is the only retry.
-		Open: func(attemptCtx context.Context, offset, length int64) (io.ReadCloser, error) {
-			// Per-request If-Match is deliberately not sent: intercepting
-			// proxies (see the open ITAR issue) can mangle ETag headers into
-			// spurious 412s. Stale objects are still caught by the resume-state
-			// ETag validation above and the checksum gate after download.
-			resp, err := s3Client.GetObjectRangeOnce(attemptCtx, objectKey, offset, offset+length-1, "")
-			if err != nil {
-				return nil, err
-			}
-			return resp.Body, nil
-		},
+		// per-chunk retry is the only retry. Every range has to come back
+		// carrying the ETag the HEAD above reported, so an object replaced
+		// while this download is running aborts it instead of producing a file
+		// stitched from two versions.
+		Open: transfer.PinObjectVersion(rangeReaderWithETag(s3Client, objectKey), etag),
 	})
 }

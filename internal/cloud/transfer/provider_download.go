@@ -8,7 +8,9 @@ package transfer
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sync"
@@ -26,6 +28,73 @@ import (
 // progress. Chunks are tens of megabytes, so reporting per completed chunk reads
 // as a series of jumps; a timer over the running byte count reads as motion.
 const chunkProgressInterval = 300 * time.Millisecond
+
+// ErrObjectReplaced reports that the object changed under a ranged download, so
+// the ranges fetched so far and the ones still to come no longer describe one
+// object.
+//
+// The sentence carries no digits on purpose. The retry classifier reads error
+// text, an ETag is hexadecimal, and a "500" or a "429" anywhere inside one
+// would have this misread as a retryable server error and retried until the
+// budget ran out. Which offset and which versions were involved goes to the log
+// instead; the caller wraps this with the chunk it was fetching.
+var ErrObjectReplaced = errors.New("the object was replaced during the download, so its ranges no longer come from one version")
+
+// OpenRangeVersioned opens one byte range and reports the version of the object
+// the bytes came from — the S3 or Azure ETag, empty when the backend reported
+// none. Implementations use their provider's non-retrying call, as OpenRange
+// does: the caller owns the retry loop.
+type OpenRangeVersioned func(ctx context.Context, offset, length int64) (io.ReadCloser, string, error)
+
+// PinObjectVersion pins a ranged download to one version of the object, so a
+// file stitched together from many range requests cannot end up holding bytes
+// from two different objects.
+//
+// A download reads its object many times over, for as long as the transfer
+// takes. Replace the object in between with a body of the same length and every
+// range fetched after the replacement comes from the new one: the file that
+// lands is a mixture of the two. Resume-time ETag validation does not see this
+// — it compares versions across attempts, not within one — and with compatible
+// encryption metadata and valid final padding nothing afterwards notices
+// either, because the size is right and a checksum, the one check that would
+// catch it, is not attached to every file.
+//
+// The version each range reports is compared against the pinned one rather than
+// sent as an If-Match condition. Intercepting proxies (see the open ITAR issue)
+// can mangle a conditional header into a spurious 412, which would fail
+// downloads that are perfectly fine; an ETag that comes back different is
+// unambiguous and costs nothing on the wire. version may be empty when the
+// metadata request reported none, in which case the first range that does
+// report one sets the pin, and a backend that never reports one leaves the
+// download exactly where it was before.
+func PinObjectVersion(open OpenRangeVersioned, version string) OpenRange {
+	var mu sync.Mutex
+	pinned := version
+
+	return func(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
+		body, reported, err := open(ctx, offset, length)
+		if err != nil {
+			return nil, err
+		}
+		if reported == "" {
+			return body, nil
+		}
+
+		mu.Lock()
+		if pinned == "" {
+			pinned = reported
+		}
+		want := pinned
+		mu.Unlock()
+
+		if reported != want {
+			body.Close()
+			log.Printf("[DOWNLOAD] object version changed at offset %d: got %s, pinned to %s", offset, reported, want)
+			return nil, ErrObjectReplaced
+		}
+		return body, nil
+	}
+}
 
 // HKDFStreamParams is what the shared HKDF (v1) download driver needs from a
 // provider.
@@ -174,9 +243,10 @@ type ChunkedConcurrentParams struct {
 
 	// ObjectETag pins the object for resume validation: a resume state that
 	// names a different ETag is discarded, so a resumed download can never mix
-	// two versions of an object. Range requests deliberately do NOT send it as
-	// If-Match (proxy ETag-mangling risk; see the open ITAR issue). Empty
-	// disables the validation.
+	// two versions of an object. Range requests within one attempt are pinned
+	// separately, by the provider's Open (see PinObjectVersion) — still without
+	// sending If-Match, because of the proxy ETag-mangling risk. Empty disables
+	// the resume validation.
 	ObjectETag string
 
 	// Retry runs one chunk fetch under the provider's retry policy.
@@ -186,6 +256,22 @@ type ChunkedConcurrentParams struct {
 	Open OpenRange
 
 	ProgressCallback func(float64)
+
+	// openSink opens the file the chunks are written into. Nil, as every caller
+	// leaves it, means the real file at LocalPath. It exists as a seam for the
+	// package's own tests: the order in which a chunk's bytes are made durable
+	// and the sidecar claims them is the one property of this driver that the
+	// finished file cannot show.
+	openSink func(localPath string) (chunkSink, error)
+}
+
+// chunkSink is the file a chunked download writes into. Real downloads use an
+// *os.File.
+type chunkSink interface {
+	WriteAt(p []byte, off int64) (int, error)
+	Sync() error
+	Truncate(size int64) error
+	Close() error
 }
 
 // DownloadChunkedConcurrent writes [0, TotalSize) to LocalPath with several
@@ -232,7 +318,13 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 		chunksToDownload = resumeState.GetMissingChunks(totalChunks)
 	}
 
-	file, err := os.OpenFile(params.LocalPath, os.O_CREATE|os.O_RDWR, 0644)
+	openSink := params.openSink
+	if openSink == nil {
+		openSink = func(localPath string) (chunkSink, error) {
+			return os.OpenFile(localPath, os.O_CREATE|os.O_RDWR, 0644)
+		}
+	}
+	file, err := openSink(params.LocalPath)
 	if err != nil {
 		return fmt.Errorf("failed to create/open file: %w", err)
 	}
@@ -346,7 +438,20 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 
 				atomic.AddInt64(&downloadedBytes, int64(len(data)))
 
-				// Recorded only now that the bytes are on disk.
+				// Flushed before it is claimed. The sidecar is a claim about
+				// what is recoverable from the file, and a write that is only
+				// in the page cache is not: a crash between the two persists
+				// the claim without the bytes, and the next attempt skips
+				// exactly that chunk. The up-front Truncate then supplies zeros
+				// in its place, so nothing downstream sees a short file — a
+				// hole only a checksum could catch, which files without one do
+				// not carry.
+				if syncErr := file.Sync(); syncErr != nil {
+					setError(fmt.Errorf("failed to flush chunk %d to disk: %w", chunkIndex, syncErr))
+					return
+				}
+
+				// Recorded only now that the bytes are durable.
 				stateMu.Lock()
 				resumeState.MarkChunkCompleted(chunkIndex, int64(len(data)))
 				_ = state.SaveDownloadState(resumeState, params.LocalPath)
@@ -359,6 +464,22 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 	errorMu.Lock()
 	failure := firstError
 	errorMu.Unlock()
+
+	// A worker that sees a cancelled context returns without recording an error,
+	// so an empty firstError is not the same as a finished download. Both of the
+	// checks below therefore stand between the workers and the completion path:
+	// without them a cancellation between two range requests was reported as
+	// 100%, the resume state was deleted, and a file whose missing chunks are
+	// still holes became what every downstream presence check calls complete.
+	if failure == nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			failure = fmt.Errorf("download cancelled after %d of %d chunks: %w",
+				len(resumeState.CompletedChunks), totalChunks, ctxErr)
+		} else if completed := int64(len(resumeState.CompletedChunks)); completed < totalChunks {
+			failure = fmt.Errorf("incomplete download: %d of %d chunks were written", completed, totalChunks)
+		}
+	}
+
 	if failure != nil {
 		// Keep the resume state: the chunks already written are still good.
 		stateMu.Lock()

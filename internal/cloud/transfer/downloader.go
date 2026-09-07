@@ -577,22 +577,60 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	var firstErr error
 	var errOnce sync.Once
 
+	// Decryption is sequential because CBC chains, so a part that arrives before
+	// the one ahead of it has to wait in partBuffer. Queueing every part up front
+	// meant a stalled part 0 slowed nothing down: the other workers fetched the
+	// rest of the object and every one of those ranges sat in the buffer at once,
+	// with nothing capping it — a large enough object buffered itself into RAM
+	// until the process died.
+	//
+	// Parts are therefore dispatched lazily against a fixed number of slots: a
+	// slot is taken before a part is queued and given back once that part has
+	// been decrypted and dropped, so no more than reorderWindow parts exist
+	// beyond nextPartToDecrypt at any moment, queued, in flight and buffered
+	// together. Twice the concurrency keeps every worker fed while an earlier
+	// part is still in flight. Workers the scaler adds later share the same
+	// window rather than widening it; the bound is the point.
+	reorderWindow := int64(concurrency) * 2
+	if reorderWindow > numParts {
+		reorderWindow = numParts
+	}
+	windowSlots := make(chan struct{}, reorderWindow)
+
 	// Job channel for download workers
-	jobChan := make(chan downloadJob, numParts)
+	jobChan := make(chan downloadJob, concurrency)
 
 	// Result channel for downloaded parts
 	resultChan := make(chan downloadResult, concurrency*2)
 
-	// Populate job queue
-	for i := int64(0); i < numParts; i++ {
-		startByte := i * partSize
-		length := partSize
-		if startByte+length > encryptedSize {
-			length = encryptedSize - startByte
+	// Dispatch parts into the window as it opens. Both sends watch the context
+	// so a cancelled or failed download does not leave this goroutine parked on
+	// a channel nobody will read again.
+	dispatchDone := make(chan struct{})
+	go func() {
+		defer close(dispatchDone)
+		defer close(jobChan)
+
+		for i := int64(0); i < numParts; i++ {
+			select {
+			case windowSlots <- struct{}{}:
+			case <-downloadCtx.Done():
+				return
+			}
+
+			startByte := i * partSize
+			length := partSize
+			if startByte+length > encryptedSize {
+				length = encryptedSize - startByte
+			}
+
+			select {
+			case jobChan <- downloadJob{partIndex: i, startByte: startByte, length: length}:
+			case <-downloadCtx.Done():
+				return
+			}
 		}
-		jobChan <- downloadJob{partIndex: i, startByte: startByte, length: length}
-	}
-	close(jobChan)
+	}()
 
 	var workerCount int32 = int32(concurrency)
 
@@ -680,12 +718,13 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 	}()
 
-	// Ensure scaler goroutine is properly cleaned up on function exit.
-	// Cancel the context first (signals scaler to stop), then wait for it to finish.
-	// This prevents goroutine leaks.
+	// Ensure the scaler and dispatcher goroutines are properly cleaned up on
+	// function exit. Cancel the context first (signals both to stop), then wait
+	// for them to finish. This prevents goroutine leaks.
 	defer func() {
 		cancelDownload()
 		<-scalerDone
+		<-dispatchDone
 	}()
 
 	// Close result channel when all workers finish
@@ -783,6 +822,11 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 			atomic.AddInt64(&decryptedBytes, int64(bytesWritten))
 			decryptedParts++
 			nextPartToDecrypt++
+
+			// This part is written and its ciphertext is gone, so the slot it
+			// occupied lets the dispatcher queue one more. Always available:
+			// every buffered part holds a slot taken when it was queued.
+			<-windowSlots
 
 			// Progress is reported only by the ticker using decryptedBytes,
 			// not per-part, to prevent jumpy progress from two conflicting sources.
@@ -1099,7 +1143,9 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}
 
 	// Queue jobs
+	producerDone := make(chan struct{})
 	go func() {
+		defer close(producerDone)
 		defer close(jobChan)
 
 		var plaintextOffset int64 = 0
@@ -1116,11 +1162,19 @@ func (d *Downloader) downloadStreamingConcurrent(
 				encEnd = encryptedSize
 			}
 
-			jobChan <- partJob{
+			// The send watches the context because the workers are the only
+			// readers: once a failed part cancels the operation they exit, and
+			// an unguarded send here would park forever on a queue nobody will
+			// drain again.
+			select {
+			case jobChan <- partJob{
 				partIndex:       partIdx,
 				encryptedStart:  encStart,
 				encryptedEnd:    encEnd,
 				plaintextOffset: plaintextOffset,
+			}:
+			case <-opCtx.Done():
+				return
 			}
 
 			// Calculate plaintext offset for next part
@@ -1130,6 +1184,16 @@ func (d *Downloader) downloadStreamingConcurrent(
 				plaintextOffset += prep.PartSize
 			}
 		}
+	}()
+
+	// Join the producer before returning. The wait group below covers the
+	// workers only, so without this the driver could return while the producer
+	// and its queued buffers stayed alive — one leak per attempt, and a retried
+	// download runs the attempt again. Cancelling first releases a producer
+	// parked on a send.
+	defer func() {
+		cancelOp()
+		<-producerDone
 	}()
 
 	// Collect results and track final file size
@@ -1165,6 +1229,18 @@ func (d *Downloader) downloadStreamingConcurrent(
 		return err
 	}
 	errorMu.Unlock()
+
+	// Workers return silently on a cancelled context, so no error does not mean
+	// every part arrived. resultsReceived is the assertion that makes the
+	// difference visible: without it a cancellation between two part requests
+	// ran on to truncation, hashing and the rename, publishing a file of the
+	// right length with holes wherever a part never landed.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("download cancelled after %d of %d parts: %w", resultsReceived, numParts, ctxErr)
+	}
+	if resultsReceived < numParts {
+		return fmt.Errorf("incomplete download: received %d of %d parts", resultsReceived, numParts)
+	}
 
 	// Calculate and set final file size
 	if numParts > 0 {

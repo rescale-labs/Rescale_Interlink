@@ -3,8 +3,11 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +24,7 @@ import (
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -129,6 +133,134 @@ type Daemon struct {
 	// implementation. Per-daemon instance; no cross-process sharing.
 	ts     *services.TransferService
 	events *events.EventBus
+
+	// Files this daemon has already checksummed against their remote file,
+	// keyed by local path. A poll happens every few minutes over output
+	// directories that run to many gigabytes, so hashing every adopted file on
+	// every cycle is not a cost the daemon can carry; the recorded size and
+	// modification time expire the entry as soon as the file changes.
+	verifiedMu sync.Mutex
+	verified   map[string]verifiedFile
+
+	// hashLocalFile computes a file's SHA-512. Nil, as every caller leaves it,
+	// means sha512File. A seam for the daemon's own tests, which need to count
+	// how often a file is read.
+	hashLocalFile func(path string) (string, error)
+}
+
+// verifiedFile records that a local file hashed to the remote file's checksum,
+// together with what the file looked like at the time.
+type verifiedFile struct {
+	size     int64
+	modTime  time.Time
+	checksum string // the remote checksum it was verified against
+}
+
+// alreadyDownloaded reports whether the file already at localPath is the remote
+// file f, so this poll can skip it.
+//
+// The length used to be the whole test, and a file of the right length is
+// exactly what an interrupted download leaves behind: a pre-allocated
+// destination, or one written up to the part that failed, is full-size and
+// holed. Adopting that file is permanent — every later poll adopts it too, so
+// the job stays recorded as downloaded and the real bytes are never fetched.
+//
+// So when the remote file carries a SHA-512 checksum, the file has to hash to
+// it before it is adopted. Without one, the length remains the only check
+// available, and it is the same check every other presence test in the product
+// makes.
+func (d *Daemon) alreadyDownloaded(localPath string, f models.JobFile) bool {
+	info, statErr := os.Stat(localPath)
+	if statErr != nil || info.Size() != f.DecryptedSize {
+		return false
+	}
+
+	expected := remoteSHA512(f.FileChecksums)
+	if expected == "" {
+		d.logger.Debug().Str("path", localPath).Msg("File already exists with correct size, skipping")
+		return true
+	}
+
+	if d.isVerified(localPath, info, expected) {
+		d.logger.Debug().Str("path", localPath).Msg("File already verified against its checksum, skipping")
+		return true
+	}
+
+	actual, hashErr := d.hashFile(localPath)
+	if hashErr != nil {
+		// Unreadable is not verified: fetch it again rather than adopt a file
+		// nothing could check.
+		d.logger.Warn().Err(hashErr).Str("path", localPath).
+			Msg("Could not checksum the existing file, downloading it again")
+		return false
+	}
+	if !strings.EqualFold(actual, expected) {
+		d.logger.Warn().Str("path", localPath).
+			Msg("Existing file is the right size but fails its checksum, downloading it again")
+		return false
+	}
+
+	d.rememberVerified(localPath, info, expected)
+	d.logger.Debug().Str("path", localPath).Msg("File already exists and matches its checksum, skipping")
+	return true
+}
+
+// isVerified reports whether this daemon already checksummed exactly this file
+// against exactly this checksum. Size and modification time are what make the
+// answer expire: a file rewritten since is a different file, and a remote file
+// given new contents carries a new checksum.
+func (d *Daemon) isVerified(localPath string, info os.FileInfo, expected string) bool {
+	d.verifiedMu.Lock()
+	defer d.verifiedMu.Unlock()
+
+	entry, ok := d.verified[localPath]
+	return ok && entry.size == info.Size() && entry.modTime.Equal(info.ModTime()) && entry.checksum == expected
+}
+
+func (d *Daemon) rememberVerified(localPath string, info os.FileInfo, expected string) {
+	d.verifiedMu.Lock()
+	defer d.verifiedMu.Unlock()
+
+	if d.verified == nil {
+		d.verified = make(map[string]verifiedFile)
+	}
+	d.verified[localPath] = verifiedFile{size: info.Size(), modTime: info.ModTime(), checksum: expected}
+}
+
+// hashFile computes a file's SHA-512 through whatever the daemon was given.
+func (d *Daemon) hashFile(path string) (string, error) {
+	if d.hashLocalFile != nil {
+		return d.hashLocalFile(path)
+	}
+	return sha512File(path)
+}
+
+// remoteSHA512 returns the SHA-512 the API reported for a file, or empty when
+// it reported none. Other algorithms are not a substitute: the download path
+// verifies SHA-512 only, so anything else leaves the length as the only check.
+func remoteSHA512(checksums []models.FileChecksum) string {
+	for _, cs := range checksums {
+		switch cs.HashFunction {
+		case "sha512", "SHA-512", "SHA512":
+			return cs.FileHash
+		}
+	}
+	return ""
+}
+
+// sha512File computes a file's SHA-512 in hex.
+func sha512File(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hash := sha512.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Daemon, error) {
@@ -906,8 +1038,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 				continue
 			}
 
-			if info, statErr := os.Stat(localPath); statErr == nil && info.Size() == f.DecryptedSize {
-				d.logger.Debug().Str("path", localPath).Msg("File already exists with correct size, skipping")
+			if d.alreadyDownloaded(localPath, f) {
 				alreadyPresent++
 				totalSize += f.DecryptedSize
 				continue

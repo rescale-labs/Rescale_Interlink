@@ -334,3 +334,300 @@ func TestFetchRangeWithRetryReportsOpenFailure(t *testing.T) {
 		t.Errorf("error does not name the range: %v", err)
 	}
 }
+
+// TestDownloadChunkedConcurrentRefusesToCallCancellationSuccess covers the gap
+// between "no worker reported an error" and "the download finished". Workers
+// return silently when the operation is cancelled, so a cancellation that
+// arrives between two range requests leaves firstError nil with chunks still
+// missing. The driver used to read that as success: it reported 100%, deleted
+// the resume state and returned nil, leaving a file full of holes that every
+// downstream presence check accepts.
+//
+// The context is cancelled here once the first chunk is in hand. The download
+// must fail, and the resume state must survive so the chunk that did land is
+// not downloaded again.
+func TestDownloadChunkedConcurrentRefusesToCallCancellationSuccess(t *testing.T) {
+	const chunkSize = 8
+	object := objectOfSize(chunkSize * 4)
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	server := &rangeServer{object: object}
+	var served int
+	cancelAfterFirstChunk := func(c context.Context, offset, length int64) (io.ReadCloser, error) {
+		body, err := server.open(c, offset, length)
+		served++
+		if served == 1 {
+			cancel()
+		}
+		return body, err
+	}
+
+	err := DownloadChunkedConcurrent(ctx, ChunkedConcurrentParams{
+		RemotePath:  "bucket/results.dat",
+		LocalPath:   localPath,
+		TotalSize:   int64(len(object)),
+		ChunkSize:   chunkSize,
+		Concurrency: 1, // one worker, so the cancellation lands between two chunks
+		StorageType: "S3Storage",
+		ObjectETag:  `"etag-1"`,
+		Retry:       passThroughRetry,
+		Open:        cancelAfterFirstChunk,
+	})
+	if err == nil {
+		t.Fatal("a cancelled download returned success, so its holes are now a finished file")
+	}
+
+	saved, loadErr := state.LoadDownloadState(localPath)
+	if loadErr != nil {
+		t.Fatalf("load resume state: %v", loadErr)
+	}
+	if saved == nil {
+		t.Fatal("the resume state was deleted, so the chunk that did land has to be downloaded again")
+	}
+	if len(saved.CompletedChunks) != 1 || saved.CompletedChunks[0] != 0 {
+		t.Errorf("completed chunks = %v, want only chunk 0", saved.CompletedChunks)
+	}
+}
+
+// TestDownloadChunkedConcurrentReportsMissingChunks is the same contract seen
+// from the other side: a worker that stops without recording an error must not
+// leave the driver reporting a download it never completed. A short chunk list
+// after the workers join is the assertion the driver was missing.
+func TestDownloadChunkedConcurrentReportsMissingChunks(t *testing.T) {
+	const chunkSize = 8
+	object := objectOfSize(chunkSize * 3)
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+
+	// A worker that returns on a cancelled context before its first request, so
+	// no range is ever fetched and no error is ever set.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	server := &rangeServer{object: object}
+	err := DownloadChunkedConcurrent(ctx, ChunkedConcurrentParams{
+		RemotePath:  "container/results.dat",
+		LocalPath:   localPath,
+		TotalSize:   int64(len(object)),
+		ChunkSize:   chunkSize,
+		Concurrency: 2,
+		StorageType: "AzureStorage",
+		ObjectETag:  `"etag-1"`,
+		Retry:       passThroughRetry,
+		Open:        server.open,
+	})
+	if err == nil {
+		t.Fatal("a download that fetched nothing returned success")
+	}
+	if server.requestCount != 0 {
+		t.Errorf("%d range requests were made on an already-cancelled context, want none", server.requestCount)
+	}
+}
+
+// recordingSink stands in for the file a chunked download writes into and
+// records the order of the calls made on it, noting at each one whether the
+// resume sidecar already claimed the chunk. The ordering between a chunk's
+// bytes becoming durable and the sidecar claiming them is the whole of what
+// this is about, and the finished file cannot show it.
+type recordingSink struct {
+	statePath string
+
+	mu    sync.Mutex
+	calls []string
+}
+
+func (s *recordingSink) note(op string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claim := "unclaimed"
+	if _, err := os.Stat(s.statePath); err == nil {
+		claim = "claimed"
+	}
+	s.calls = append(s.calls, op+"/"+claim)
+}
+
+func (s *recordingSink) WriteAt(p []byte, off int64) (int, error) {
+	s.note("write")
+	return len(p), nil
+}
+func (s *recordingSink) Sync() error               { s.note("sync"); return nil }
+func (s *recordingSink) Truncate(size int64) error { return nil }
+func (s *recordingSink) Close() error              { return nil }
+
+func (s *recordingSink) sequence() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+// TestDownloadChunkedConcurrentMakesChunksDurableBeforeClaimingThem covers the
+// ordering the resume sidecar depends on. The data file was synced only once,
+// at the very end, while the sidecar was written after every chunk — so a
+// crash, or a power failure, could persist a sidecar claiming chunks whose
+// bytes were still in the page cache. The next attempt skips exactly those
+// chunks, and the up-front Truncate fills their place with zeros: a hole that
+// no size check sees and that only a checksum would ever catch, which files
+// without one do not have.
+func TestDownloadChunkedConcurrentMakesChunksDurableBeforeClaimingThem(t *testing.T) {
+	const chunkSize = 8
+	object := objectOfSize(chunkSize * 2)
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+
+	sink := &recordingSink{statePath: localPath + ".download.resume"}
+	server := &rangeServer{object: object}
+
+	err := DownloadChunkedConcurrent(context.Background(), ChunkedConcurrentParams{
+		RemotePath:  "bucket/results.dat",
+		LocalPath:   localPath,
+		TotalSize:   int64(len(object)),
+		ChunkSize:   chunkSize,
+		Concurrency: 1, // one worker, so the call sequence is the driver's, not the scheduler's
+		StorageType: "S3Storage",
+		ObjectETag:  `"etag-1"`,
+		Retry:       passThroughRetry,
+		Open:        server.open,
+		openSink:    func(string) (chunkSink, error) { return sink, nil },
+	})
+	if err != nil {
+		t.Fatalf("DownloadChunkedConcurrent: %v", err)
+	}
+
+	// Two chunks: each is written, then flushed, and only then claimed. A sync
+	// that already sees the chunk claimed would mean the claim came first.
+	want := []string{
+		"write/unclaimed", // chunk 0's bytes
+		"sync/unclaimed",  // made durable before the sidecar claims chunk 0
+		"write/claimed",   // chunk 1's bytes, chunk 0 now claimed
+		"sync/claimed",    // made durable before the sidecar claims chunk 1
+		"sync/claimed",    // the final flush before the caller checksums the file
+	}
+	got := sink.sequence()
+	if len(got) != len(want) {
+		t.Fatalf("call sequence = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("call sequence = %v, want %v", got, want)
+		}
+	}
+}
+
+// versionedRangeServer answers range requests out of one of two objects of the
+// same length, switching to the second once the first replaceAfter ranges have
+// been served — an object replaced under a download that is still running.
+type versionedRangeServer struct {
+	before, after []byte
+	etagBefore    string
+	etagAfter     string
+	replaceAfter  int
+
+	mu     sync.Mutex
+	served int
+}
+
+func (s *versionedRangeServer) open(_ context.Context, offset, length int64) (io.ReadCloser, string, error) {
+	s.mu.Lock()
+	object, etag := s.before, s.etagBefore
+	if s.served >= s.replaceAfter {
+		object, etag = s.after, s.etagAfter
+	}
+	s.served++
+	s.mu.Unlock()
+
+	return io.NopCloser(bytes.NewReader(object[offset : offset+length])), etag, nil
+}
+
+// TestDownloadChunkedConcurrentAbortsWhenTheObjectIsReplaced covers the version
+// consistency a ranged download had none of. Ranges were fetched with no
+// condition and the ETag each response carried was thrown away, so replacing
+// the object mid-download with a body of the same length produced a file
+// stitched from both versions. Resume-time ETag validation does not catch it —
+// it compares across attempts, not within one — and neither does the size
+// check, which is all a file without a checksum has.
+func TestDownloadChunkedConcurrentAbortsWhenTheObjectIsReplaced(t *testing.T) {
+	const chunkSize = 8
+	first := objectOfSize(chunkSize * 4)
+	second := objectOfSize(chunkSize * 4)
+	for i := range second {
+		second[i] ^= 0xff // same length, entirely different bytes
+	}
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+
+	server := &versionedRangeServer{
+		before:       first,
+		after:        second,
+		etagBefore:   `"etag-1"`,
+		etagAfter:    `"etag-2"`,
+		replaceAfter: 2, // the first two ranges come from the object we started on
+	}
+
+	err := DownloadChunkedConcurrent(context.Background(), ChunkedConcurrentParams{
+		RemotePath:  "bucket/results.dat",
+		LocalPath:   localPath,
+		TotalSize:   int64(len(first)),
+		ChunkSize:   chunkSize,
+		Concurrency: 1, // one worker, so the replacement lands between two chunks
+		StorageType: "S3Storage",
+		ObjectETag:  `"etag-1"`,
+		Retry:       passThroughRetry,
+		Open:        PinObjectVersion(server.open, `"etag-1"`),
+	})
+	if err == nil {
+		t.Fatal("the download succeeded, so a file made of two different objects is now the download")
+	}
+	if !errors.Is(err, ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+	if !strings.Contains(err.Error(), "chunk 2") {
+		t.Errorf("error does not name the chunk that hit the replacement: %v", err)
+	}
+
+	written, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read partial download: %v", readErr)
+	}
+	if bytes.Equal(written, first) || bytes.Equal(written, second) {
+		t.Error("the aborted download left a complete file; it must not look finished")
+	}
+}
+
+// TestPinObjectVersionAdoptsTheFirstVersion covers the case where the metadata
+// request reported no version: the first range that reports one sets the pin,
+// and a backend that never reports one is left alone rather than being refused.
+func TestPinObjectVersionAdoptsTheFirstVersion(t *testing.T) {
+	object := objectOfSize(32)
+
+	t.Run("the first reported version becomes the pin", func(t *testing.T) {
+		server := &versionedRangeServer{
+			before: object, after: object,
+			etagBefore: `"etag-1"`, etagAfter: `"etag-2"`,
+			replaceAfter: 1,
+		}
+		open := PinObjectVersion(server.open, "")
+
+		if _, err := open(context.Background(), 0, 8); err != nil {
+			t.Fatalf("first range: %v", err)
+		}
+		if _, err := open(context.Background(), 8, 8); !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("second range error = %v, want ErrObjectReplaced", err)
+		}
+	})
+
+	t.Run("a backend that reports no version pins nothing", func(t *testing.T) {
+		server := &versionedRangeServer{
+			before: object, after: object,
+			replaceAfter: 1, // both etags are empty
+		}
+		open := PinObjectVersion(server.open, "")
+
+		for offset := int64(0); offset < 32; offset += 8 {
+			body, err := open(context.Background(), offset, 8)
+			if err != nil {
+				t.Fatalf("range at %d: %v", offset, err)
+			}
+			body.Close()
+		}
+	})
+}
