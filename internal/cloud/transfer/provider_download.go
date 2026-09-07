@@ -65,10 +65,18 @@ type OpenRangeVersioned func(ctx context.Context, offset, length int64) (io.Read
 // downloads that are perfectly fine; an ETag that comes back different is
 // unambiguous and costs nothing on the wire. version may be empty when the
 // metadata request reported none, in which case the first range that does
-// report one sets the pin, and a backend that never reports one leaves the
-// download exactly where it was before.
+// report one sets the pin.
+//
+// Once a version is pinned, a range that reports none is refused just as one
+// reporting a different version is: missing evidence is not evidence of
+// sameness, and a proxy that drops the header from the one response that
+// matters would otherwise bypass the comparison entirely. Only a download that
+// has never seen a version at all runs unpinned, which is where a backend that
+// reports none leaves it — with one warning, so a whole class of downloads
+// going unpinned is visible.
 func PinObjectVersion(open OpenRangeVersioned, version string) OpenRange {
 	var mu sync.Mutex
+	var warnOnce sync.Once
 	pinned := version
 
 	return func(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
@@ -76,21 +84,29 @@ func PinObjectVersion(open OpenRangeVersioned, version string) OpenRange {
 		if err != nil {
 			return nil, err
 		}
-		if reported == "" {
-			return body, nil
-		}
 
 		mu.Lock()
-		if pinned == "" {
+		if pinned == "" && reported != "" {
 			pinned = reported
 		}
 		want := pinned
 		mu.Unlock()
 
+		if want == "" {
+			warnOnce.Do(func() {
+				log.Printf("[DOWNLOAD] the backend reports no object version, so this download cannot be pinned to one")
+			})
+			return body, nil
+		}
+
 		if reported != want {
 			body.Close()
+			if reported == "" {
+				log.Printf("[DOWNLOAD] the range at offset %d carried no object version, and the download is pinned to %s", offset, want)
+				return nil, fmt.Errorf("the range carried no object version: %w", ErrObjectReplaced)
+			}
 			log.Printf("[DOWNLOAD] object version changed at offset %d: got %s, pinned to %s", offset, reported, want)
-			return nil, ErrObjectReplaced
+			return nil, fmt.Errorf("the range carried a different object version: %w", ErrObjectReplaced)
 		}
 		return body, nil
 	}

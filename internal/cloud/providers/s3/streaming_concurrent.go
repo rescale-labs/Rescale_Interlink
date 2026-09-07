@@ -507,12 +507,30 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 		return 0, "", fmt.Errorf("failed to get object metadata: %w", err)
 	}
 
+	size := *headResp.ContentLength
 	etag := ""
 	if headResp.ETag != nil {
 		etag = *headResp.ETag
 	}
+	if etag == "" && size > 0 {
+		etag = versionFromFirstByte(ctx, s3Client, remotePath)
+	}
 
-	return *headResp.ContentLength, etag, nil
+	return size, etag, nil
+}
+
+// versionFromFirstByte reads the object's version off a one-byte range, for a
+// HEAD that answered without one. Intercepting proxies strip response headers
+// from HEAD replies and leave them on GETs, and a download that gives up on
+// being pinned is worse than one byte on the wire. An empty answer here means
+// the backend reports no version at all, and the download runs unpinned.
+func versionFromFirstByte(ctx context.Context, s3Client *S3Client, remotePath string) string {
+	body, etag, err := rangeReaderWithETag(s3Client, remotePath)(ctx, 0, 1)
+	if err != nil {
+		return ""
+	}
+	_ = body.Close()
+	return etag
 }
 
 // DownloadEncryptedRange downloads a specific byte range of the encrypted file from S3.

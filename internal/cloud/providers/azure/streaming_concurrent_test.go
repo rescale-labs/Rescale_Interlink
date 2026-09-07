@@ -208,10 +208,12 @@ func TestStreamingCommitRefusesABlockListWithAHole(t *testing.T) {
 type hkdfBlobBackend struct {
 	mu sync.Mutex
 
-	ciphertext []byte
-	metadata   map[string]string
-	replaceAt  int // range index from which the ETag changes; 0 disables
-	ranges     int
+	ciphertext  []byte
+	metadata    map[string]string
+	replaceAt   int  // range index from which the ETag changes; 0 disables
+	noHeadETag  bool // the properties call carries no ETag, the way a proxy that strips them from those replies alone leaves it
+	noRangeETag bool // ranged GETs carry no ETag, which leaves a pinned download nothing to compare
+	ranges      int
 }
 
 // rangeCount reports how many ranged GETs the backend has served.
@@ -229,10 +231,17 @@ func (h *hkdfBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 		if h.replaceAt > 0 && h.ranges >= h.replaceAt {
 			etag = `"version-two"`
 		}
+		if h.noRangeETag {
+			etag = ""
+		}
+	} else if h.noHeadETag {
+		etag = ""
 	}
 	h.mu.Unlock()
 
-	w.Header().Set("ETag", etag)
+	if etag != "" {
+		w.Header().Set("ETag", etag)
+	}
 	w.Header().Set("Last-Modified", time.Now().UTC().Format(nethttp.TimeFormat))
 	w.Header().Set("x-ms-blob-type", "BlockBlob")
 	for name, value := range h.metadata {
@@ -515,5 +524,109 @@ func TestValidateStreamingUploadExistsChecksTheStagedBlocks(t *testing.T) {
 	}
 	if exists {
 		t.Error("a resume was allowed against a blob that does not exist")
+	}
+}
+
+// TestDownloadEncryptedRangeRefusesARangeWithNoVersion is the other way a blob
+// can be replaced without the pin noticing: not a different ETag, but no ETag at
+// all on the response that matters. A pinned download has nothing to compare
+// then, and had been handing those bytes over.
+func TestDownloadEncryptedRangeRefusesARangeWithNoVersion(t *testing.T) {
+	backend, _, _ := newHKDFBlob(t, 3, 64)
+	backend.noRangeETag = true // the properties call reports a version, the ranges report none
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestAzureClient(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, azureClient: client}
+	ctx := context.Background()
+
+	_, version, err := provider.GetEncryptedSize(ctx, "blob.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+	if version != `"version-one"` {
+		t.Fatalf("version = %q, want the ETag the properties call reported", version)
+	}
+
+	_, err = provider.DownloadEncryptedRange(ctx, "blob.dat", 0, 64, version, nil)
+	if !errors.Is(err, transfer.ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+	// Evidence that never arrives will not arrive on the retry either, and the
+	// error wording has to keep the classifier reading it as fatal.
+	if got := backend.rangeCount(); got != 1 {
+		t.Errorf("%d ranges were fetched, want exactly the one attempt", got)
+	}
+}
+
+// TestGetEncryptedSizeFallsBackToARangeForTheVersion covers the properties call
+// that comes back without an ETag. Some intercepting proxies strip response
+// headers from those replies and leave them on GETs, and an unpinned download is
+// worse than one extra byte on the wire — so the version is read off a one-byte
+// range before the download gives up on being pinned at all.
+func TestGetEncryptedSizeFallsBackToARangeForTheVersion(t *testing.T) {
+	backend, _, _ := newHKDFBlob(t, 3, 64)
+	backend.noHeadETag = true // only the properties call is stripped
+	backend.replaceAt = 2     // the blob is replaced right after the fallback range
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestAzureClient(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, azureClient: client}
+	ctx := context.Background()
+
+	size, version, err := provider.GetEncryptedSize(ctx, "blob.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+	if size != int64(len(backend.ciphertext)) {
+		t.Errorf("size = %d, want the %d bytes the blob holds", size, len(backend.ciphertext))
+	}
+	if version != `"version-one"` {
+		t.Fatalf("version = %q, want the ETag the fallback range reported", version)
+	}
+	if got := backend.rangeCount(); got != 1 {
+		t.Errorf("the fallback cost %d ranges, want the single byte", got)
+	}
+
+	// And that version pins the parts: the blob replaced after it is caught.
+	if _, err := provider.DownloadEncryptedRange(ctx, "blob.dat", 0, 64, version, nil); !errors.Is(err, transfer.ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+}
+
+// TestGetEncryptedSizeLeavesTheDownloadUnpinnedWithoutAnyVersion is the floor
+// under the two above: a backend that reports no version anywhere is not
+// refused, it is downloaded unpinned, exactly as it was before versions were
+// compared at all.
+func TestGetEncryptedSizeLeavesTheDownloadUnpinnedWithoutAnyVersion(t *testing.T) {
+	backend, _, _ := newHKDFBlob(t, 3, 64)
+	backend.noHeadETag = true
+	backend.noRangeETag = true
+
+	server := httptest.NewTLSServer(backend)
+	t.Cleanup(server.Close)
+	client := newTestAzureClient(t, server)
+	provider := &Provider{storageInfo: client.storageInfo, apiClient: client.apiClient, azureClient: client}
+	ctx := context.Background()
+
+	size, version, err := provider.GetEncryptedSize(ctx, "blob.dat")
+	if err != nil {
+		t.Fatalf("GetEncryptedSize: %v", err)
+	}
+	if size != int64(len(backend.ciphertext)) {
+		t.Errorf("size = %d, want the %d bytes the blob holds", size, len(backend.ciphertext))
+	}
+	if version != "" {
+		t.Errorf("version = %q, want none: the backend reported none anywhere", version)
+	}
+
+	got, err := provider.DownloadEncryptedRange(ctx, "blob.dat", 64, 64, version, nil)
+	if err != nil {
+		t.Fatalf("DownloadEncryptedRange: %v", err)
+	}
+	if !bytes.Equal(got, backend.ciphertext[64:128]) {
+		t.Errorf("range [64-128) came back as %d bytes that are not the blob's", len(got))
 	}
 }

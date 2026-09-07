@@ -877,26 +877,21 @@ func TestDownloadCBCStreamingAbortsWhenTheObjectIsReplaced(t *testing.T) {
 		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
 	}
 
-	// The v2 path writes straight to the destination, so an aborted download has
-	// to leave something visibly short of the file that was asked for rather
-	// than a full-length one the next run would adopt.
-	got, readErr := os.ReadFile(localPath)
-	if readErr != nil {
-		t.Fatalf("read the destination: %v", readErr)
-	}
-	if len(got) >= len(plaintext) {
-		t.Errorf("destination holds %d bytes of a %d-byte file: the aborted download left a full-length file behind",
-			len(got), len(plaintext))
+	// The v2 path writes straight to the destination and keeps no resume state,
+	// so an aborted download leaves nothing at all: not the bytes it managed to
+	// write, and nothing beside them claiming the parts it got through.
+	if info, statErr := os.Stat(localPath); statErr == nil {
+		t.Errorf("the aborted download left a %d-byte file at the destination", info.Size())
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("stat %s: %v", localPath, statErr)
 	}
 
-	// The v2 path keeps no resume state, so nothing beside the destination may
-	// be left claiming the parts this attempt got through.
 	entries, dirErr := os.ReadDir(dir)
 	if dirErr != nil {
 		t.Fatalf("read the destination directory: %v", dirErr)
 	}
-	if len(entries) != 1 || entries[0].Name() != filepath.Base(localPath) {
-		t.Errorf("destination directory holds %v, want only the destination file", entries)
+	if len(entries) != 0 {
+		t.Errorf("destination directory holds %v, want nothing", entries)
 	}
 }
 
@@ -1135,5 +1130,378 @@ func TestDownloadStreamingConcurrentJoinsTheProgressTicker(t *testing.T) {
 	}
 	if !bytes.Equal(got, plaintext) {
 		t.Errorf("downloaded %d bytes, want the %d of the source", len(got), len(plaintext))
+	}
+}
+
+// delayedFinalCBCPartDownloader serves a v2 object whose final range is held
+// back until every part before it has been decrypted and written, and is then
+// refused as a replacement.
+type delayedFinalCBCPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+	finalStart int64
+
+	// localPath and plaintextSize are how the fake knows the earlier parts have
+	// landed: it waits for the destination to reach its full plaintext length
+	// before failing the range that is still outstanding.
+	localPath     string
+	plaintextSize int64
+}
+
+func (m *delayedFinalCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
+}
+
+func (m *delayedFinalCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+	if offset == m.finalStart {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if info, err := os.Stat(m.localPath); err == nil && info.Size() >= m.plaintextSize {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		return nil, fmt.Errorf("the range carried a different object version: %w", ErrObjectReplaced)
+	}
+
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, nil
+}
+
+// A failed CBC download is not always a short one. When the plaintext is a whole
+// number of parts the last encrypted part is padding only, so every plaintext
+// byte is already at the destination before that part is fetched: a download
+// that fails there leaves a full-length file behind. The daemon adopts a file
+// whose size matches, and a file without a registered checksum has nothing else
+// to disqualify it — so an explicitly failed attempt became the download. The
+// v2 path keeps no resume state, so the file it failed to finish is worth
+// nothing and goes.
+func TestDownloadCBCStreamingRemovesWhatAFailedDownloadWrote(t *testing.T) {
+	const partSize = int64(64)
+	// 384 bytes of plaintext in 64-byte parts: six full ciphertext parts plus a
+	// seventh holding nothing but the padding block.
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	dir := t.TempDir()
+	localPath := filepath.Join(dir, "results.dat")
+	finalStart := (int64(len(ciphertext)) / partSize) * partSize
+	if finalStart != int64(len(plaintext)) {
+		t.Fatalf("test setup: the final part starts at %d, want the padding-only part at %d", finalStart, len(plaintext))
+	}
+
+	mock := &delayedFinalCBCPartDownloader{
+		ciphertext:    ciphertext,
+		finalStart:    finalStart,
+		localPath:     localPath,
+		plaintextSize: int64(len(plaintext)),
+	}
+	mock.formatVersion = 2
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 2,
+		PartSize:      partSize,
+		EncryptionKey: enc.GetKey(),
+		IV:            enc.GetInitialIV(),
+	}
+
+	err = NewDownloader(mock).downloadCBCStreaming(context.Background(), prep)
+	if !errors.Is(err, ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+
+	if info, statErr := os.Stat(localPath); statErr == nil {
+		t.Errorf("a failed download left a %d-byte file at the destination, which is the %d bytes the finished download has",
+			info.Size(), len(plaintext))
+	} else if !os.IsNotExist(statErr) {
+		t.Errorf("stat %s: %v", localPath, statErr)
+	}
+
+	entries, dirErr := os.ReadDir(dir)
+	if dirErr != nil {
+		t.Fatalf("read the destination directory: %v", dirErr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the failed download left %v behind", entries)
+	}
+}
+
+// replacedWordingCBCDownloader is a v2 provider whose part fetch fails with a
+// replacement worded so that it also reads as a decryption failure — a provider
+// adding its own context, or a reword of the sentinel. It is a LegacyDownloader
+// too, so the orchestrator's fallback is there to be taken.
+type replacedWordingCBCDownloader struct {
+	mockLegacyDownloader
+}
+
+func (m *replacedWordingCBCDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
+}
+
+func (m *replacedWordingCBCDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+	if offset == 0 {
+		return nil, fmt.Errorf("cannot decrypt a part of the object that replaced it: %w", ErrObjectReplaced)
+	}
+
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, nil
+}
+
+// The v2 path falls back to the legacy one when the failure reads as a
+// decryption problem, and it decides that by looking for words in the error
+// text. A replaced object is not a decryption problem: the legacy path would
+// fetch the object again, from whichever version is there now, and hand back
+// whatever that decrypts to. Nothing but the wording of two error strings kept
+// the fallback from firing on one, so the replacement is excluded by identity
+// instead.
+func TestDownloadDoesNotFallBackToLegacyWhenTheObjectWasReplaced(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	mock := &replacedWordingCBCDownloader{}
+	mock.ciphertext = ciphertext
+	mock.formatVersion = 2
+	mock.partSize = partSize
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	hash, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+		RemotePath: "user/abc/results.dat",
+		LocalPath:  localPath,
+		FileInfo: &models.CloudFile{
+			EncodedEncryptionKey: base64.StdEncoding.EncodeToString(enc.GetKey()),
+			IV:                   base64.StdEncoding.EncodeToString(enc.GetInitialIV()),
+			DecryptedSize:        int64(len(plaintext)),
+		},
+	})
+	if !errors.Is(err, ErrObjectReplaced) {
+		t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+	}
+	if mock.downloadEncryptedCalled {
+		t.Error("the legacy fallback fetched the object again after a replacement was detected")
+	}
+	if hash != "" {
+		t.Errorf("a failed download returned the hash %q", hash)
+	}
+}
+
+// versionedCBCPartDownloader serves a v2 object and refuses any range that is
+// not asked for under the exact version its size call reported, which is what a
+// pinned provider does. It records what each caller passed.
+type versionedCBCPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+
+	mu        sync.Mutex
+	sizeCalls int
+	asked     []string
+	probed    bool
+}
+
+func (m *versionedCBCPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	m.mu.Lock()
+	m.sizeCalls++
+	m.mu.Unlock()
+	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
+}
+
+func (m *versionedCBCPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+	m.mu.Lock()
+	m.asked = append(m.asked, version)
+	if offset == int64(len(m.ciphertext))-32 && length == 32 {
+		m.probed = true
+	}
+	m.mu.Unlock()
+
+	if version != cbcPinnedVersion {
+		return nil, fmt.Errorf("the range at offset %d was asked for under version %q: %w", offset, version, ErrObjectReplaced)
+	}
+
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	if progressCallback != nil {
+		progressCallback(int64(len(out)))
+	}
+	return out, nil
+}
+
+// The pin is only worth what the orchestrator threads through it: the version
+// the size call reported has to reach the verification probe and every part
+// fetch, from the one size call the whole download makes. A part fetched under
+// no version, or under a second size call's, is a part nothing compares against
+// the rest.
+func TestDownloadPinsTheProbeAndEveryCBCPartToTheSizeCallVersion(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24)
+
+	enc, err := encryption.NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	ciphertext, err := enc.EncryptPart(plaintext, true)
+	if err != nil {
+		t.Fatalf("EncryptPart: %v", err)
+	}
+
+	mock := &versionedCBCPartDownloader{ciphertext: ciphertext}
+	mock.formatVersion = 2
+	mock.partSize = partSize
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	if _, err := NewDownloader(mock).Download(context.Background(), cloud.DownloadParams{
+		RemotePath: "user/abc/results.dat",
+		LocalPath:  localPath,
+		FileInfo: &models.CloudFile{
+			EncodedEncryptionKey: base64.StdEncoding.EncodeToString(enc.GetKey()),
+			IV:                   base64.StdEncoding.EncodeToString(enc.GetInitialIV()),
+			DecryptedSize:        int64(len(plaintext)),
+		},
+	}); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+
+	if mock.sizeCalls != 1 {
+		t.Errorf("the object's size was asked for %d times; the second answer is a second version the parts are not pinned to", mock.sizeCalls)
+	}
+	if !mock.probed {
+		t.Error("the verification probe never ran, so this says nothing about the version it carries")
+	}
+	wantRanges := int(int64(len(ciphertext)+int(partSize)-1)/partSize) + 1 // every part, plus the probe
+	if len(mock.asked) != wantRanges {
+		t.Errorf("%d ranges were fetched, want %d (every part and the probe)", len(mock.asked), wantRanges)
+	}
+	for i, version := range mock.asked {
+		if version != cbcPinnedVersion {
+			t.Errorf("range %d was fetched under version %q, want the one the size call reported", i, version)
+		}
+	}
+
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read the downloaded file: %v", readErr)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want the original %d", len(got), len(plaintext))
+	}
+}
+
+// versionedHKDFPartDownloader is the v1 equivalent: it refuses any range not
+// asked for under the version its size call reported.
+type versionedHKDFPartDownloader struct {
+	mockStreamingDownloader
+	ciphertext []byte
+
+	mu    sync.Mutex
+	asked []string
+}
+
+func (m *versionedHKDFPartDownloader) GetEncryptedSize(ctx context.Context, remotePath string) (int64, string, error) {
+	return int64(len(m.ciphertext)), cbcPinnedVersion, nil
+}
+
+func (m *versionedHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, remotePath string, offset, length int64, version string, progressCallback func(int64)) ([]byte, error) {
+	m.mu.Lock()
+	m.asked = append(m.asked, version)
+	m.mu.Unlock()
+
+	if version != cbcPinnedVersion {
+		return nil, fmt.Errorf("the range at offset %d was asked for under version %q: %w", offset, version, ErrObjectReplaced)
+	}
+
+	end := offset + length
+	if end > int64(len(m.ciphertext)) {
+		end = int64(len(m.ciphertext))
+	}
+	out := make([]byte, end-offset)
+	copy(out, m.ciphertext[offset:end])
+	return out, nil
+}
+
+// The concurrent v1 path fetches its parts the same way the v2 one does, from
+// its own size call, and was pinned in the same change. Its parts have to carry
+// that version too.
+func TestDownloadStreamingConcurrentPinsEveryPartToTheSizeCallVersion(t *testing.T) {
+	const partSize = int64(64)
+	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24) // six whole parts
+
+	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+
+	localPath := filepath.Join(t.TempDir(), "results.dat")
+	mock := &versionedHKDFPartDownloader{ciphertext: ciphertext}
+	mock.formatVersion = 1
+	mock.partSize = partSize
+
+	prep := &DownloadPrep{
+		Params: cloud.DownloadParams{
+			RemotePath: "user/abc/results.dat",
+			LocalPath:  localPath,
+			FileInfo:   &models.CloudFile{DecryptedSize: int64(len(plaintext))},
+		},
+		FormatVersion: 1,
+		PartSize:      partSize,
+		EncryptionKey: masterKey,
+	}
+
+	if err := NewDownloader(mock).downloadStreamingConcurrent(context.Background(), prep, 4, mock, fileID); err != nil {
+		t.Fatalf("downloadStreamingConcurrent: %v", err)
+	}
+
+	if len(mock.asked) != len(plaintext)/int(partSize) {
+		t.Errorf("%d ranges were fetched, want one per part", len(mock.asked))
+	}
+	for i, version := range mock.asked {
+		if version != cbcPinnedVersion {
+			t.Errorf("range %d was fetched under version %q, want the one the size call reported", i, version)
+		}
+	}
+
+	got, readErr := os.ReadFile(localPath)
+	if readErr != nil {
+		t.Fatalf("read the downloaded file: %v", readErr)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Errorf("downloaded %d bytes, want the original %d", len(got), len(plaintext))
 	}
 }

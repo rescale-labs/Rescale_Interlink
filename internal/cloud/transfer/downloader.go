@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -229,9 +230,15 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 			err := d.downloadCBCStreaming(ctx, prep)
 			if err != nil {
 				errStr := err.Error()
-				isDecryptionError := strings.Contains(errStr, "padding") ||
-					strings.Contains(errStr, "decrypt") ||
-					strings.Contains(errStr, "chunk size")
+				// A replaced object is not something the legacy path could get
+				// past: it would fetch the object again, from whichever version
+				// is there now. Excluded by identity rather than left to the
+				// wording of the sentinel, which is all that kept the fallback
+				// from firing on one.
+				isDecryptionError := !errors.Is(err, ErrObjectReplaced) &&
+					(strings.Contains(errStr, "padding") ||
+						strings.Contains(errStr, "decrypt") ||
+						strings.Contains(errStr, "chunk size"))
 
 				if isDecryptionError {
 					// CBC streaming failed - try legacy as fallback
@@ -508,7 +515,7 @@ func (d *Downloader) verifyDecryptionQuick(
 // 2-4x throughput improvement. CBC decryption MUST be sequential because each part's IV
 // is the last ciphertext block of the previous part. Downloads are parallelized by
 // downloading ahead and buffering parts, then decrypting in order as they become available.
-func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPrep) error {
+func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPrep) (retErr error) {
 	if prep.Params.OutputWriter != nil {
 		fmt.Fprintf(prep.Params.OutputWriter, "Using CBC streaming format (v2) download with parallel fetch - no temp file\n")
 	}
@@ -550,6 +557,17 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	defer func() {
 		if !fileClosed {
 			_ = outFile.Close()
+		}
+		// A failed download leaves nothing usable: this path keeps no resume
+		// state, so its output is only ever re-fetched from the start. And it is
+		// not always short — when the plaintext is a whole number of parts the
+		// final encrypted part is padding only, so every plaintext byte can be
+		// on disk before that part fails — which is exactly the file the daemon
+		// adopts by size when no checksum is registered. Removed after the
+		// close, because Windows refuses to remove a file anything still holds
+		// open.
+		if retErr != nil {
+			_ = os.Remove(prep.Params.LocalPath)
 		}
 	}()
 

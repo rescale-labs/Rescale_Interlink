@@ -508,7 +508,26 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 		return 0, "", fmt.Errorf("failed to get blob properties: %w", err)
 	}
 
-	return props.ContentLength, props.ETag, nil
+	etag := props.ETag
+	if etag == "" && props.ContentLength > 0 {
+		etag = versionFromFirstByte(ctx, azureClient, remotePath)
+	}
+
+	return props.ContentLength, etag, nil
+}
+
+// versionFromFirstByte reads the blob's version off a one-byte range, for a
+// properties call that answered without one. Intercepting proxies strip response
+// headers from those replies and leave them on GETs, and a download that gives
+// up on being pinned is worse than one byte on the wire. An empty answer here
+// means the backend reports no version at all, and the download runs unpinned.
+func versionFromFirstByte(ctx context.Context, azureClient *AzureClient, remotePath string) string {
+	body, etag, err := rangeReaderWithETag(azureClient, remotePath)(ctx, 0, 1)
+	if err != nil {
+		return ""
+	}
+	_ = body.Close()
+	return etag
 }
 
 // DownloadEncryptedRange downloads a specific byte range of the encrypted blob from Azure.

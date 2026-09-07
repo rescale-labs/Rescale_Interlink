@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -628,6 +629,117 @@ func TestPinObjectVersionAdoptsTheFirstVersion(t *testing.T) {
 				t.Fatalf("range at %d: %v", offset, err)
 			}
 			body.Close()
+		}
+	})
+}
+
+// closeTrackingBody is a range body that records whether it was closed.
+type closeTrackingBody struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+// scriptedVersionServer answers each range with the next version of its script,
+// and keeps the bodies it handed out so a test can ask whether a refused one was
+// closed.
+type scriptedVersionServer struct {
+	object   []byte
+	versions []string
+
+	mu     sync.Mutex
+	served int
+	bodies []*closeTrackingBody
+}
+
+func (s *scriptedVersionServer) open(_ context.Context, offset, length int64) (io.ReadCloser, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	version := ""
+	if s.served < len(s.versions) {
+		version = s.versions[s.served]
+	}
+	s.served++
+
+	body := &closeTrackingBody{Reader: bytes.NewReader(s.object[offset : offset+length])}
+	s.bodies = append(s.bodies, body)
+	return body, version, nil
+}
+
+func (s *scriptedVersionServer) lastBody() *closeTrackingBody {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bodies[len(s.bodies)-1]
+}
+
+// TestPinObjectVersionRefusesEvidenceItCannotCheck covers the half of the pin
+// that failed open. A response carrying no version was handed straight back even
+// when the download was pinned to one, so a range whose ETag never arrived —
+// a proxy that drops the header on the response that matters, a backend that
+// omits it — went into the file unchecked. Missing evidence is not evidence of
+// sameness: only a download that has never seen a version at all may run
+// unpinned.
+func TestPinObjectVersionRefusesEvidenceItCannotCheck(t *testing.T) {
+	object := objectOfSize(32)
+
+	t.Run("a pinned download refuses a range that reports no version", func(t *testing.T) {
+		server := &scriptedVersionServer{object: object, versions: []string{""}}
+		open := PinObjectVersion(server.open, `"etag-1"`)
+
+		body, err := open(context.Background(), 0, 8)
+		if !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("error = %v, want it to wrap ErrObjectReplaced", err)
+		}
+		if body != nil {
+			t.Error("a refused range handed its body back to be read")
+		}
+		if !server.lastBody().closed.Load() {
+			t.Error("the refused body was left open")
+		}
+	})
+
+	t.Run("an adopted pin refuses a later range that reports no version", func(t *testing.T) {
+		server := &scriptedVersionServer{object: object, versions: []string{`"etag-1"`, ""}}
+		open := PinObjectVersion(server.open, "")
+
+		first, err := open(context.Background(), 0, 8)
+		if err != nil {
+			t.Fatalf("first range: %v", err)
+		}
+		first.Close()
+
+		if _, err := open(context.Background(), 8, 8); !errors.Is(err, ErrObjectReplaced) {
+			t.Fatalf("second range error = %v, want it to wrap ErrObjectReplaced", err)
+		}
+		if !server.lastBody().closed.Load() {
+			t.Error("the refused body was left open")
+		}
+	})
+
+	t.Run("a backend that reports no version warns once, not once per range", func(t *testing.T) {
+		server := &scriptedVersionServer{object: object, versions: []string{"", "", "", ""}}
+		open := PinObjectVersion(server.open, "")
+
+		var logged bytes.Buffer
+		log.SetOutput(&logged)
+		t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+		for offset := int64(0); offset < 32; offset += 8 {
+			body, err := open(context.Background(), offset, 8)
+			if err != nil {
+				t.Fatalf("range at %d: %v", offset, err)
+			}
+			body.Close()
+		}
+
+		if got := strings.Count(logged.String(), "reports no object version"); got != 1 {
+			t.Errorf("an unpinnable download logged %d warnings over four ranges, want exactly one:\n%s",
+				got, logged.String())
 		}
 	})
 }
