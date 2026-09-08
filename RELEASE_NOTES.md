@@ -116,6 +116,16 @@ Contributed by @ctusa-rescale as part of
   parent (`.rescale-int-<hash>/`, keyed by the batch's state file), so two batches over
   one deck no longer overwrite or delete each other's archives, and the pipeline stops an
   item when a checkpoint cannot be written before an irreversible step.
+- A PUR run started without `--state` completes again. Since the transfer hardening
+  refused to pass an irreversible step whose state could not be recorded, such a run
+  archived and uploaded every job and then failed each one; an empty state path now
+  keeps the run's state in memory, and `pur run` says once, before it starts, that the
+  run cannot be resumed and records no progress.
+- `pur run`, `pur resume` and `pur submit-existing` refuse a jobs CSV whose `Submit`
+  column holds an unrecognised value, naming the row and the value, instead of silently
+  creating the jobs without submitting them; a `tar_workers`, `upload_workers` or
+  `job_workers` value below 1 in `config.csv` is refused before any work instead of
+  stalling the run or crashing it.
 
 ### Linux GUI: blank window fixed (#31)
 
@@ -205,6 +215,17 @@ owner filter when none is selected.
 - A rejected file tag reports the server's explanation instead of a bare status code.
 - Exported log files carry a date-and-time name, so two exports on one day no longer
   collide, and per-request proxy routing lines are logged only with `RESCALE_DEBUG`.
+- `files upload --dry-run` never uploads. With duplicate checking off, which is the
+  default whenever the command runs without a terminal, the preview used to upload for
+  real; every mode now prints the destination and each file that would be uploaded and
+  makes no request.
+- `--timing` is a flag on every command, equivalent to `RESCALE_TIMING=1`; it used to be
+  rejected as unknown.
+- `jobs tail` refuses an interval below one second instead of crashing, and Ctrl+C now
+  ends it.
+- The hint printed after an interrupted upload no longer says the rerun starts from the
+  beginning; it says the rerun can resume from the completed parts while the file is
+  unchanged and the interrupted upload is less than seven days old.
 
 ### Auto-download reliability
 
