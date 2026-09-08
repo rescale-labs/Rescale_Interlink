@@ -218,6 +218,105 @@ func TestUnconfirmedStatusesSurviveTheStateFile(t *testing.T) {
 	}
 }
 
+// TestInMemoryManagerWritesNothing covers a run started without --state: there
+// is no file to write, so the manager holds the run in memory and every write
+// succeeds.
+//
+// The empty path used to be persisted like any other, which meant
+// os.MkdirAll("."), os.Create(".tmp") in the working directory and a rename onto
+// "" that cannot succeed. Every save reported that failure. It went unnoticed
+// while the pipeline ignored save errors; now that a save it cannot make stops
+// the job before the next irreversible step, an unstated run archived and
+// uploaded every job and then failed each one at the first checkpoint.
+func TestInMemoryManagerWritesNothing(t *testing.T) {
+	// The directory the empty path resolved against. os.Chdir with the old
+	// directory restored on cleanup, which is what t.Chdir does.
+	work := t.TempDir()
+	t.Chdir(work)
+
+	mgr := NewManager("")
+	if err := mgr.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := mgr.FilePath(); got != "" {
+		t.Errorf("FilePath() = %q, want empty: the pipeline seeds this run's archive namespace from it", got)
+	}
+	if err := mgr.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// The pipeline's own sequence, whose checkpoints are what failed: the
+	// upload's file ID, then the intent recorded before a creation, then the
+	// job the platform named.
+	st := mgr.InitializeState(1, "job_1", "/runs/Run_1")
+	st.TarStatus = "success"
+	st.UploadStatus = "success"
+	st.FileID = "file-123"
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("checkpoint after upload: %v", err)
+	}
+
+	st.SubmitStatus = SubmitStatusCreating
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("record create intent: %v", err)
+	}
+	if !MayAlreadyExist(mgr.GetState(1)) {
+		t.Error("a creation recorded as going out is not held in memory as unconfirmed")
+	}
+
+	st.JobID = "job-abc"
+	st.SubmitStatus = "skipped"
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("checkpoint after create: %v", err)
+	}
+
+	got := mgr.GetState(1)
+	if got == nil {
+		t.Fatal("job 1 has no state")
+	}
+	if got.FileID != "file-123" || got.JobID != "job-abc" || got.SubmitStatus != "skipped" {
+		t.Errorf("state = %+v, want the upload's file ID, the job ID and SubmitStatus skipped", *got)
+	}
+	if all := mgr.GetAllStates(); len(all) != 1 || all[0].JobID != "job-abc" {
+		t.Errorf("GetAllStates() = %v, want the one job the run recorded", all)
+	}
+
+	// Nothing reached the filesystem: no ".tmp" left behind, and no entry named
+	// after the empty path.
+	entries, err := os.ReadDir(work)
+	if err != nil {
+		t.Fatalf("read working directory: %v", err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Errorf("a run with no state file wrote %v into the working directory", names)
+	}
+}
+
+// TestInMemoryManagerLoadReadsNothing pins the other half: an in-memory manager
+// starts empty however the working directory looks, so a file some earlier run
+// left there is never picked up as this run's state.
+func TestInMemoryManagerLoadReadsNothing(t *testing.T) {
+	work := t.TempDir()
+	t.Chdir(work)
+	if err := os.WriteFile(filepath.Join(work, ".tmp"), []byte(
+		"Index,JobName,Directory,TarPath,TarStatus,FileID,UploadStatus,JobID,SubmitStatus,ExtraFileIDs,ErrorMessage,LastUpdated\n"+
+			"1,job_1,/runs/Run_1,,success,file-1,success,job-old,success,,,2026-01-02T03:04:05Z\n"), 0o644); err != nil {
+		t.Fatalf("write leftover: %v", err)
+	}
+
+	mgr := NewManager("")
+	if err := mgr.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if all := mgr.GetAllStates(); len(all) != 0 {
+		t.Errorf("Load() picked up %v, want nothing: this run has no state file", all)
+	}
+}
+
 // TestMayAlreadyExist pins what the pipeline and the CLI both ask of a loaded
 // state: a creation that went out, or was recorded as going out, and never came
 // back with a job ID. Answering yes to anything else would skip work a resume

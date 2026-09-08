@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -661,6 +662,19 @@ func (f *purPipelineFlags) register(cmd *cobra.Command, stateUsage, dryRunUsage 
 	cmd.MarkFlagRequired("jobs-csv")
 }
 
+// warnNoStateFile says that a run given no --state keeps its record in memory.
+//
+// Such a run works and is not blocked — a one-off batch nobody means to resume
+// is a fair thing to ask for — but nothing survives it: no file records which
+// jobs were created, and `pur resume` has nothing to read. That is worth one
+// line before the work starts rather than a discovery afterwards.
+func (f *purPipelineFlags) warnNoStateFile(w io.Writer) {
+	if f.stateFile != "" {
+		return
+	}
+	fmt.Fprintln(w, "No --state file given: this run cannot be resumed and its progress is not recorded.")
+}
+
 // loadInputs loads the config, applies the tar and worker overrides the user
 // explicitly set, and reads the jobs CSV.
 //
@@ -798,6 +812,10 @@ Example:
 				fmt.Println("\n(dry-run mode: no jobs were created or submitted)")
 				return nil
 			}
+
+			// After the --dry-run branch: a dry run starts no pipeline, so it
+			// has nothing to record and nothing to resume.
+			f.warnNoStateFile(os.Stderr)
 
 			return f.runPipeline(cfg, jobs, "Pipeline completed successfully")
 		},

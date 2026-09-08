@@ -42,13 +42,26 @@ func MayAlreadyExist(st *models.JobState) bool {
 }
 
 // Manager manages job state persistence
+//
+// An empty filePath is a manager with nothing to persist to: it holds the same
+// map and answers every read the same way, but Load reads nothing and Save
+// writes nothing. That is what a run started without --state asks for — a run
+// with no record for anyone to resume from.
+//
+// It used to persist to the empty path like any other, which meant
+// os.MkdirAll("."), a ".tmp" file in the working directory and a rename onto ""
+// that cannot succeed, so every save returned an error. That went unnoticed
+// while the pipeline discarded save errors; now that a checkpoint it cannot
+// write stops the job before the next irreversible step, such a run archived
+// and uploaded every job and then failed each one.
 type Manager struct {
 	filePath string
 	states   map[int]*models.JobState // Index -> JobState
 	mu       sync.RWMutex
 }
 
-// NewManager creates a new state manager
+// NewManager creates a new state manager. An empty filePath keeps the run's
+// state in memory only; see Manager.
 func NewManager(filePath string) *Manager {
 	return &Manager{
 		filePath: filePath,
@@ -56,10 +69,15 @@ func NewManager(filePath string) *Manager {
 	}
 }
 
-// Load loads state from CSV file
+// Load loads state from CSV file. An in-memory manager has no file, and starts
+// from the empty map it was constructed with.
 func (m *Manager) Load() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.filePath == "" {
+		return nil
+	}
 
 	if _, err := os.Stat(m.filePath); os.IsNotExist(err) {
 		return nil // No state file yet, that's OK
@@ -114,7 +132,9 @@ func (m *Manager) Load() error {
 	return nil
 }
 
-// Save saves state to CSV file (atomic write)
+// Save saves state to CSV file (atomic write). An in-memory manager has no file
+// to write, and reports the success its callers act on: the map they read back
+// is already the whole record.
 func (m *Manager) Save() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -124,6 +144,14 @@ func (m *Manager) Save() error {
 // saveUnlocked saves state to CSV file without acquiring locks.
 // Caller must hold at least RLock on m.mu.
 func (m *Manager) saveUnlocked() error {
+	// An in-memory manager touches the filesystem nowhere: no directory is
+	// created, no temp file is written, and nothing is renamed. Guarded here
+	// rather than in each caller so every write path — Save and UpdateState —
+	// is covered by the one check.
+	if m.filePath == "" {
+		return nil
+	}
+
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(m.filePath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -208,6 +236,9 @@ func (m *Manager) saveUnlocked() error {
 // it so two batches over the same inputs do not write one archive, and a resume
 // lands on the batch's own archives again. Set at construction and never
 // written afterwards, so it needs no lock.
+//
+// An in-memory manager answers "", which is what tells the pipeline this run
+// has nothing to resume from and has to seed that namespace some other way.
 func (m *Manager) FilePath() string {
 	return m.filePath
 }
