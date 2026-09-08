@@ -43,6 +43,12 @@ func retryReporter(bar retryBar, w io.Writer) func(cloud.RetryEvent) {
 	}
 }
 
+// uploadFilesWithIDsFn is a test seam, following the pattern of the download
+// seams in download_helper.go: the upload path needs an API client and live
+// cloud credentials, which a unit test cannot supply. Overriding it lets a test
+// assert that a code path performs no upload at all.
+var uploadFilesWithIDsFn = UploadFilesWithIDs
+
 // cliUploadItem wraps a file for upload with index info.
 // Implements transfer.WorkItem for BatchExecutor.
 type cliUploadItem struct {
@@ -123,9 +129,15 @@ func executeFileUploadWithDuplicateCheck(
 		return err
 	}
 
-	// If not checking duplicates, use the fast path
+	// If not checking duplicates, use the fast path. --dry-run still has to be
+	// answered here, before the upload: skipping the duplicate check is no reason
+	// to move bytes the user only asked to preview.
 	if duplicateMode == UploadDuplicateModeNoCheck {
-		_, err := UploadFilesWithIDs(ctx, filePaths, folderID, maxConcurrent, preEncrypt, uploadTags, apiClient, logger, false)
+		if dryRun {
+			printUploadDryRun(filePaths, 0, folderID, duplicateMode)
+			return nil
+		}
+		_, err := uploadFilesWithIDsFn(ctx, filePaths, folderID, maxConcurrent, preEncrypt, uploadTags, apiClient, logger, false)
 		return err
 	}
 
@@ -210,53 +222,78 @@ func executeFileUploadWithDuplicateCheck(
 	}
 
 	if len(filesToUpload) == 0 {
+		if dryRun {
+			printUploadDryRun(nil, filesSkipped, folderID, duplicateMode)
+			return nil
+		}
 		fmt.Println("✓ No files to upload (all were duplicates)")
 		return nil
 	}
 
 	// DRY-RUN MODE: Show what would happen without uploading
 	if dryRun {
-		fmt.Println("\n" + strings.Repeat("=", 60))
-		fmt.Println("📊 Dry-Run Summary")
-		fmt.Println(strings.Repeat("=", 60))
-
-		// Calculate total size
-		var totalBytes int64
-		for _, filePath := range filesToUpload {
-			if info, err := os.Stat(filePath); err == nil {
-				totalBytes += info.Size()
-			}
-		}
-
-		fmt.Printf("\n📄 Files:\n")
-		fmt.Printf("  Would upload:     %d\n", len(filesToUpload))
-		if filesSkipped > 0 {
-			fmt.Printf("  Would skip:       %d (duplicates)\n", filesSkipped)
-		}
-		fmt.Printf("\n💾 Total data to upload: %.2f MB\n", float64(totalBytes)/(1024*1024))
-
-		// Duplicate mode reminder
-		fmt.Printf("\n🔧 Duplicate mode: ")
-		switch duplicateMode {
-		case UploadDuplicateModeNoCheck:
-			fmt.Println("NO-CHECK (no duplicate checking)")
-		case UploadDuplicateModeSkipAll:
-			fmt.Println("SKIP-DUPLICATES (skip existing files)")
-		case UploadDuplicateModeUploadAll:
-			fmt.Println("ALLOW-DUPLICATES (upload even if exists)")
-		default:
-			fmt.Println("CHECK (prompt for each duplicate)")
-		}
-
-		fmt.Println(strings.Repeat("=", 60))
-		fmt.Println("\n✅ Dry-run complete. No files were uploaded.")
-		fmt.Println("   Remove --dry-run to perform the actual upload.")
+		printUploadDryRun(filesToUpload, filesSkipped, folderID, duplicateMode)
 		return nil
 	}
 
 	// Upload the filtered files
-	_, err = UploadFilesWithIDs(ctx, filesToUpload, folderID, maxConcurrent, preEncrypt, uploadTags, apiClient, logger, false)
+	_, err = uploadFilesWithIDsFn(ctx, filesToUpload, folderID, maxConcurrent, preEncrypt, uploadTags, apiClient, logger, false)
 	return err
+}
+
+// printUploadDryRun prints the --dry-run preview for a file upload: every file
+// that would be uploaded with its size, the destination folder, and the summary
+// counts. It reads nothing but the local files, so every duplicate mode can
+// reach it before any upload starts — the no-check fast path included.
+func printUploadDryRun(filesToUpload []string, filesSkipped int, folderID string, duplicateMode UploadDuplicateMode) {
+	fmt.Println("🔍 DRY-RUN MODE - Analyzing what would happen...")
+	fmt.Println()
+
+	if folderID != "" {
+		fmt.Printf("📁 Destination: folder ID %s\n", folderID)
+	} else {
+		fmt.Println("📁 Destination: root (My Library)")
+	}
+	fmt.Println()
+
+	// List each file with its size, and total as we go
+	var totalBytes int64
+	for _, filePath := range filesToUpload {
+		var size int64
+		if info, err := os.Stat(filePath); err == nil {
+			size = info.Size()
+		}
+		totalBytes += size
+		fmt.Printf("✓ Would upload: %s (%.2f MB)\n", filePath, float64(size)/(1024*1024))
+	}
+
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("📊 Dry-Run Summary")
+	fmt.Println(strings.Repeat("=", 60))
+
+	fmt.Printf("\n📄 Files:\n")
+	fmt.Printf("  Would upload:     %d\n", len(filesToUpload))
+	if filesSkipped > 0 {
+		fmt.Printf("  Would skip:       %d (duplicates)\n", filesSkipped)
+	}
+	fmt.Printf("\n💾 Total data to upload: %.2f MB\n", float64(totalBytes)/(1024*1024))
+
+	// Duplicate mode reminder
+	fmt.Printf("\n🔧 Duplicate mode: ")
+	switch duplicateMode {
+	case UploadDuplicateModeNoCheck:
+		fmt.Println("NO-CHECK (no duplicate checking)")
+	case UploadDuplicateModeSkipAll:
+		fmt.Println("SKIP-DUPLICATES (skip existing files)")
+	case UploadDuplicateModeUploadAll:
+		fmt.Println("ALLOW-DUPLICATES (upload even if exists)")
+	default:
+		fmt.Println("CHECK (prompt for each duplicate)")
+	}
+
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println("\n✅ Dry-run complete. No files were uploaded.")
+	fmt.Println("   Remove --dry-run to perform the actual upload.")
 }
 
 // UploadFilesWithIDs uploads files concurrently and returns their file IDs.

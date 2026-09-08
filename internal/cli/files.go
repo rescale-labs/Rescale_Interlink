@@ -136,15 +136,22 @@ Examples:
 				}
 			}
 
-			// Get API client
-			apiClient, err := getAPIClient()
-			if err != nil {
-				return err
-			}
-
 			var uploadTags []string
 			if tagsFlag != "" {
 				uploadTags = tags.ParseCommaSeparated(tagsFlag)
+			}
+
+			// A dry run that skips the duplicate check needs no client, and
+			// building one can already reach the network (proxy warmup), so
+			// none is built for it.
+			if dryRun && duplicateMode == UploadDuplicateModeNoCheck {
+				return executeFileUploadWithDuplicateCheck(GetContext(), args, folderID, maxConcurrent, duplicateMode, dryRun, preEncrypt, uploadTags, nil, logger)
+			}
+
+			// Get API client (via the test seam, so a command test can reach RunE)
+			apiClient, err := getAPIClientFn()
+			if err != nil {
+				return err
 			}
 
 			// Use helper function with duplicate mode
