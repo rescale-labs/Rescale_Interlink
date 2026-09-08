@@ -280,10 +280,14 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
 
-	// Bound the state file. Once a job's completion falls outside the lookback
-	// window plus the API pre-filter buffer, no scan can select it again, so its
-	// entry only grows the file — and this file is loaded and rewritten on every
-	// poll for the daemon's whole lifetime.
+	// Bound the state file. The daemon reads it once, here, and then holds it in
+	// memory and rewrites it for the rest of its life — every poll, every
+	// download outcome, and shutdown. Entries are what grow it, and an entry is
+	// only useful while a scan could still pick the job up: the retention window
+	// is the lookback window plus the same margin FindCompletedJobs allows its
+	// creation-date pre-filter, so pruning is anchored to when the daemon
+	// downloaded a job and selection to the platform's own creation and
+	// completion timestamps for it.
 	if daemonCfg.Eligibility != nil && daemonCfg.Eligibility.LookbackDays > 0 {
 		retentionDays := daemonCfg.Eligibility.LookbackDays + stateRetentionBufferDays
 		state.SetRetention(time.Duration(retentionDays) * 24 * time.Hour)

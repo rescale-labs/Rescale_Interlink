@@ -30,6 +30,7 @@ var (
 	apiBaseURL string
 	verbose    bool
 	debug      bool
+	timing     bool
 
 	// Thread control flags
 	maxThreads  int
@@ -60,6 +61,16 @@ func FIPSStatus() string {
 }
 
 // NewRootCmd creates the root command for CLI mode.
+// applyTimingFlag turns --timing into RESCALE_TIMING=1, which is what the
+// transfer path's timing check reads. The variable is set rather than mirrored
+// in memory so a subprocess (the rate limit coordinator, a daemon) inherits it,
+// as it does when the user exports it themselves.
+func applyTimingFlag(enabled bool) {
+	if enabled {
+		os.Setenv("RESCALE_TIMING", "1")
+	}
+}
+
 func NewRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "rescale-int",
@@ -77,6 +88,8 @@ GUI Mode (--gui flag):
 Security:
   FIPS 140-3 compliant cryptography for FedRAMP Moderate.`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			applyTimingFlag(timing)
+
 			// Initialize logger
 			logger = logging.NewDefaultCLILogger()
 			if VerboseOutput() {
@@ -116,6 +129,7 @@ Security:
 	rootCmd.PersistentFlags().StringVar(&apiBaseURL, "api-url", "", "Rescale API base URL (overrides config)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output (shows debug messages)")
 	rootCmd.PersistentFlags().BoolVar(&debug, "debug", false, "Enable debug output (same as --verbose)")
+	rootCmd.PersistentFlags().BoolVar(&timing, "timing", false, "Print [TIMING] transfer diagnostics (same as RESCALE_TIMING=1)")
 
 	// Thread control flags for multi-threaded transfers
 	rootCmd.PersistentFlags().IntVar(&maxThreads, "max-threads", 0, "Maximum threads for transfers (0 = auto-detect, range: 1-32)")

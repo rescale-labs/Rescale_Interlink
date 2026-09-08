@@ -653,6 +653,11 @@ Example:
 			if jobID == "" {
 				return fmt.Errorf("--job-id (or --id) is required")
 			}
+			// Before the client is built and the first poll goes out:
+			// time.NewTicker panics on a non-positive duration.
+			if pollInterval < 1 {
+				return fmt.Errorf("--interval must be at least 1 second (got %d)", pollInterval)
+			}
 
 			// Get API client
 			apiClient, err := getAPIClientFn()
@@ -696,8 +701,17 @@ Example:
 				}
 			}
 
-			// Poll for updates
-			for range ticker.C {
+			// Poll for updates. Ctrl+C cancels the shared context, and only this
+			// select answers it: a poll made with a cancelled context fails, and
+			// the error path below retries, so waiting on the ticker alone kept
+			// the command polling for as long as the process lived.
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ticker.C:
+				}
+
 				statuses, err := apiClient.GetJobStatuses(ctx, jobID)
 				if err != nil {
 					logger.Error().Err(err).Msg("Failed to get job statuses")
@@ -729,13 +743,11 @@ Example:
 					return nil
 				}
 			}
-
-			return nil
 		},
 	}
 
 	cmd.Flags().StringVarP(&jobID, "job-id", "j", "", "Job ID (required)")
-	cmd.Flags().IntVarP(&pollInterval, "interval", "i", 10, "Polling interval in seconds")
+	cmd.Flags().IntVarP(&pollInterval, "interval", "i", 10, "Polling interval in seconds (minimum 1)")
 	cmd.MarkFlagRequired("job-id")
 
 	return cmd

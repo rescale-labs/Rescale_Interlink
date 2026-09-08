@@ -296,6 +296,25 @@ func printUploadDryRun(filesToUpload []string, filesSkipped int, folderID string
 	fmt.Println("   Remove --dry-run to perform the actual upload.")
 }
 
+// interruptedUploadHint returns the line printed after a failed upload that left
+// a resume record behind, or "" when there is nothing to resume from.
+//
+// The record is what the next attempt continues from, so the hint says so: the
+// old text promised the opposite ("starts it from the beginning; the partial
+// upload state is discarded") and sent users to delete a record that was about
+// to save them the transfer. The two conditions named are the ones a user
+// controls — both backends drop an unfinished upload after state.MaxResumeAge,
+// and a source whose size or modification time has changed no longer matches
+// the parts already sent. The rest of what resume checks is internal.
+func interruptedUploadHint(localPath string) string {
+	if !state.UploadResumeStateExists(localPath) {
+		return ""
+	}
+	return fmt.Sprintf("\n💡 Re-running the same command can resume this upload using its completed parts "+
+		"if the file is unchanged, the interrupted upload is less than %d days old, and its saved resume data is still usable.\n\n",
+		int(state.MaxResumeAge.Hours()/24))
+}
+
 // UploadFilesWithIDs uploads files concurrently and returns their file IDs.
 // This is a shared helper for both 'files upload' and 'jobs submit --files'.
 // Returns file IDs in the same order as input files.
@@ -434,8 +453,8 @@ func UploadFilesWithIDs(
 			fileBar = ensureBar()
 			fileBar.Complete("", err)
 
-			if state.UploadResumeStateExists(fPath) {
-				fmt.Fprintf(uploadUI.Writer(), "\n💡 Re-running the upload starts it from the beginning; the partial upload state is discarded.\n\n")
+			if hint := interruptedUploadHint(fPath); hint != "" {
+				fmt.Fprint(uploadUI.Writer(), hint)
 			}
 
 			return fmt.Errorf("failed to upload %s: %w", fPath, err)

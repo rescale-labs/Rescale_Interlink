@@ -11,7 +11,6 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
-	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
@@ -328,8 +327,8 @@ func uploadDirectoryPipelined(
 
 				if uploadErr != nil {
 					fileBar.Complete("", uploadErr)
-					if state.UploadResumeStateExists(fpath) {
-						fmt.Fprintf(uploadUI.Writer(), "\n💡 Partial upload state for %s was left behind; re-running the command discards it and uploads the file again.\n", filepath.Base(fpath))
+					if hint := interruptedUploadHint(fpath); hint != "" {
+						fmt.Fprintf(uploadUI.Writer(), "\n💡 %s left a resume record.%s", filepath.Base(fpath), strings.TrimPrefix(hint, "\n💡"))
 					}
 					recordError(fpath, uploadErr)
 					logger.Error().Str("file", fpath).Err(uploadErr).Msg("Failed to upload file")

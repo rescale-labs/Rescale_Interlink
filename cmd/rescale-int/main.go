@@ -19,7 +19,9 @@ func init() {
 }
 
 func main() {
-	// Enable timing output
+	// Enable timing output. The native CLI has --timing as a real persistent
+	// flag (see internal/cli/root.go); this scan is what covers compat mode,
+	// which never reaches that command tree.
 	if slices.Contains(os.Args, "--timing") {
 		os.Setenv("RESCALE_TIMING", "1")
 	}
