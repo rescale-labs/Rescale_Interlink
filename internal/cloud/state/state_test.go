@@ -44,6 +44,9 @@ func replacePIDDomain(t *testing.T, read func() (string, error)) {
 
 // TestUploadState_FilePermissions verifies that upload state files are created with secure permissions (0600).
 func TestUploadState_FilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
+	}
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "upload-state-test-*")
 	if err != nil {
@@ -93,6 +96,9 @@ func TestUploadState_FilePermissions(t *testing.T) {
 
 // TestDownloadState_FilePermissions verifies that download state files are created with secure permissions (0600).
 func TestDownloadState_FilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
+	}
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "download-state-test-*")
 	if err != nil {
@@ -135,6 +141,9 @@ func TestDownloadState_FilePermissions(t *testing.T) {
 
 // TestUploadLock_FilePermissions verifies that upload lock files are created with secure permissions (0600).
 func TestUploadLock_FilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
+	}
 	// Create temp directory
 	tmpDir, err := os.MkdirTemp("", "upload-lock-test-*")
 	if err != nil {
