@@ -62,7 +62,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v6.4.0
         with:
-          node-version: '20'
+          node-version: '24.21.0'
 
       - name: Install frontend dependencies
         run: npm ci
@@ -101,13 +101,13 @@ jobs:
         uses: actions/checkout@v6.0.2
 
       # The build script would otherwise install Node itself via Chocolatey, and
-      # that fails on this runner: the image already has a newer Node from the
-      # same MSI upgrade family, so msiexec refuses the downgrade with 1603.
+      # that fails with msiexec 1603 whenever the image already has a newer Node
+      # from the same MSI upgrade family, because msiexec will not downgrade it.
       # Pinned to the exact patch because this job produces the signed artifacts.
       - name: Install Node.js
         uses: actions/setup-node@v6.4.0
         with:
-          node-version: '20.20.2'
+          node-version: '24.21.0'
 
       - name: Run build script
         run: ./build/build_dist.ps1 -ReleaseTag "${{ github.ref_name }}"
@@ -120,8 +120,10 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      # Held at v0.5.11: v1.0.0 renamed code-signing-account-name to
+      # signing-account-name, so a newer pin must rename that input at both sites.
       - name: Sign executable using Azure Trusted Signing
-        uses: azure/artifact-signing-action@v0
+        uses: azure/artifact-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0.5.11
         with:
           files-folder: ${{ github.workspace }}\_build\bin
           files-folder-filter: exe
@@ -153,7 +155,7 @@ jobs:
       # v4.5.8: Sign the MSI after creation. The MSI is what users double-click,
       # so it must be signed to avoid SmartScreen "Unknown publisher" errors.
       - name: Sign MSI installer using Azure Trusted Signing
-        uses: azure/artifact-signing-action@v0
+        uses: azure/artifact-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0.5.11
         with:
           files-folder: ${{ github.workspace }}
           files-folder-filter: msi
@@ -174,12 +176,16 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
 
-      # v4.5.8: Regenerate checksum after signing changes the MSI file hash
-      - name: Regenerate MSI checksum after signing
+      # Regenerate checksum after signing changes the MSI file hash.
+      # Each file holds "<hash>  <file name>" and an LF, as on macOS, so that
+      # shasum -a 256 -c accepts it; with CRLF it looks for "<file name>\r".
+      - name: Write MSI and zip checksums
         run: |
-          $msiPath = "rescale-interlink-${{ github.ref_name }}-win_amd64.msi"
-          $hash = (Get-FileHash -Path $msiPath -Algorithm SHA256).Hash.ToLower()
-          "$hash  $msiPath" | Out-File -FilePath "$msiPath.sha256" -Encoding ASCII
+          $base = "rescale-interlink-${env:GITHUB_REF_NAME}-win_amd64"
+          foreach ($file in "$base.msi", "$base.zip") {
+            $hash = (Get-FileHash -Path $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $file`n" | Out-File -FilePath "$file.sha256" -Encoding ASCII -NoNewline
+          }
         shell: pwsh
 
       - name: Upload Artifacts
@@ -213,7 +219,7 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v6.4.0
         with:
-          node-version: '20'
+          node-version: '24.21.0'
 
       - name: Select Xcode
         run: |
@@ -236,10 +242,22 @@ jobs:
       - name: Install frontend dependencies
         run: cd frontend && npm ci
 
+      # Build the CLI while the checkout is still clean. wails build regenerates
+      # frontend/wailsjs, and a CLI built after it is stamped vcs.modified=true.
+      - name: Build standalone CLI binary
+        run: |
+          BUILD_TIME=$(date +%Y-%m-%d)
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${GITHUB_REF_NAME} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export CC="$(xcrun --find clang)"
+          export CXX="$(xcrun --find clang++)"
+          GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
+            go build -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
+
       - name: Build Wails GUI application
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
-          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
+          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${GITHUB_REF_NAME} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
@@ -249,16 +267,6 @@ jobs:
           echo "xcrun clang: $(xcrun --find clang)"
           GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             wails build -tags fips -platform darwin/arm64 -ldflags "$LDFLAGS"
-
-      - name: Build standalone CLI binary
-        run: |
-          BUILD_TIME=$(date +%Y-%m-%d)
-          LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${{ github.ref_name }} -X github.com/rescale/rescale-int/internal/version.BuildTime=${BUILD_TIME}"
-          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-          export CC="$(xcrun --find clang)"
-          export CXX="$(xcrun --find clang++)"
-          GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
-            go build -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
       - name: Install Apple Certificate
         env:

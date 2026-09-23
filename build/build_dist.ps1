@@ -157,16 +157,16 @@ Write-Host ""
 Write-Host "[3.5/7] Installing Node.js and Wails CLI..."
 
 # Install Node.js via Chocolatey. The version is pinned because the unpinned
-# nodejs-lts package tracks whatever the current LTS is (24.x today), and the
-# frontend must be built with the same Node 20 the other release paths use.
-$NodeVersion = "20.20.2"
+# nodejs-lts package tracks whatever the current LTS is, and the frontend must
+# be built with the same Node the other release paths use.
+$NodeVersion = "24.21.0"
 $PinnedNodeDir = $null
 
 if ($InheritedNodeVersion -eq "v$NodeVersion") {
     # Nothing to install. This is the CI path: actions/setup-node has already put
     # the pinned Node on PATH, and running Chocolatey anyway fails with msiexec
-    # 1603, because the runner image ships a newer Node from the same MSI upgrade
-    # family and Windows Installer refuses to downgrade it.
+    # 1603 whenever the runner image ships a newer Node from the same MSI upgrade
+    # family, because Windows Installer refuses to downgrade it.
     Write-Host "Node.js $NodeVersion already present at ${InheritedNodeDir} - skipping Chocolatey install."
     $PinnedNodeDir = $InheritedNodeDir
 } else {
@@ -208,8 +208,8 @@ Write-Host $nodeResult
 # Pinning the package is not enough on its own: the runner ships a preinstalled
 # Node, and whichever copy wins the PATH refresh above is the one that builds the
 # frontend. Fail loudly rather than shipping a build made with the wrong Node.
-if (($nodeResult -join "`n") -notmatch 'v20\.\d+\.\d+') {
-    throw "Expected Node 20 on PATH, got: $nodeResult"
+if (($nodeResult -join "`n").Trim() -ne "v$NodeVersion") {
+    throw "Expected Node.js $NodeVersion on PATH, got: $nodeResult"
 }
 
 # Install Wails CLI
@@ -264,6 +264,30 @@ if ($npmExitCode -ne 0) {
     throw "npm ci failed with exit code: $npmExitCode"
 }
 
+# Build the CLI and tray while the checkout is still clean. wails build
+# regenerates frontend\wailsjs and writes build\windows\info.json, and a binary
+# built after it is stamped vcs.modified=true.
+Write-Host "Building rescale-int.exe (standalone CLI)..."
+$GoExe = "C:\Go\bin\go.exe"
+$cliBuildCmd = "set `"GOFIPS140=certified`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags`" -o `"$BinDir\rescale-int.exe`" .\cmd\rescale-int"
+$prevErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+cmd /c $cliBuildCmd 2>&1 | Out-Host
+$cliExitCode = $LASTEXITCODE
+$ErrorActionPreference = $prevErrorAction
+if ($cliExitCode -ne 0 -or -not (Test-Path "$BinDir\rescale-int.exe")) { throw "CLI build failed (exit code: $cliExitCode)" }
+Write-Host "CLI binary built: rescale-int.exe"
+
+# Build tray companion (windowsgui subsystem) - this is a separate simple Go app
+Write-Host "Building rescale-int-tray.exe..."
+$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
+$prevErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+cmd /c $trayCmd 2>&1 | Out-Host
+$trayExitCode = $LASTEXITCODE
+$ErrorActionPreference = $prevErrorAction
+if ($trayExitCode -ne 0 -or -not (Test-Path "$BinDir\rescale-int-tray.exe")) { throw "Failed to build rescale-int-tray.exe (exit code: $trayExitCode)" }
+
 # Build GUI binary using Wails (required for embedded frontend assets)
 # NOTE: Must use wails build, not go build, because the app embeds frontend assets
 Write-Host "Building rescale-int-gui.exe with Wails..."
@@ -287,28 +311,6 @@ if ($wailsBuildExitCode -ne 0 -or -not (Test-Path $WailsOutputExe)) {
 Copy-Item $WailsOutputExe -Destination "$BinDir\rescale-int-gui.exe"
 Write-Host "GUI binary built: rescale-int-gui.exe"
 
-# v4.0.2: Build standalone CLI binary
-Write-Host "Building rescale-int.exe (standalone CLI)..."
-$GoExe = "C:\Go\bin\go.exe"
-$cliBuildCmd = "set `"GOFIPS140=certified`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags`" -o `"$BinDir\rescale-int.exe`" .\cmd\rescale-int"
-$prevErrorAction = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-cmd /c $cliBuildCmd 2>&1 | Out-Host
-$cliExitCode = $LASTEXITCODE
-$ErrorActionPreference = $prevErrorAction
-if ($cliExitCode -ne 0 -or -not (Test-Path "$BinDir\rescale-int.exe")) { throw "CLI build failed (exit code: $cliExitCode)" }
-Write-Host "CLI binary built: rescale-int.exe"
-
-# Build tray companion (windowsgui subsystem) - this is a separate simple Go app
-Write-Host "Building rescale-int-tray.exe..."
-$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
-$prevErrorAction = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-cmd /c $trayCmd 2>&1 | Out-Host
-$trayExitCode = $LASTEXITCODE
-$ErrorActionPreference = $prevErrorAction
-if ($trayExitCode -ne 0 -or -not (Test-Path "$BinDir\rescale-int-tray.exe")) { throw "Failed to build rescale-int-tray.exe (exit code: $trayExitCode)" }
-
 Write-Host "Binaries built successfully"
 Get-ChildItem $BinDir
 
@@ -318,27 +320,43 @@ Get-ChildItem $BinDir
 Write-Host ""
 Write-Host "[4.5/7] Bundling WebView2 Fixed Version Runtime..."
 
+# Pinned WebView2.Runtime.X64 package. Change both lines together: the SHA-256
+# is of the .nupkg that api.nuget.org serves for this version.
+$WebView2Version = "152.0.4191.62"
+$WebView2Sha256 = "f6db2fa2038d7e7398cf33ca3113c86187b76cb6906c6a3abdb4aee8a042b376"
+
 $WebView2Dir = Join-Path $BinDir "webview2"
+$RuntimeExtract = Join-Path $BuildDir "webview2-runtime-extract"
+# build_installer.ps1 requires this marker, which is written last. Clearing it and
+# any earlier extraction or copy first keeps stale or partial runtimes out of the MSI.
+$WebView2Marker = Join-Path $BuildDir "webview2-bundled.txt"
+Get-Item $WebView2Marker, $RuntimeExtract, $WebView2Dir -Force -ErrorAction Ignore | Remove-Item -Recurse -Force
 New-Item -ItemType Directory -Force -Path $WebView2Dir | Out-Null
 
 # Download WebView2 Fixed Version Runtime from NuGet
 # IMPORTANT: Use WebView2.Runtime.X64 package (contains actual runtime files)
 # NOT Microsoft.Web.WebView2 (which is just the SDK with WebView2Loader.dll)
 # See: https://github.com/ProKn1fe/WebView2.Runtime
-$RuntimeNuGetUrl = "https://www.nuget.org/api/v2/package/WebView2.Runtime.X64"
+$RuntimeNuGetUrl = "https://api.nuget.org/v3-flatcontainer/webview2.runtime.x64/$WebView2Version/webview2.runtime.x64.$WebView2Version.nupkg"
 $RuntimePkg = Join-Path $BuildDir "webview2-runtime.zip"
 
-Write-Host "Downloading WebView2 Fixed Version Runtime (WebView2.Runtime.X64)..."
-$hasWebView2 = $false
+Write-Host "Downloading WebView2 Fixed Version Runtime (WebView2.Runtime.X64 $WebView2Version)..."
 
+# Any failure below stops the build. Without the bundled runtime, the GUI offers to
+# download an Evergreen runtime where none is installed, and cannot start without one.
 try {
     (New-Object System.Net.WebClient).DownloadFile($RuntimeNuGetUrl, $RuntimePkg)
     Write-Host "WebView2.Runtime.X64 package downloaded successfully"
     $pkgSize = (Get-Item $RuntimePkg).Length / 1MB
     Write-Host "Package size: $([math]::Round($pkgSize, 1)) MB"
 
+    $RuntimePkgSha256 = (Get-FileHash -Path $RuntimePkg -Algorithm SHA256).Hash
+    if ($RuntimePkgSha256 -ne $WebView2Sha256.ToUpper()) {
+        throw "checksum mismatch for ${RuntimeNuGetUrl}: expected $WebView2Sha256, got $RuntimePkgSha256"
+    }
+    Write-Host "Checksum OK: $RuntimePkgSha256"
+
     # Extract the NuGet package
-    $RuntimeExtract = Join-Path $BuildDir "webview2-runtime-extract"
     Expand-Archive -Path $RuntimePkg -DestinationPath $RuntimeExtract -Force
 
     Write-Host "Searching for runtime files..."
@@ -352,7 +370,6 @@ try {
 
         # Copy all runtime files
         Copy-Item -Path "$RuntimeSourceDir\*" -Destination $WebView2Dir -Recurse -Force
-        $hasWebView2 = $true
 
         # v4.0.1: Strip unnecessary components to avoid path length issues and reduce size
         # - WidevineCdm: DRM for video playback - not needed for Interlink
@@ -383,38 +400,26 @@ try {
         # Verify
         $copiedExe = Join-Path $WebView2Dir "msedgewebview2.exe"
         if (Test-Path $copiedExe) {
-            Write-Host "SUCCESS: msedgewebview2.exe bundled for MSI"
+            Write-Host "SUCCESS: WebView2 $WebView2Version bundled for MSI (msedgewebview2.exe $((Get-Item $copiedExe).VersionInfo.FileVersion))"
             $fileCount = (Get-ChildItem -Path $WebView2Dir -Recurse).Count
             $totalSize = (Get-ChildItem -Path $WebView2Dir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
             Write-Host "WebView2 runtime: $fileCount files, $([math]::Round($totalSize, 1)) MB total"
         } else {
-            Write-Host "ERROR: Failed to copy msedgewebview2.exe"
-            $hasWebView2 = $false
+            throw "Failed to copy msedgewebview2.exe"
         }
     } else {
-        Write-Host "ERROR: msedgewebview2.exe not found in WebView2.Runtime.X64 package"
-        Get-ChildItem -Path $RuntimeExtract -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object FullName
-        $hasWebView2 = $false
+        Get-ChildItem -Path $RuntimeExtract -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object FullName | Out-Host
+        throw "msedgewebview2.exe not found in WebView2.Runtime.X64 package"
     }
+
+    Set-Content -Path $WebView2Marker -Value $WebView2Version
 
     # Cleanup
     Remove-Item $RuntimePkg -Force -ErrorAction SilentlyContinue
     Remove-Item $RuntimeExtract -Recurse -Force -ErrorAction SilentlyContinue
 
 } catch {
-    Write-Host "ERROR: Could not download/extract WebView2 runtime: $_"
-    Write-Host "MSI will require WebView2 Evergreen runtime on target system"
-    $hasWebView2 = $false
-}
-
-if ($hasWebView2) {
-    Write-Host ""
-    Write-Host "WebView2 Fixed Version Runtime BUNDLED in MSI"
-    Write-Host "MSI will work on Windows Server 2019 without any pre-installation"
-} else {
-    Write-Host ""
-    Write-Host "WARNING: WebView2 runtime NOT bundled in MSI"
-    Write-Host "MSI requires WebView2 Evergreen runtime (pre-installed on Win10+)"
+    throw "Could not bundle WebView2 runtime ${WebView2Version}: $_"
 }
 
 # =============================================================================
