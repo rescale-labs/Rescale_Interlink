@@ -1,0 +1,124 @@
+name: Release Rescale Interlink (Linux)
+run-name: ${{ github.actor }} is building the Linux release of Rescale Interlink
+
+# A v* tag builds and gates the Linux tarball, then attaches it to the draft
+# release that release.yml creates for the same tag. A push to a release branch
+# that changes the Linux packaging runs the same build and gate but only keeps
+# the tarball as a workflow artifact. Path filters never apply to tag pushes.
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - "release/**"
+    paths:
+      - "build/linux/**"
+      - ".github/workflows/release-linux.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and gate
+    runs-on: ubuntu-latest
+    # AlmaLinux 8: its glibc 2.28 is the floor the Linux release keeps, and the
+    # hand-built releases were made on it. Docker's rockylinux:8 image has not
+    # been rebuilt since May 2024; almalinux:8 is current.
+    container: almalinux:8
+    timeout-minutes: 60
+    steps:
+      # Without git in the container, actions/checkout downloads a tarball
+      # instead of a repository, and the build could not record its commit.
+      - name: Install git
+        run: dnf -y install git-core
+
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build, gate and package
+        run: bash build/linux/build-release.sh
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: rescale-interlink-linux-amd64
+          path: /tmp/build/rescale-interlink-*-linux-amd64.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the draft release
+    needs: [build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    # A second run for the same tag, such as a re-run, waits for this job to end.
+    concurrency:
+      group: release-linux-attach-${{ github.ref_name }}
+    permissions:
+      contents: write
+    steps:
+      - name: Download tarball
+        uses: actions/download-artifact@v8.0.1
+        with:
+          name: rescale-interlink-linux-amd64
+
+      # release.yml creates the draft only after its Windows and macOS jobs,
+      # which usually finish after this build, so wait up to 90 minutes for it;
+      # a failed lookup, such as a 502, is retried within that bound.
+      # Upload only to a single draft: never create a release, and never change
+      # one that is already published. 'gh release upload' resolves the tag to a
+      # release whether or not it is published, so the draft is pinned by ID and
+      # re-read before each change to its assets. A check and the change after
+      # it are separate requests: publish the release only after this job ends.
+      - name: Upload to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          tarball="rescale-interlink-${TAG}-linux-amd64.tar.gz"
+          sha256sum -c "${tarball}.sha256"
+          # check FILE stops unless release $id is still the draft for TAG, and
+          # sets url to its upload URL and old to the ID of its asset FILE, if any.
+          check() {
+            local got
+            got="$(F="$1" gh api "repos/${GH_REPO}/releases/${id}" --jq 'select(.draft and .tag_name == env.TAG)
+              | "\(.upload_url) \([.assets[] | select(.name == env.F) | .id] | join(" "))"')" && [ -n "$got" ] \
+              || { echo "::error::could not confirm release ${id} is still the draft for ${TAG}; stopped before changing its assets"; exit 1; }
+            read -r url old <<<"$got"
+          }
+          # attach FILE TYPE uploads FILE, first deleting any asset of that name.
+          attach() {
+            check "$1"
+            [ -z "$old" ] || { gh api --method DELETE "repos/${GH_REPO}/releases/assets/${old}"; check "$1"; }
+            gh api --method POST "${url%%\{*}" -f name="$1" -H "Content-Type: $2" --input "$1" \
+              --jq '"attached \(.name) (\(.size) bytes)"'
+          }
+          for attempt in $(seq 90); do
+            # Every page, so that a second release for the tag cannot go unseen.
+            found="$(gh api --paginate "repos/${GH_REPO}/releases" \
+              --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"')" \
+              || { echo "::warning::release lookup failed (${attempt}/90)"; sleep 60; continue; }
+            case "$found" in
+              "")
+                echo "no release for ${TAG} yet (${attempt}/90)"
+                sleep 60
+                ;;
+              *$'\n'* | *" false")
+                echo "::error::expected one draft release for ${TAG}; found (id draft): ${found//$'\n'/, }"
+                exit 1
+                ;;
+              *)
+                id="${found% true}"
+                attach "$tarball" application/x-gtar
+                attach "${tarball}.sha256" application/octet-stream
+                exit 0
+                ;;
+            esac
+          done
+          echo "::error::no draft release for ${TAG} after 90 minutes; re-run this job once release.yml has created it"
+          exit 1

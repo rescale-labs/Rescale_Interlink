@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Rescale Interlink
-Exec=rescale-int --gui
-Comment=Unified CLI and GUI for Rescale HPC platform
-Terminal=false
-Type=Application
-Categories=Development;Science;
-Icon=rescale-int
