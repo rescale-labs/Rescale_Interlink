@@ -668,8 +668,13 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 		return nil
 	})
 
-	// Collect errors from batch result
+	// Collect errors from batch result. A cancel stops the batch before it
+	// starts the files still queued, which leave no error of their own.
 	errs := batchResult.Errors
+	failed := len(items) - batchResult.Completed
+	if failed > len(errs) {
+		errs = append(errs, fmt.Errorf("%d file(s) not downloaded: %w", failed-len(errs), ctx.Err()))
+	}
 
 	// Print summary
 	if len(errs) > 0 {
@@ -677,7 +682,7 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 		if len(skippedFiles) > 0 {
 			fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 		}
-		fmt.Printf("✗ Failed to download %d file(s)\n", len(errs))
+		fmt.Printf("✗ Failed to download %d file(s)\n", failed)
 		// Return first error but continue with others (per project objectives)
 		return errs[0]
 	}
@@ -700,6 +705,14 @@ func existingFileIsComplete(info os.FileInfo, expectedSize int64) bool {
 		return true
 	}
 	return info.Size() == expectedSize
+}
+
+// namesDirectory reports whether path is an existing directory or ends in a
+// path separator, "." or "..": none of these can be the path of a file.
+func namesDirectory(path string) bool {
+	info, err := os.Stat(path)
+	_, last := filepath.Split(path)
+	return path != "" && (last == "" || last == "." || last == ".." || err == nil && info.IsDir())
 }
 
 // filterValidJobFiles splits job files into those whose server-supplied name is

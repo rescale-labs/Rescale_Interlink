@@ -713,6 +713,17 @@ func ReadTokenFile(path string) (string, error) {
 // WriteTokenFile writes an API token to a file with secure permissions (0600)
 // The token is written as-is (trimmed of leading/trailing whitespace)
 func WriteTokenFile(path, token string) error {
+	return writeTokenFile(path, token, os.O_TRUNC)
+}
+
+// CreateTokenFile is WriteTokenFile for a token file that must not exist yet.
+// The create is exclusive, so a file or link that appeared after the caller
+// looked is not replaced; the error then matches fs.ErrExist.
+func CreateTokenFile(path, token string) error {
+	return writeTokenFile(path, token, os.O_EXCL)
+}
+
+func writeTokenFile(path, token string, flag int) error {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return fmt.Errorf("cannot write empty token")
@@ -728,11 +739,18 @@ func WriteTokenFile(path, token string) error {
 	// On Windows, 0600 is honored via a coarser ACL — applyTokenFileACL
 	// below tightens it to the explicit (owner, Administrators, SYSTEM)
 	// model required by spec §11.2.
-	if err := os.WriteFile(path, []byte(token+"\n"), 0600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|flag, 0600)
+	if err == nil {
+		_, err = f.WriteString(token + "\n")
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
 	}
 
-	// os.WriteFile only applies the 0600 mode when creating the file; if the
+	// The 0600 mode applies only when the file is created; if the
 	// token file already existed with looser permissions (e.g. 0644), the
 	// overwrite preserves that mode. Explicitly chmod to repair it. On Windows
 	// the meaningful protection is the ACL applied below, so a chmod error

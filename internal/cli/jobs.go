@@ -8,22 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
-	"github.com/rescale/rescale-int/internal/cloud"
-	"github.com/rescale/rescale-int/internal/cloud/download"
 	"github.com/rescale/rescale-int/internal/constants"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
-	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/pur/parser"
-	"github.com/rescale/rescale-int/internal/ratelimit"
-	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/analysis"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/validation"
@@ -845,8 +839,15 @@ MODE 1: Download all job output files (default)
   Download all output files from a job to a directory, preserving relative paths.
   Supports concurrent downloads, filtering, and conflict resolution.
 
-MODE 2: Download specific file
-  Download a single file by file ID.
+MODE 2: Download specific file (--file-id)
+  Download a single file by file ID to the file path --output (default:
+  ./<file name>). Only MODE 2 takes --output, and only MODE 1 takes --outdir,
+  --max-concurrent and the filter flags; each is refused in the other mode.
+
+Existing files (both modes): with no flag, or with --skip, a file already on
+disk at its expected size is kept and one of any other size is downloaded
+again; --overwrite replaces it and --resume continues an interrupted download.
+Give at most one of the three. There is no prompt.
 
 Examples:
   # Download all job output files to directory (concurrent)
@@ -887,8 +888,46 @@ Examples:
 				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
+			// Validate conflict flags (only one can be set)
+			conflictFlags := 0
+			if overwriteAll {
+				conflictFlags++
+			}
+			if skipAll {
+				conflictFlags++
+			}
+			if resumeAll {
+				conflictFlags++
+			}
+			if conflictFlags > 1 {
+				return fmt.Errorf("only one of --overwrite, --skip, or --resume can be specified")
+			}
+
+			// Each mode refuses the other's flags rather than ignore them: one
+			// file has no list to filter or share out between workers, and
+			// --output is that file's path, not a directory.
+			if fileID != "" {
+				if cmd.Flags().Changed("outdir") {
+					return fmt.Errorf("--outdir applies only when downloading all of a job's files; with --file-id, use --output to set the file's path")
+				}
+				for _, name := range []string{"max-concurrent", "filter", "exclude", "search", "path-filter"} {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--%s applies only when downloading all of a job's files, not with --file-id", name)
+					}
+				}
+				if namesDirectory(outputPath) {
+					return fmt.Errorf("--output %s names a directory; give the path of the file to write", outputPath)
+				}
+			} else if cmd.Flags().Changed("output") {
+				return fmt.Errorf("--output applies only when downloading one file with --file-id; to set the directory for all of a job's files, use --outdir")
+			}
+			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
+				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
+					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			}
+
 			// Get API client
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -897,21 +936,6 @@ Examples:
 
 			// MODE 1: Download all files if no specific file ID provided
 			if fileID == "" {
-				// Validate conflict flags (only one can be set)
-				conflictFlags := 0
-				if overwriteAll {
-					conflictFlags++
-				}
-				if skipAll {
-					conflictFlags++
-				}
-				if resumeAll {
-					conflictFlags++
-				}
-				if conflictFlags > 1 {
-					return fmt.Errorf("only one of --overwrite, --skip, or --resume can be specified")
-				}
-
 				// Determine output directory
 				if outputDir == "" {
 					outputDir = "."
@@ -948,90 +972,29 @@ Examples:
 				outputPath = filepath.Join(".", fileInfo.Name)
 			}
 
-			// Ensure output directory exists
-			outDir := filepath.Dir(outputPath)
-			if err := os.MkdirAll(outDir, 0755); err != nil {
-				return fmt.Errorf("failed to create output directory: %w", err)
-			}
-
 			fmt.Printf("Downloading file: %s\n", fileInfo.Name)
 			fmt.Printf("  Size: %.2f MB\n", float64(fileInfo.DecryptedSize)/(1024*1024))
 			fmt.Printf("  Output: %s\n\n", outputPath)
 
-			// Use modern download infrastructure with DownloadUI
-			downloadUI := progress.NewDownloadUI(1)
-
-			// Route this command's logs through the bar — see executeFileUpload for why.
-			if downloadUI.IsTerminal() {
-				logger = logger.WithOutput(downloadUI.Writer())
-			}
-
-			defer downloadUI.Wait()
-
-			// Create resource manager and transfer manager
-			resourceMgr := CreateResourceManager()
-			transferMgr := transfer.NewManager(resourceMgr)
-
-			// Allocate transfer handle
-			transferHandle := transferMgr.AllocateTransfer(fileInfo.DecryptedSize, 1)
-
-			// Print thread info if multi-threaded
-			if transferHandle.GetThreads() > 1 && fileInfo.DecryptedSize > 100*1024*1024 {
-				fmt.Fprintf(downloadUI.Writer(), "Using %d concurrent threads\n", transferHandle.GetThreads())
-			}
-
-			// Create progress bar. The progress and retry callbacks run on
-			// different transfer goroutines, so creation is guarded by a lock.
-			var (
-				barMu   sync.Mutex
-				fileBar *progress.DownloadFileBar
-			)
-			ensureBar := func() *progress.DownloadFileBar {
-				barMu.Lock()
-				defer barMu.Unlock()
-				if fileBar == nil {
-					fileBar = downloadUI.AddFileBar(1, fileID, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
-				}
-				return fileBar
-			}
-
-			// Download file with progress tracking and transfer manager
-			// Use strict checksum verification (skipChecksum=false) for job downloads
-			// Signal active transfer for sleep inhibition + coordinator keepalive.
-			// Single-file job download bypasses RunBatch/RunBatchFromChannel, so must signal directly.
-			ratelimit.GlobalStore().BeginTransferActivity()
-			defer ratelimit.GlobalStore().EndTransferActivity()
-			err = download.DownloadFile(ctx, download.DownloadParams{
-				FileID:    fileID,
-				LocalPath: outputPath,
-				APIClient: apiClient,
-				ProgressCallback: func(fraction float64) {
-					ensureBar().UpdateProgress(fraction)
-				},
-				OnRetry: func(ev cloud.RetryEvent) {
-					retryReporter(ensureBar(), downloadUI.Writer())(ev)
-				},
-				TransferHandle: transferHandle,
-				SkipChecksum:   false,
+			// A batch of one, so the conflict flags and --skip-checksum act
+			// exactly as they do for a whole job.
+			return runDownloadBatch(ctx, []cliDownloadItem{{
+				fileID:    fileID,
+				name:      fileInfo.Name,
+				size:      fileInfo.DecryptedSize,
+				localPath: outputPath,
+				cloudFile: fileInfo,
+			}}, downloadBatchOptions{
+				label:          "JOB-DOWNLOAD",
+				jobID:          jobID,
+				maxConcurrent:  1,
+				skipChecksum:   skipChecksum,
+				conflictMode:   initialDownloadConflictMode(overwriteAll, skipAll, resumeAll),
+				makeParentDirs: true,
+				announceSkip:   true,
+				apiClient:      apiClient,
+				logger:         logger,
 			})
-
-			fileBar = ensureBar()
-
-			if err != nil {
-				fileBar.Complete(err)
-				storageType := "unknown"
-				if fileInfo.Storage != nil {
-					storageType = fileInfo.Storage.StorageType
-				}
-				return formatDownloadError(fileInfo.Name, fileID, jobID, storageType, err)
-			}
-
-			fileBar.Complete(nil)
-
-			fmt.Printf("\n✓ File downloaded successfully\n")
-			fmt.Printf("  Path: %s\n", outputPath)
-
-			return nil
 		},
 	}
 
@@ -1045,7 +1008,7 @@ Examples:
 	cmd.Flags().BoolVarP(&overwriteAll, "overwrite", "w", false, "Overwrite existing files without prompting")
 	cmd.Flags().BoolVarP(&skipAll, "skip", "S", false, "Skip existing files without prompting")
 	cmd.Flags().BoolVarP(&resumeAll, "resume", "r", false, "Resume interrupted downloads without prompting")
-	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Skip checksum verification (not recommended; the file-size check still applies)")
+	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Warn instead of failing when the checksum does not match (not recommended; the file-size check still applies)")
 	cmd.Flags().StringVar(&filterPatterns, "filter", "", "Include only files matching these patterns (comma-separated glob patterns, e.g. \"*.dat,*.log\")")
 	cmd.Flags().StringVarP(&excludePatterns, "exclude", "x", "", "Exclude files matching these patterns (comma-separated glob patterns, e.g. \"debug*,temp*\")")
 	cmd.Flags().StringVarP(&searchTerms, "search", "s", "", "Include only files containing these terms in filename (comma-separated, case-insensitive)")

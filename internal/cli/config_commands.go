@@ -48,6 +48,10 @@ var errConfigInitNeedsTTY = errors.New(
 		"set RESCALE_API_KEY or use --token-file, or edit the config file directly " +
 		"(see 'rescale-int config path')")
 
+// configInitTerminalFn is IsTerminal, replaceable in tests: go test runs
+// without a terminal, and 'config init' will not prompt without one.
+var configInitTerminalFn = IsTerminal
+
 // readPromptLine reads one answer from an interactive prompt.
 //
 // A read error with no data means stdin ended (pipe closed, /dev/null, CI):
@@ -62,6 +66,12 @@ func readPromptLine(reader *bufio.Reader) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+// shellQuote quotes s as one word for a POSIX shell, the shell the commands
+// 'config init' prints are written for.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // newConfigInitCmd creates the 'config init' command.
 func newConfigInitCmd() *cobra.Command {
 	var force bool
@@ -71,27 +81,62 @@ func newConfigInitCmd() *cobra.Command {
 		Short: "Initialize configuration interactively",
 		Long: `Interactive configuration setup for rescale-int.
 
-The configuration will be saved to ~/.config/rescale/config.csv
+The configuration is saved to the --config file, or to the default location
+when --config is not given ('rescale-int config path' shows it). The API key
+is saved separately, to a file named token in the same directory.
 
-Use --force to overwrite existing configuration.`,
+Use --force to overwrite an existing configuration or token file.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
 			// Every answer below comes from stdin. Without a terminal there is
 			// nothing to read and the required-field loops would spin forever.
-			if !IsTerminal() {
+			if !configInitTerminalFn() {
 				return errConfigInitNeedsTTY
 			}
 
-			// Get default config path
-			configPath := config.GetDefaultConfigPath()
+			// Get config path
+			configPath := cfgFile
+			if configPath == "" {
+				configPath = config.GetDefaultConfigPath()
+			}
+			if namesDirectory(configPath) {
+				return fmt.Errorf("--config %s names a directory; give the path of the configuration file", configPath)
+			}
+			// The key goes to a file named token beside the configuration, so a
+			// configuration of that name, in any letter case (macOS and Windows
+			// filesystems ignore it) or with trailing dots and spaces (Windows
+			// drops them), would be written over the key.
+			if strings.EqualFold(strings.TrimRight(filepath.Base(configPath), ". "), "token") {
+				return fmt.Errorf("--config %s has the name of the token file, which holds the API key; give the configuration file another name", configPath)
+			}
+			tokenFilePath := filepath.Join(filepath.Dir(configPath), "token")
+			// So would a configuration that is the token file through a link.
+			configInfo, errConfig := os.Stat(configPath)
+			tokenInfo, errToken := os.Stat(tokenFilePath)
+			if errConfig == nil && errToken == nil && os.SameFile(configInfo, tokenInfo) {
+				return fmt.Errorf("--config %s is the same file as %s, which holds the API key; use a separate configuration file", configPath, tokenFilePath)
+			}
 
-			// Check if config already exists
+			// Later commands find a non-default configuration or token only when named.
+			tokenArg := shellQuote(tokenFilePath)
+			rescaleInt, tokenFlag := "rescale-int", ""
+			if cfgFile != "" {
+				rescaleInt += " --config " + shellQuote(configPath)
+				tokenFlag = " --token-file " + tokenArg
+			}
+
+			// Check if config or token already exists: Lstat, so that a link to
+			// a missing file counts too, and a failed check stops the run.
 			if !force {
-				if _, err := os.Stat(configPath); err == nil {
-					fmt.Printf("Configuration already exists at: %s\n", configPath)
-					fmt.Println("Use --force to overwrite or run 'config show' to view current config.")
-					return nil
+				for _, path := range []string{configPath, tokenFilePath} {
+					if _, err := os.Lstat(path); err == nil {
+						fmt.Printf("Configuration already exists at: %s\n", path)
+						fmt.Printf("Use --force to overwrite, or view the current config with: %s config show\n", rescaleInt)
+						return nil
+					} else if !errors.Is(err, os.ErrNotExist) {
+						return fmt.Errorf("failed to check for an existing configuration: %w", err)
+					}
 				}
 			}
 
@@ -99,7 +144,7 @@ Use --force to overwrite existing configuration.`,
 			fmt.Println("===========================")
 			fmt.Println()
 
-			reader := bufio.NewReader(os.Stdin)
+			reader := bufio.NewReader(cmd.InOrStdin())
 
 			// API Key (required)
 			var apiKeyInput string
@@ -250,17 +295,17 @@ Use --force to overwrite existing configuration.`,
 				MaxRetries:     1,
 			}
 
-			// Ensure config directory exists
-			configDir := filepath.Dir(configPath)
-			if err := os.MkdirAll(configDir, 0755); err != nil {
-				return fmt.Errorf("failed to create config directory: %w", err)
-			}
-
 			// Save API key to a separate token file (for security, not in config CSV).
 			// Use config.WriteTokenFile so the file picks up the Windows
 			// explicit-ACL tightening (spec §11.2) on par with the GUI path.
-			tokenFilePath := filepath.Join(configDir, "token")
-			if err := config.WriteTokenFile(tokenFilePath, apiKeyInput); err != nil {
+			// It creates the directory owner-only, as SaveConfigCSV does. Without
+			// --force the create is exclusive: a token that appeared during the
+			// prompts is refused, not replaced.
+			writeToken := config.CreateTokenFile
+			if force {
+				writeToken = config.WriteTokenFile
+			}
+			if err := writeToken(tokenFilePath, apiKeyInput); err != nil {
 				return fmt.Errorf("failed to save API token file: %w", err)
 			}
 			logger.Info().Str("path", tokenFilePath).Msg("API token saved")
@@ -280,12 +325,13 @@ Use --force to overwrite existing configuration.`,
 			fmt.Println("To use rescale-int commands, you have two options:")
 			fmt.Println()
 			fmt.Printf("  Option 1: Use the token file (recommended):\n")
-			fmt.Printf("    rescale-int --token-file %s <command>\n", tokenFilePath)
+			fmt.Printf("    %s --token-file %s <command>\n", rescaleInt, tokenArg)
 			fmt.Println()
 			fmt.Printf("  Option 2: Set environment variable:\n")
-			fmt.Printf("    export RESCALE_API_KEY=$(cat %s)\n", tokenFilePath)
+			fmt.Printf("    export RESCALE_API_KEY=$(cat < %s)\n", tokenArg)
+			fmt.Printf("    %s <command>\n", rescaleInt)
 			fmt.Println()
-			fmt.Println("Test your configuration with: rescale-int config test")
+			fmt.Printf("Test your configuration with: %s%s config test\n", rescaleInt, tokenFlag)
 
 			return nil
 		},
