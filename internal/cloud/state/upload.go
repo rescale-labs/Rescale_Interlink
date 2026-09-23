@@ -134,6 +134,17 @@ const lockTakeoverAttempts = 8
 // carry on past there.
 var ErrUploadLockUnavailable = errors.New("the source directory cannot hold an upload lock")
 
+// ErrUploadLocked is what every refusal to share a source's upload lock
+// matches: another transfer holds the source, or may. That is the user's to act
+// on — wait for it, or delete the lock a refusal names if nothing holds it —
+// not a failure of the transfer. Its text is never part of a refusal's message.
+var ErrUploadLocked = errors.New("the upload is locked by another transfer")
+
+// lockRefusal marks a refusal as ErrUploadLocked without changing its message.
+type lockRefusal struct{ error }
+
+func (lockRefusal) Is(target error) bool { return target == ErrUploadLocked }
+
 // =============================================================================
 // Basic I/O functions - these are the core operations needed everywhere
 // =============================================================================
@@ -416,7 +427,7 @@ func AcquireUploadLock(localPath string) (*UploadLock, error) {
 	lockFilePath := lockFilePathFor(localPath)
 
 	if !claimLocalLock(lockFilePath) {
-		return nil, fmt.Errorf("upload of %s is already in progress in this process", localPath)
+		return nil, lockRefusal{fmt.Errorf("upload of %s is already in progress in this process", localPath)}
 	}
 
 	lock, err := acquireLockFile(lockFilePath, localPath, uploadLockState{
@@ -464,6 +475,8 @@ func acquireLockFile(lockFilePath, localPath string, newLock uploadLockState) (*
 		}
 	}
 
+	// Not marked a refusal: a fault ends here too, on every attempt (a dangling
+	// symlink at the lock path is one), so this stays reportable.
 	return nil, fmt.Errorf("could not acquire upload lock for %s: it kept being retaken", localPath)
 }
 
@@ -548,15 +561,15 @@ func reclaimStaleLock(lockFilePath, localPath string, owner uploadLockState, dat
 		// get two keys in the in-process map and meet on the one lock file
 		// they share. A release that failed to remove its file leaves the same
 		// record, and is refused the same way until the file is deleted.
-		return nil, fmt.Errorf("upload of %s is already in progress in this process; its lock is %s", localPath, lockFilePath)
+		return nil, lockRefusal{fmt.Errorf("upload of %s is already in progress in this process; its lock is %s", localPath, lockFilePath)}
 	case !inThisPIDDomain(existing, owner.PIDDomain):
 		return nil, foreignLockError(localPath, lockFilePath, existing)
 	case existing.ProcessID != owner.ProcessID:
 		liveness, probeErr := probeProcessLiveness(existing.ProcessID)
 		switch liveness {
 		case livenessAlive:
-			return nil, fmt.Errorf("upload locked by another process (PID %d) since %s",
-				existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))
+			return nil, lockRefusal{fmt.Errorf("upload locked by another process (PID %d) since %s",
+				existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))}
 		case livenessUnknown:
 			return nil, undecidedLockError(localPath, lockFilePath, existing, probeErr)
 		}
@@ -590,10 +603,10 @@ func inThisPIDDomain(existing uploadLockState, domain string) bool {
 // each remove the other's replacement. What is left is to say who holds it and
 // leave the decision to whoever can make it.
 func foreignLockError(localPath, lockFilePath string, existing uploadLockState) error {
-	return fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s; "+
+	return lockRefusal{fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s; "+
 		"if that upload is not running, delete %s to release it",
 		localPath, existing.ProcessID, orUnknown(existing.Host), orUnknown(existing.Owner),
-		existing.AcquiredAt.Format(time.RFC3339), lockFilePath)
+		existing.AcquiredAt.Format(time.RFC3339), lockFilePath)}
 }
 
 // undecidedLockError refuses a lock whose owner this system would not answer
@@ -603,20 +616,20 @@ func foreignLockError(localPath, lockFilePath string, existing uploadLockState) 
 // lock. So the answer is the same as for a lock this process may not judge —
 // who holds it, and the file to delete if nobody does.
 func undecidedLockError(localPath, lockFilePath string, existing uploadLockState, err error) error {
-	return fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s, "+
+	return lockRefusal{fmt.Errorf("upload of %s is locked by PID %d on host %s as user %s since %s, "+
 		"and this system will not say whether that process is still running (%v); "+
 		"if that upload is not running, delete %s to release it",
 		localPath, existing.ProcessID, orUnknown(existing.Host), orUnknown(existing.Owner),
-		existing.AcquiredAt.Format(time.RFC3339), err, lockFilePath)
+		existing.AcquiredAt.Format(time.RFC3339), err, lockFilePath)}
 }
 
 // unidentifiedLockError refuses a lock file that names no owner at all: there is
 // no domain, user or PID in it to judge, so nothing here can establish that
 // clearing it is safe, however long ago it was written.
 func unidentifiedLockError(localPath, lockFilePath string, judged os.FileInfo) error {
-	return fmt.Errorf("upload of %s is locked by a record that names no owner, written %s; "+
+	return lockRefusal{fmt.Errorf("upload of %s is locked by a record that names no owner, written %s; "+
 		"if no upload of that file is running, delete %s to release it",
-		localPath, judged.ModTime().Format(time.RFC3339), lockFilePath)
+		localPath, judged.ModTime().Format(time.RFC3339), lockFilePath)}
 }
 
 func orUnknown(value string) string {
@@ -750,8 +763,8 @@ func takeStaleLock(lockFilePath, localPath string, owner uploadLockState, data, 
 // record and replacing it, so this is ordinarily a transient answer; one an
 // acquirer died holding is not, which is why the file is named.
 func reclamationInProgressError(localPath, claimPath string) error {
-	return fmt.Errorf("the upload lock of %s is being reclaimed by another transfer; "+
-		"if none is running, delete %s to release it", localPath, claimPath)
+	return lockRefusal{fmt.Errorf("the upload lock of %s is being reclaimed by another transfer; "+
+		"if none is running, delete %s to release it", localPath, claimPath)}
 }
 
 // ReleaseUploadLock releases an upload lock.

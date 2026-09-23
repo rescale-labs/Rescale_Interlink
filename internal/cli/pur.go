@@ -766,13 +766,17 @@ func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []mod
 	return cfg, jobs, nil
 }
 
+// newPipelineClientFn is the API client of the commands that run a pipeline: a
+// test seam, like getAPIClientFn, since a test server cannot pass the allowlist.
+var newPipelineClientFn = api.NewClient
+
 // runPipeline creates the API client, resolves the batch upload destination and
 // runs the pipeline to completion.
 //
 // Callers must have returned already when --dry-run is set: resolving the upload
 // target creates the remote folder, which a dry run must never do.
 func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec, doneMsg string) error {
-	apiClient, err := api.NewClient(cfg)
+	apiClient, err := newPipelineClientFn(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create API client: %w", err)
 	}
@@ -801,12 +805,36 @@ func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec
 	}
 
 	if err := pipe.Run(ctx); err != nil {
+		printFailedJobs(os.Stderr, pipe.FailedJobs())
 		return fmt.Errorf("pipeline failed: %w", err)
 	}
 
 	GetLogger().Info().Msg(doneMsg)
 	fmt.Println("\n✓ Pipeline completed")
 	return nil
+}
+
+// printFailedJobs names each failed job with the reason the run recorded for it,
+// one line each: at most ten, or every one with --verbose. Without these lines a
+// failed run said how many jobs failed and never why. The pipeline's log shows
+// only with --verbose, and a resumed run does not log again a failure its state
+// file already holds.
+func printFailedJobs(w io.Writer, failed []*models.JobState) {
+	shown := 10
+	if VerboseOutput() {
+		shown = len(failed)
+	}
+	// A name comes from the jobs CSV or the state file, and a reason can quote an
+	// API response body: either can run to many lines, and a reason to a megabyte.
+	oneLine := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
+	field := func(s string, width int) string { return truncateField(sanitizeErrorString(oneLine.Replace(s)), width) }
+	for i, st := range failed {
+		if i == shown {
+			fmt.Fprintf(w, "... and %d more (--verbose lists them all)\n", len(failed)-shown)
+			return
+		}
+		fmt.Fprintf(w, "✗ %s: %s\n", field(st.JobName, pattern.MaxJobNameLength), field(st.ErrorMessage, 1000))
+	}
 }
 
 // newRunCmd creates the 'run' command.
@@ -1083,7 +1111,7 @@ Example:
 			}
 
 			// Create API client
-			apiClient, err := api.NewClient(cfg)
+			apiClient, err := newPipelineClientFn(cfg)
 			if err != nil {
 				return fmt.Errorf("failed to create API client: %w", err)
 			}
@@ -1104,6 +1132,7 @@ Example:
 			// It checks if jobs have ExtraInputFileIDs and skips tar/upload accordingly
 			ctx := GetContext()
 			if err := pipe.Run(ctx); err != nil {
+				printFailedJobs(os.Stderr, pipe.FailedJobs())
 				return fmt.Errorf("submit-existing failed: %w", err)
 			}
 

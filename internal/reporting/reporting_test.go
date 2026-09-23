@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+
+	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/events"
 )
 
@@ -53,6 +56,28 @@ func TestClassify_Nil(t *testing.T) {
 	}
 }
 
+// s3InternalError is a genuine S3 500 on uploading a file in dir.
+func s3InternalError(dir string) string {
+	return "failed to upload /Users/jd/sweep/" + dir + "/in.dat: operation error S3: PutObject, https response error " +
+		"StatusCode: 500, RequestID: 8Q4NVDC1TMR1JS4Q, HostID: 7Zk0c2VkXhQ=, api error InternalError: " +
+		"We encountered an internal error. Please try again."
+}
+
+// conflictUnder is an API 409 on registering a file uploaded from dir.
+func conflictUnder(dir string) string {
+	return "failed to upload /Users/jd/sweep/" + dir + `/in.dat: register file failed: status 409: {"detail": "Conflict."}`
+}
+
+// s3ResponseError stands in for smithy-go's ResponseError, which every S3 SDK
+// error wraps and which carries its status as a value.
+type s3ResponseError struct {
+	status int
+	text   string
+}
+
+func (e s3ResponseError) Error() string       { return e.text }
+func (e s3ResponseError) HTTPStatusCode() int { return e.status }
+
 func TestClassifyErrorClass(t *testing.T) {
 	tests := []struct {
 		msg  string
@@ -81,15 +106,69 @@ func TestClassifyErrorClass(t *testing.T) {
 		// fd exhaustion is usually our own leak — deliberately NOT LocalFS.
 		{"open /tmp/f.dat: too many open files", ClassInternal},
 		{"open /tmp/aaaa...: file name too long", ClassLocalFS},
-		// Local-filesystem markers win over a bare status-code substring.
+		// A bare number in a path is not a status code.
 		{"open /data/run400/f.dat: permission denied", ClassLocalFS},
 		// HTTP 403 is still auth, not a local permission problem.
 		{"403 Forbidden: permission denied by policy", ClassAuth},
+
+		// Paths are full of status-like digits and words; only a stated status counts.
+		{"read /Users/jd/sweep/Run_503: is a directory", ClassLocalFS},
+		{"open /Users/jd/sweep/Run_503/in.dat/x: not a directory", ClassLocalFS},
+		{"mkdir /Users/jd/sweep/Run_503: file exists", ClassLocalFS},
+		// macOS privacy protection on Documents, Desktop and Downloads.
+		{"open /Users/jd/Documents/Run_503/in.dat: operation not permitted", ClassLocalFS},
+		{"read /Users/jd/sweep/Run_404/in.dat: input/output error", ClassInternal},
+		{`open C:\sweep\Run_503\in.dat: The system cannot find the file specified.`, ClassLocalFS},
+		{`open C:\sweep\Run_7\in.dat: Access is denied.`, ClassLocalFS},
+		{`write C:\sweep\Run_7\out.tar: There is not enough space on the disk.`, ClassDiskSpace},
+		{s3InternalError("Run_404"), ClassServerError},
+		{s3InternalError("network_model"), ClassServerError},
+		{"failed to stage block 0: PUT https://acct.blob.core.windows.net/c/Run_404/in.dat\n---\n" +
+			"RESPONSE 503: 503 The server is busy.\nERROR CODE: ServerBusy", ClassServerError},
+		{"failed to upload /tmp/uid-503/a.bin: failed to acquire upload lock: cannot inspect the existing " +
+			"upload lock of /tmp/uid-503/a.bin: open /tmp/uid-503/a.bin.upload.lock: input/output error", ClassInternal},
+		// A status is read only from a clause of its own, never from inside a path.
+		{"open /tmp/status503/input: permission denied", ClassLocalFS},
+		{`open C:\runs\HTTP 503\in.dat: Access is denied.`, ClassLocalFS},
+		{"read /Users/jd/Run 404 Not Found/in.dat: input/output error", ClassInternal},
+		{"open /Users/jd/frequency response 500 Hz/in.dat: permission denied", ClassLocalFS},
+		{"could not acquire upload lock for /tmp/status404/input: it kept being retaken", ClassInternal},
+		{s3InternalError("status404"), ClassServerError},
+		// A stated status with no class of its own is not left to a path's words.
+		{conflictUnder("network_model"), ClassInternal},
+		// A 504 is a timeout where its response says so, as S3's and Azure's do; its path never makes it one.
+		{"operation error S3: PutObject, https response error StatusCode: 504, RequestID: 8Q4NVDC1TMR1JS4Q, " +
+			"HostID: 7Zk0c2VkXhQ=, api error GatewayTimeout: Gateway Timeout", ClassTimeout},
+		{"failed to stage block 0: PUT https://acct.blob.core.windows.net/c/run_1/in.dat\n---\n" +
+			"RESPONSE 504: 504 Gateway Timeout\nERROR CODE UNAVAILABLE", ClassTimeout},
+		{"failed to upload /Users/jd/sweep/timeout_study/in.dat: register file failed: status 504: " +
+			"<html><head><title>504 Gateway Time-out</title></head></html>", ClassInternal},
 	}
 	for _, tt := range tests {
 		got := ClassifyErrorClass(tt.msg)
 		if got != tt.want {
 			t.Errorf("ClassifyErrorClass(%q) = %q, want %q", tt.msg, got, tt.want)
+		}
+	}
+
+	// A response that says it timed out is a timeout under any path, and a path
+	// never makes one: S3's RequestTimeout (a 400), an S3 body that timed out
+	// after its 200, and the API's 408 and 504.
+	for msg, want := range map[string]ErrorClass{
+		"operation error S3: UploadPart, https response error StatusCode: 400, RequestID: 8Q4NVDC1TMR1JS4Q, HostID: 7Zk0c2VkXhQ=, " +
+			"api error RequestTimeout: Your socket connection to the server was not read from or written to within the timeout period.": ClassTimeout,
+		"operation error S3: CompleteMultipartUpload, https response error StatusCode: 200, RequestID: 8Q4NVDC1TMR1JS4Q, " +
+			"HostID: 7Zk0c2VkXhQ=, context deadline exceeded": ClassTimeout,
+		"register file failed: status 408: 408 Request Timeout":      ClassTimeout,
+		"register file failed: status 504: upstream request timeout": ClassTimeout,
+		"operation error S3: CreateMultipartUpload, https response error StatusCode: 200, RequestID: 8Q4NVDC1TMR1JS4Q, " +
+			"HostID: 7Zk0c2VkXhQ=, deserialization failed, failed to decode response body, unexpected EOF": ClassInternal,
+		`register file failed: status 400: {"name": ["This field is required."]}`: ClassClientError,
+	} {
+		for _, at := range []string{"", "failed to upload /Users/jd/sweep/network_model/in.dat: ", "failed to upload /Users/jd/sweep/timeout_study/in.dat: "} {
+			if got := ClassifyErrorClass(at + msg); got != want {
+				t.Errorf("ClassifyErrorClass(%q) = %q, want %q", at+msg, got, want)
+			}
 		}
 	}
 }
@@ -114,6 +193,7 @@ func TestIsReportable(t *testing.T) {
 		{"network error", errors.New("connection refused"), CategoryTransfer, false},
 		{"dns error", errors.New("no such host api.rescale.com"), CategoryTransfer, false},
 		{"timeout", errors.New("context deadline exceeded"), CategoryTransfer, false},
+		{"Azure 504", &azcore.ResponseError{StatusCode: 504, ErrorCode: "GatewayTimeout"}, CategoryTransfer, false},
 		{"disk space", errors.New("no space left on device"), CategoryTransfer, false},
 		{"client 400", errors.New("API returned 400 bad request"), CategoryTransfer, false},
 		{"client 404", errors.New("status 404: file not found"), CategoryTransfer, false},
@@ -125,6 +205,14 @@ func TestIsReportable(t *testing.T) {
 
 		// Reportable: server errors and unclassified internal errors
 		{"server 500", errors.New("API returned 500 internal server error"), CategoryTransfer, true},
+		{"server 500 under Run_429", errors.New(s3InternalError("Run_429")), CategoryTransfer, true},
+		// The status an SDK error carries decides, where the text states none, and only its own words say it timed out.
+		{"Azure 503 under network_model/", fmt.Errorf("failed to upload /Users/jd/sweep/network_model/in.dat: %w",
+			&azcore.ResponseError{StatusCode: 503, ErrorCode: "ServerBusy"}), CategoryTransfer, true},
+		{"S3 503 under network_model/", fmt.Errorf("failed to upload /Users/jd/sweep/network_model/in.dat: %w",
+			s3ResponseError{503, "api error SlowDown: Please reduce your request rate"}), CategoryTransfer, true},
+		{"Azure 504 under timeout_study/", fmt.Errorf("failed to upload /Users/jd/sweep/timeout_study/in.dat: %w",
+			&azcore.ResponseError{StatusCode: 504}), CategoryTransfer, true},
 		{"server 502", errors.New("502 bad gateway"), CategoryTransfer, true},
 		{"server 503", errors.New("503 service unavailable"), CategoryTransfer, true},
 		{"unclassified error", errors.New("some unexpected error"), CategoryTransfer, true},
@@ -138,6 +226,48 @@ func TestIsReportable(t *testing.T) {
 				t.Errorf("IsReportable(%q) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// An S3 SDK error's own text, never the path wrapped around it, says whether its
+// response timed out. RequestTimeout (a 400) and a body that timed out after its
+// 200 are timeouts and not reported; a 200 that failed otherwise is reported.
+func TestClassify_S3ResponseError(t *testing.T) {
+	for _, tt := range []struct {
+		err    s3ResponseError
+		want   ErrorClass
+		report bool
+	}{
+		{s3ResponseError{400, "api error RequestTimeout: Your socket connection to the server was not read from or " +
+			"written to within the timeout period."}, ClassTimeout, false},
+		{s3ResponseError{200, "deserialization failed, failed to decode response body, context deadline exceeded"}, ClassTimeout, false},
+		{s3ResponseError{200, "deserialization failed, failed to decode response body, unexpected EOF"}, ClassInternal, true},
+	} {
+		err := fmt.Errorf("failed to upload /Users/jd/sweep/timeout_study/in.dat: %w", tt.err)
+		if class, report := Classify(err, CategoryTransfer, "files upload", "").ErrorClass, IsReportable(err, CategoryTransfer); class != tt.want || report != tt.report {
+			t.Errorf("classified %s, reportable %v; want %s, reportable %v: %v", class, report, tt.want, tt.report, err)
+		}
+	}
+}
+
+// An upload refused by another transfer's lock is the user's to act on, however
+// the refusal is worded.
+func TestUploadLockRefusalIsNotReportable(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "data.bin")
+	held, err := state.AcquireUploadLock(src)
+	if err != nil {
+		t.Fatalf("acquire the upload lock: %v", err)
+	}
+	defer state.ReleaseUploadLock(held)
+	lock, refusal := state.AcquireUploadLock(src)
+	if refusal == nil {
+		state.ReleaseUploadLock(lock)
+		t.Fatal("acquired an upload lock another transfer holds")
+	}
+
+	err = fmt.Errorf("failed to upload %s: S3Storage upload failed: failed to acquire upload lock: %w", src, refusal)
+	if class := Classify(err, CategoryTransfer, "files upload", "").ErrorClass; class != ClassLocalFS || IsReportable(err, CategoryTransfer) {
+		t.Errorf("classified %s, reportable %v; want %s, not reportable: %v", class, IsReportable(err, CategoryTransfer), ClassLocalFS, err)
 	}
 }
 

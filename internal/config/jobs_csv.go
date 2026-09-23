@@ -314,12 +314,12 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 			job.TarSubpath,
 			strings.Join(job.LocalInputFiles, ";"),
 			job.LicenseFeatureName,
-			strconv.Itoa(job.LicensesPerJob),
+			emptyIfZero(job.LicensesPerJob),
 			strings.Join(job.Automations, ";"),
 			strings.Join(job.InputFiles, ";"),
 			job.CIDRRule,
 			job.PublicKey,
-			strconv.Itoa(job.SSHPort),
+			emptyIfZero(job.SSHPort),
 		}
 		if err := writer.Write(row); err != nil {
 			return fmt.Errorf("failed to write job row: %w", err)
@@ -327,4 +327,14 @@ func SaveJobsCSV(path string, jobs []models.JobSpec) error {
 	}
 
 	return nil
+}
+
+// emptyIfZero writes an optional count or port. Zero is its unset value — no
+// license feature takes zero seats, and port 0 is no port — and LoadJobsCSV
+// reads an empty cell back as zero.
+func emptyIfZero(v int) string {
+	if v == 0 {
+		return ""
+	}
+	return strconv.Itoa(v)
 }

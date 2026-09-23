@@ -3,9 +3,15 @@ package reporting
 
 import (
 	"context"
+	"errors"
+	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/google/uuid"
+
+	"github.com/rescale/rescale-int/internal/cloud/state"
 )
 
 // ErrorCategory classifies the domain of an error.
@@ -37,7 +43,7 @@ const (
 	ClassServerError ErrorClass = "server_error" // 5xx — server-side failure
 	ClassInternal    ErrorClass = "internal"
 	ClassTimeout     ErrorClass = "timeout"
-	ClassLocalFS     ErrorClass = "local_fs" // local filesystem refused the operation (permissions, missing path, fd limit)
+	ClassLocalFS     ErrorClass = "local_fs" // local filesystem refused the operation (permissions, missing path, another transfer's upload lock)
 )
 
 // ClassifiedError holds a fully classified error ready for report building.
@@ -59,7 +65,7 @@ func Classify(err error, category ErrorCategory, operation, backend string) *Cla
 	}
 
 	msg := err.Error()
-	class := ClassifyErrorClass(msg)
+	class := classifyError(err)
 
 	severity := SeverityError
 	if category == CategoryAuth || class == ClassAuth {
@@ -100,7 +106,7 @@ func IsReportable(err error, category ErrorCategory) bool {
 	}
 
 	// Rate limit 429 is transient
-	if strings.Contains(msg, "429") || strings.Contains(msg, "rate limit") {
+	if status, _ := statusOf(err); status == 429 || strings.Contains(msg, "rate limit") {
 		return false
 	}
 
@@ -111,7 +117,7 @@ func IsReportable(err error, category ErrorCategory) bool {
 
 	// Classify the error to filter user-fixable problems.
 	// Only server errors (5xx) and unclassified internal errors are reportable.
-	class := ClassifyErrorClass(msg)
+	class := classifyError(err)
 	switch class {
 	case ClassAuth: // wrong/expired credentials — user can fix
 		return false
@@ -132,17 +138,87 @@ func IsReportable(err error, category ErrorCategory) bool {
 	return true
 }
 
-// ClassifyErrorClass maps error message patterns to an ErrorClass.
-// Exported for use as a partial-batch failure gate in transfer_service.go.
-// Mirrors the pattern matching in translateAPIError (file_bindings.go)
-// and classifyError (transferStore.ts).
-func ClassifyErrorClass(msg string) ErrorClass {
-	lower := strings.ToLower(msg)
+// classifyError is ClassifyErrorClass for an error value. An upload refused by
+// another transfer's lock is the user's to act on, whatever its text says.
+func classifyError(err error) ErrorClass {
+	if errors.Is(err, state.ErrUploadLocked) {
+		return ClassLocalFS
+	}
+	status, response := statusOf(err)
+	return classifyMessage(err.Error(), status, response)
+}
 
-	switch {
-	case strings.Contains(lower, "401") || strings.Contains(lower, "unauthorized"):
+// statusOf returns the HTTP status of the response err reports and the text
+// reporting it. An S3 or Azure SDK error carries both itself, free of any path
+// wrapped around it; for any other error both are read from err's text.
+func statusOf(err error) (int, string) {
+	var s3Err interface{ HTTPStatusCode() int } // smithy-go's ResponseError, behind every S3 response error
+	if errors.As(err, &s3Err) {
+		return s3Err.HTTPStatusCode(), s3Err.(error).Error()
+	}
+	var azureErr *azcore.ResponseError
+	if errors.As(err, &azureErr) {
+		return azureErr.StatusCode, azureErr.Error()
+	}
+	return httpStatus(err.Error()), err.Error()
+}
+
+// statusPattern finds the HTTP status a message states: a code after "status",
+// "StatusCode", "HTTP" or "RESPONSE" and a separator, or one ahead of its reason
+// phrase, opening after a space or punctuation and closing at punctuation or a
+// line's end, as every status formatted here or by the SDKs does. A code inside
+// a path or name runs on instead: "/tmp/status503/", "frequency response 500 Hz/".
+var statusPattern = regexp.MustCompile(`(?i)(?:^|[\s(\["',;:>])(?:` +
+	`(?:status(?:\s*code)?|http(?:/[\d.]+)?|response)(?:\s*[:=]\s*|\s+)([1-5]\d\d)|` +
+	`([1-5]\d\d) (?:bad request|unauthorized|forbidden|not found|too many requests|internal server error|bad gateway|service unavailable)` +
+	`)(?:$|[\r\n)\]"',;:<]|\.(?:\s|$))`)
+
+// httpStatus returns the HTTP status msg states, or 0 if it states none.
+func httpStatus(msg string) int {
+	if m := statusPattern.FindStringSubmatch(msg); m != nil {
+		code, _ := strconv.Atoi(m[1] + m[2])
+		return code
+	}
+	return 0
+}
+
+// ClassifyErrorClass maps an error message to an ErrorClass. Exported for the
+// partial-batch failure gate in transfer_service.go, which has only the text.
+func ClassifyErrorClass(msg string) ErrorClass {
+	return classifyMessage(msg, httpStatus(msg), msg)
+}
+
+// classifyMessage maps an error message, the HTTP status of the response it
+// reports (0 for none) and the text reporting that response to an ErrorClass.
+func classifyMessage(msg string, status int, response string) ErrorClass {
+	// Whether the response says it timed out: its own words run from the status
+	// its text states, so a path, name or URL ahead of that never counts.
+	said := strings.ToLower(response)
+	if loc := statusPattern.FindStringIndex(said); loc != nil {
+		said = said[loc[0]:]
+	}
+	timedOut := strings.Contains(said, "timeout") || strings.Contains(said, "deadline exceeded")
+	switch status {
+	case 0: // no status: the words below decide
+	case 401, 403:
 		return ClassAuth
-	case strings.Contains(lower, "403") || strings.Contains(lower, "forbidden"):
+	case 400, 404:
+		if timedOut { // S3's RequestTimeout, for a connection left idle, is a 400
+			return ClassTimeout
+		}
+		return ClassClientError
+	case 500, 502, 503:
+		return ClassServerError
+	default: // a status with no class of its own, such as 504, 409 or a 200 whose body then failed; the words below could be a path's
+		if timedOut {
+			return ClassTimeout
+		}
+		return ClassInternal
+	}
+
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "unauthorized") || strings.Contains(lower, "forbidden"):
 		return ClassAuth
 	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded"):
 		return ClassTimeout
@@ -151,24 +227,26 @@ func ClassifyErrorClass(msg string) ErrorClass {
 		return ClassNetwork
 	// "disc quota" is the macOS/BSD spelling of EDQUOT; Linux says "disk quota".
 	case strings.Contains(lower, "no space left") || strings.Contains(lower, "disk quota") ||
-		strings.Contains(lower, "disc quota"):
+		strings.Contains(lower, "disc quota") || strings.Contains(lower, "not enough space on the disk"):
 		return ClassDiskSpace
-	// Local filesystem refusals. These come from the user's own machine — a
-	// protected download directory, a path that disappeared mid-transfer, a
-	// read-only volume — so they are never a Rescale failure worth a report.
-	// Checked before the 4xx/5xx digit matches, whose substring tests would
-	// otherwise claim messages containing a bare number. Deliberately absent:
-	// "too many open files" — fd exhaustion is usually our own descriptor
-	// leak, so it stays reportable.
+	// Local filesystem refusals, in Unix wording and then Windows'. These come
+	// from the user's own machine — a directory macOS privacy protection guards,
+	// a path that disappeared mid-transfer, a read-only volume — so they are
+	// never a Rescale failure worth a report. Deliberately absent: "too many
+	// open files" (fd exhaustion is usually our own descriptor leak) and I/O
+	// errors, which stay reportable.
 	case strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "operation not permitted") ||
 		strings.Contains(lower, "no such file or directory") ||
 		strings.Contains(lower, "read-only file system") ||
-		strings.Contains(lower, "file name too long"):
+		strings.Contains(lower, "file name too long") ||
+		strings.Contains(lower, "is a directory") ||
+		strings.Contains(lower, "not a directory") ||
+		strings.Contains(lower, "file exists") ||
+		strings.Contains(lower, "the system cannot find the") ||
+		strings.Contains(lower, "access is denied"):
 		return ClassLocalFS
-	case strings.Contains(lower, "400") || strings.Contains(lower, "404"):
-		return ClassClientError
-	case strings.Contains(lower, "500") || strings.Contains(lower, "502") ||
-		strings.Contains(lower, "503") || strings.Contains(lower, "internal server"):
+	case strings.Contains(lower, "internal server"):
 		return ClassServerError
 	default:
 		return ClassInternal

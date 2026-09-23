@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"log"
 	nethttp "net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,9 @@ func TestUploadCheckpointFailureStopsBeforeDestructiveSteps(t *testing.T) {
 
 	breakStateWrites(t, stateFile)
 
+	var logged strings.Builder // what --verbose shows
+	defer log.SetOutput(log.Writer())
+	log.SetOutput(&logged)
 	handed := runUploadStage(t, p, &workItem{index: 1, jobSpec: p.jobs[0], state: st})
 
 	if uploader.calls != 1 {
@@ -109,8 +113,11 @@ func TestUploadCheckpointFailureStopsBeforeDestructiveSteps(t *testing.T) {
 	if len(handed) != 0 {
 		t.Errorf("%d item(s) went on to job creation with an unrecorded upload", len(handed))
 	}
-	if failed := p.countFailedJobs(); failed != 1 {
-		t.Errorf("run counts %d failed job(s), want 1", failed)
+	if failed := p.FailedJobs(); len(failed) != 1 || !strings.HasPrefix(failed[0].ErrorMessage, "could not record upload state: ") {
+		t.Errorf("run names %d failed job(s), want job_1 with the checkpoint's reason", len(failed))
+	}
+	if !strings.Contains(logged.String(), "job_1: could not record upload state: ") {
+		t.Errorf("the log does not name job_1 with its reason:\n%s", logged.String())
 	}
 }
 

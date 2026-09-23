@@ -451,6 +451,9 @@ func (p *Pipeline) logf(level, stage, jobName, format string, args ...interface{
 		p.onLog(level, message, stage, jobName)
 	} else {
 		// Only log directly when no callback is set (CLI mode without Engine)
+		if jobName != "" {
+			message = jobName + ": " + message
+		}
 		log.Printf("[%s] [%s] %s", level, stage, message)
 	}
 }
@@ -903,20 +906,26 @@ func clearStaleFailures(state *models.JobState) bool {
 	return changed
 }
 
-// countFailedJobs counts jobs that failed at any stage. The state manager is the
-// authoritative record (it is what --state resume reads back), so counting there
-// covers every failure path without a counter at each one.
+// countFailedJobs counts the jobs FailedJobs names.
 func (p *Pipeline) countFailedJobs() int {
+	return len(p.FailedJobs())
+}
+
+// FailedJobs returns the jobs that failed at any stage, in state order, each
+// with the reason the run recorded for it. The state manager is the
+// authoritative record (it is what --state resume reads back), so reading it
+// covers every failure path without a list kept at each one.
+func (p *Pipeline) FailedJobs() []*models.JobState {
 	if p.stateMgr == nil {
-		return 0
+		return nil
 	}
-	failed := 0
+	var failed []*models.JobState
 	for _, st := range p.stateMgr.GetAllStates() {
 		if st == nil {
 			continue
 		}
 		if st.TarStatus == "failed" || st.UploadStatus == "failed" || st.SubmitStatus == "failed" {
-			failed++
+			failed = append(failed, st)
 		}
 	}
 	return failed
