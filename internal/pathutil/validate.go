@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/rescale/rescale-int/internal/ipc"
 )
@@ -78,6 +79,71 @@ func ValidateWritablePath(path string, consumer PathConsumer) PathValidationResu
 	}
 
 	return probeWritable(resolved)
+}
+
+// The drive types GetDriveType reports for local volumes and network drives,
+// mirrored as plain numbers because golang.org/x/sys/windows builds on Windows
+// alone and validateWindowsStrict is compiled and tested everywhere.
+const (
+	driveRemovable = 2 // DRIVE_REMOVABLE
+	driveFixed     = 3 // DRIVE_FIXED
+	driveRemote    = 4 // DRIVE_REMOTE
+	driveCDROM     = 5 // DRIVE_CDROM
+	driveRAMDisk   = 6 // DRIVE_RAMDISK
+)
+
+// validateWindowsStrict runs the Windows Service-SYSTEM strictness check.
+// SYSTEM cannot see the drive letters a user maps to network shares, so a path
+// on a network drive must resolve to its UNC path via WNetGetUniversalName, or
+// it is refused. A local drive is probed as it is: WNetGetUniversalName answers
+// ERROR_NOT_CONNECTED for any drive that is not redirected, so asking it about
+// a local drive would refuse that drive. Any other drive is refused, since
+// nothing says SYSTEM can reach it.
+func validateWindowsStrict(resolved string) PathValidationResult {
+	if len(resolved) < 2 || resolved[1] != ':' {
+		// Already UNC or a non-drive path; skip the WNet step.
+		return probeWritable(resolved)
+	}
+
+	switch driveTypeResolver(resolved[:2] + `\`) {
+	case driveRemovable, driveFixed, driveCDROM, driveRAMDisk:
+		return probeWritable(resolved)
+	case driveRemote: // resolved through WNet below
+	default:
+		return PathValidationResult{
+			ResolvedPath: resolved,
+			ErrorCode:    ipc.CodeDownloadFolderInaccessible,
+			Reason: fmt.Sprintf(
+				"Windows does not recognize drive %s as a local or network drive. Use a local path or a UNC path (\\\\server\\share) instead.",
+				resolved[:2],
+			),
+		}
+	}
+
+	unc, err := wnetResolver(resolved)
+	if err != nil {
+		return PathValidationResult{
+			ResolvedPath: resolved,
+			ErrorCode:    ipc.CodeDownloadFolderInaccessible,
+			Reason: fmt.Sprintf(
+				"Drive %s is a user-session mapping and is not reachable from the Windows Service (SYSTEM): %s. Use a UNC path (\\\\server\\share) or a local path instead.",
+				resolved[:2], strings.TrimSuffix(err.Error(), "."),
+			),
+		}
+	}
+
+	// Probe the resolved UNC for writability, but report the user-entered
+	// path as the resolved path (spec §13.4 forbids silent rewrite).
+	probe := probeWritable(unc)
+	if !probe.Reachable {
+		probe.ResolvedPath = resolved
+		return probe
+	}
+	return PathValidationResult{
+		Reachable:    true,
+		ResolvedPath: unc,
+		WasUNC:       true,
+	}
 }
 
 // probeWritable attempts to write and remove a small marker file in the

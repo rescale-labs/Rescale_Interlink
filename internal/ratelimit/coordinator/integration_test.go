@@ -2,9 +2,6 @@ package coordinator
 
 import (
 	"context"
-	"net"
-	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -130,9 +127,9 @@ func TestEmergencyCapWhenNoCoordinator(t *testing.T) {
 		scope        ratelimit.Scope
 		expectedRate float64
 	}{
-		{ratelimit.ScopeUser, (2.0 / 4.0) * 0.5},             // 0.25
-		{ratelimit.ScopeJobSubmission, (0.278 / 4.0) * 0.5},   // ~0.035
-		{ratelimit.ScopeJobsUsage, (25.0 / 4.0) * 0.5},        // 3.125
+		{ratelimit.ScopeUser, (2.0 / 4.0) * 0.5},            // 0.25
+		{ratelimit.ScopeJobSubmission, (0.278 / 4.0) * 0.5}, // ~0.035
+		{ratelimit.ScopeJobsUsage, (25.0 / 4.0) * 0.5},      // 3.125
 	}
 
 	for _, tt := range tests {
@@ -149,16 +146,10 @@ func TestEmergencyCapWhenNoCoordinator(t *testing.T) {
 }
 
 func TestClientReconnectAfterCoordinatorRestart(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "coordinator-restart")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	sockPath := filepath.Join(tmpDir, "test.sock")
+	sockPath := testEndpoint(t)
 
 	// Start first server
-	listener1, err := net.Listen("unix", sockPath)
+	listener1, err := listenTest(sockPath)
 	if err != nil {
 		t.Fatalf("failed to listen: %v", err)
 	}
@@ -186,7 +177,7 @@ func TestClientReconnectAfterCoordinatorRestart(t *testing.T) {
 	}
 
 	// Start second server on same socket
-	listener2, err := net.Listen("unix", sockPath)
+	listener2, err := listenTest(sockPath)
 	if err != nil {
 		t.Fatalf("failed to listen on restart: %v", err)
 	}

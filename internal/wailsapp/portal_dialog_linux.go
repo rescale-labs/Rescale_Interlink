@@ -29,12 +29,12 @@ import (
 )
 
 const (
-	portalBusName     = "org.freedesktop.portal.Desktop"
-	portalObjPath     = "/org/freedesktop/portal/desktop"
-	portalFileCh      = "org.freedesktop.portal.FileChooser"
-	portalReqIface    = "org.freedesktop.portal.Request"
-	portalReqClose    = "org.freedesktop.portal.Request.Close"
-	portalRespOnSig   = portalReqIface + ".Response"
+	portalBusName          = "org.freedesktop.portal.Desktop"
+	portalObjPath          = "/org/freedesktop/portal/desktop"
+	portalFileCh           = "org.freedesktop.portal.FileChooser"
+	portalReqIface         = "org.freedesktop.portal.Request"
+	portalReqClose         = "org.freedesktop.portal.Request.Close"
+	portalRespOnSig        = portalReqIface + ".Response"
 	portalDialogTimeout    = 5 * time.Minute
 	portalStillOpenWarn    = 30 * time.Second
 	portalRequestCloseWait = 2 * time.Second
@@ -228,8 +228,8 @@ func buildPortalSaveOptions(defaultName string, filters []runtime.FileFilter) ma
 	if defaultName != "" {
 		out["current_name"] = dbus.MakeVariant(defaultName)
 	}
-	if len(filters) > 0 {
-		out["filters"] = dbus.MakeVariant(convertFilters(filters))
+	if converted := convertFilters(filters); len(converted) > 0 {
+		out["filters"] = dbus.MakeVariant(converted)
 	}
 	return out
 }

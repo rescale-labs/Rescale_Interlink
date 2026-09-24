@@ -3,7 +3,9 @@ package localfs
 import (
 	"context"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"sync"
@@ -88,8 +90,8 @@ func addSymlinks(t *testing.T, root string, links [][2]string) {
 	}
 }
 
-// drainWalkStreamInOrder collects all entries from WalkStream, preserving each
-// channel's own arrival order.
+// drainWalkStreamInOrder collects all entries from WalkStream as slash-separated
+// paths relative to root, preserving each channel's own arrival order.
 //
 // Each channel gets its own goroutine. A single select loop over both could not
 // distinguish the walker's send order from the pseudo-random pick select makes
@@ -106,14 +108,14 @@ func drainWalkStreamInOrder(t *testing.T, root string, opts WalkOptions) (dirs, 
 		defer wg.Done()
 		for entry := range dirChan {
 			rel, _ := filepath.Rel(root, entry.Path)
-			dirs = append(dirs, rel)
+			dirs = append(dirs, filepath.ToSlash(rel))
 		}
 	}()
 	go func() {
 		defer wg.Done()
 		for entry := range fileChan {
 			rel, _ := filepath.Rel(root, entry.Path)
-			files = append(files, rel)
+			files = append(files, filepath.ToSlash(rel))
 		}
 	}()
 	wg.Wait()
@@ -140,7 +142,8 @@ func drainWalkStream(t *testing.T, root string, opts WalkOptions) (dirs, files [
 }
 
 // walkCollectRel runs WalkCollect and returns its three result slices as sorted
-// paths relative to root, so they can be compared with drainWalkStream's.
+// slash-separated paths relative to root, so they can be compared with
+// drainWalkStream's.
 func walkCollectRel(t *testing.T, root string, opts WalkOptions) (dirs, files, symlinks []string) {
 	t.Helper()
 	result, err := WalkCollect(root, opts)
@@ -150,7 +153,8 @@ func walkCollectRel(t *testing.T, root string, opts WalkOptions) (dirs, files, s
 	rel := func(entries []FileEntry) []string {
 		paths := make([]string, len(entries))
 		for i, e := range entries {
-			paths[i], _ = filepath.Rel(root, e.Path)
+			rel, _ := filepath.Rel(root, e.Path)
+			paths[i] = filepath.ToSlash(rel)
 		}
 		sort.Strings(paths)
 		return paths
@@ -312,7 +316,7 @@ func TestWalkStream_PerChannelOrdering(t *testing.T) {
 			// file's parent is announced on dirChan at some point.
 			seen := map[string]bool{".": true}
 			for _, d := range dirs {
-				if parent := filepath.Dir(d); !seen[parent] {
+				if parent := path.Dir(d); !seen[parent] {
 					t.Errorf("directory %q arrived before its parent %q; order: %v", d, parent, dirs)
 				}
 				if seen[d] {
@@ -321,7 +325,7 @@ func TestWalkStream_PerChannelOrdering(t *testing.T) {
 				seen[d] = true
 			}
 			for _, f := range files {
-				if parent := filepath.Dir(f); !seen[parent] {
+				if parent := path.Dir(f); !seen[parent] {
 					t.Errorf("file %q has no dirChan entry for its parent %q; dirs: %v", f, parent, dirs)
 				}
 			}
@@ -366,6 +370,11 @@ func TestWalkStream_WalkCollectConsistency(t *testing.T) {
 	}
 }
 
+// noDirLinksOnWindows is why a test that follows a link to a directory skips on
+// Windows: getDirIdentity has no identity there to detect a cycle with, so the
+// walker reports such a link as skipped instead (inode_windows.go).
+const noDirLinksOnWindows = "Windows does not follow links to directories"
+
 // TestWalkStream_FollowSymlinks covers what a followed link contributes to the
 // walk. Every row builds a tree, adds its links, and drains WalkStream with the
 // same options bar FollowSymlinks; the wants are membership claims, since a row
@@ -376,6 +385,7 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 		tree        func(*testing.T) string // nil: createTestTree
 		links       [][2]string
 		follow      bool
+		dirLink     bool // follows a link to a directory; see noDirLinksOnWindows
 		wantDirs    []string
 		wantFiles   []string
 		absentDirs  []string
@@ -385,6 +395,7 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			name:      "symlinked_dir",
 			links:     [][2]string{{"b", "link_to_b"}},
 			follow:    true,
+			dirLink:   true,
 			wantDirs:  []string{"link_to_b"},
 			wantFiles: []string{"b/file5.txt", "link_to_b/file5.txt"},
 		},
@@ -417,6 +428,7 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			name:      "path_rewriting",
 			links:     [][2]string{{"a/sub", "link"}},
 			follow:    true,
+			dirLink:   true,
 			wantDirs:  []string{"link", "link/deep"},
 			wantFiles: []string{"link/file3.txt", "link/deep/file4.txt"},
 		},
@@ -426,12 +438,14 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			tree:      func(t *testing.T) string { return mkTree(t, nil, []string{"shared/data.txt"}) },
 			links:     [][2]string{{"shared", "linkA"}, {"shared", "linkB"}},
 			follow:    true,
+			dirLink:   true,
 			wantFiles: []string{"linkA/data.txt", "linkB/data.txt", "shared/data.txt"},
 		},
 		{
 			name:     "alias_root_dir_entry",
 			links:    [][2]string{{"a/sub", "link_to_sub"}},
 			follow:   true,
+			dirLink:  true,
 			wantDirs: []string{"link_to_sub"},
 		},
 		{
@@ -441,6 +455,7 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			tree:      func(t *testing.T) string { return mkTree(t, []string{"b"}, []string{"a/sub/file.txt"}) },
 			links:     [][2]string{{"a/sub", "b/link"}},
 			follow:    true,
+			dirLink:   true,
 			wantDirs:  []string{"b/link"},
 			wantFiles: []string{"b/link/file.txt"},
 		},
@@ -448,6 +463,9 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.dirLink && runtime.GOOS == "windows" {
+				t.Skip(noDirLinksOnWindows)
+			}
 			makeTree := tc.tree
 			if makeTree == nil {
 				makeTree = createTestTree
@@ -526,6 +544,9 @@ func TestWalkStream_FollowSymlinks_NoHang(t *testing.T) {
 }
 
 func TestWalkCollect_FollowSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip(noDirLinksOnWindows)
+	}
 	root := createTestTree(t)
 	addSymlinks(t, root, [][2]string{{"b", "link_to_b"}})
 

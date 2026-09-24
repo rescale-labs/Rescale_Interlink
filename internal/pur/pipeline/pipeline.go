@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -183,6 +184,12 @@ func tarballDir(jobs []models.JobSpec) (string, error) {
 // safeRemoveTar tests for it, so the name is load-bearing rather than cosmetic.
 const archiveNamespacePrefix = ".rescale-int-"
 
+// The stateless seed's clock, which tests fix, and its per-process count.
+var (
+	namespaceClock = time.Now
+	namespaceCount atomic.Uint64
+)
+
 // archiveNamespace names the directory a batch writes its archives to, inside
 // the jobs' common parent.
 //
@@ -199,7 +206,9 @@ const archiveNamespacePrefix = ".rescale-int-"
 // recomputed to the path it had before.
 //
 // With no state file there is nothing to resume, so a value unique to this
-// process stands in. That is the case with no other protection at all: two
+// batch stands in: the PID, the clock and a count of this process's batches,
+// because two batches can read one clock value (Windows' clock moves once per
+// timer tick). That is the case with no other protection at all: two
 // concurrent stateless runs over one file list share every input the name is
 // built from.
 func archiveNamespace(statePath string) string {
@@ -209,7 +218,7 @@ func archiveNamespace(statePath string) string {
 			seed = abs
 		}
 	} else {
-		seed = fmt.Sprintf("pid-%d-%d", os.Getpid(), time.Now().UnixNano())
+		seed = fmt.Sprintf("pid-%d-%d-%d", os.Getpid(), namespaceClock().UnixNano(), namespaceCount.Add(1))
 	}
 
 	h := fnv.New32a()

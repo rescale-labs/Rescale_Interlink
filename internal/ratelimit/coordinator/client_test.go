@@ -2,29 +2,20 @@ package coordinator
 
 import (
 	"context"
-	"net"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
-// startTestServers creates a server on a temp socket, starts it, and returns
-// numClients clients connected to it plus a cleanup function.
+// startTestServers creates a server on the test's own endpoint, starts it, and
+// returns numClients clients connected to it plus a cleanup function.
 func startTestServers(t *testing.T, numClients int) ([]*Client, *Server, func()) {
 	t.Helper()
 
-	tmpDir, err := os.MkdirTemp("", "coordinator-test")
+	sockPath := testEndpoint(t)
+	listener, err := listenTest(sockPath)
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	sockPath := filepath.Join(tmpDir, "test.sock")
-
-	listener, err := net.Listen("unix", sockPath)
-	if err != nil {
-		os.RemoveAll(tmpDir)
 		t.Fatalf("failed to listen: %v", err)
 	}
 
@@ -41,7 +32,6 @@ func startTestServers(t *testing.T, numClients int) ([]*Client, *Server, func())
 			c.Close()
 		}
 		srv.Stop()
-		os.RemoveAll(tmpDir)
 	}
 
 	return clients, srv, cleanup
@@ -106,19 +96,12 @@ func TestClientAcquireWaitAndRetry(t *testing.T) {
 }
 
 func TestClientFallbackOnDisconnect(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "coordinator-test")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	sockPath := filepath.Join(tmpDir, "nonexistent.sock")
-	client := NewClientWithPath(sockPath)
+	client := NewClientWithPath(testEndpoint(t)) // nothing listens there
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	err = client.Acquire(ctx, "https://platform.rescale.com", "abcdef01", ratelimit.ScopeUser)
+	err := client.Acquire(ctx, "https://platform.rescale.com", "abcdef01", ratelimit.ScopeUser)
 	if err != ErrCoordinatorUnreachable {
 		t.Errorf("expected ErrCoordinatorUnreachable, got: %v", err)
 	}

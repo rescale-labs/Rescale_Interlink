@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
@@ -125,7 +126,7 @@ func TestStatelessRunCompletes(t *testing.T) {
 
 // TestStatelessRunsGetDistinctArchives keeps the seed archiveNamespace falls
 // back on when there is no state file to hash: FilePath() still answers "" for
-// an in-memory manager, so the pid-and-clock seed is still what names the
+// an in-memory manager, so the stateless seed is still what names the
 // directory, and two stateless batches over one file list do not write one
 // archive.
 func TestStatelessRunsGetDistinctArchives(t *testing.T) {
@@ -141,6 +142,12 @@ func TestStatelessRunsGetDistinctArchives(t *testing.T) {
 	jobs := func() []models.JobSpec {
 		return []models.JobSpec{{JobName: "job_1", LocalInputFiles: []string{deck}}}
 	}
+
+	// Both batches read one clock value, as two built within one tick of
+	// Windows' clock (15.6 ms by default) do.
+	now := time.Now()
+	namespaceClock = func() time.Time { return now }
+	t.Cleanup(func() { namespaceClock = time.Now })
 
 	first := newBatch(t, jobs(), "")
 	if got := first.stateMgr.FilePath(); got != "" {

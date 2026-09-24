@@ -8,52 +8,27 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-
-	"github.com/rescale/rescale-int/internal/ipc"
 )
 
-// wnetResolver is the injection point for WNetGetUniversalName. Production
-// code uses wnetResolveReal; tests can swap in a fake.
-var wnetResolver = wnetResolveReal
+// wnetResolver and driveTypeResolver are the injection points for
+// WNetGetUniversalName and GetDriveType. Production code uses the real calls;
+// tests swap in fakes.
+var (
+	wnetResolver      = wnetResolveReal
+	driveTypeResolver = driveTypeReal
+)
 
 // universalNameInfoLevel selects the REMOTE_NAME_INFO layout returned by
 // WNetGetUniversalNameW. See MSDN: UNIVERSAL_NAME_INFO_LEVEL = 1.
 const universalNameInfoLevel = 1
 
-// validateWindowsStrict runs the Windows Service-SYSTEM strictness check:
-// drive-letter paths are resolved to UNC via WNetGetUniversalName. A drive
-// that cannot be resolved by WNet (ERROR_NOT_CONNECTED / similar) is a
-// user-session-only mapping that SYSTEM cannot see; the path is refused.
-func validateWindowsStrict(resolved string) PathValidationResult {
-	if len(resolved) < 2 || resolved[1] != ':' {
-		// Already UNC or a non-drive path; skip the WNet step.
-		return probeWritable(resolved)
-	}
-
-	unc, err := wnetResolver(resolved)
+// driveTypeReal calls GetDriveTypeW for a drive root such as `C:\`.
+func driveTypeReal(root string) uint32 {
+	rootPtr, err := syscall.UTF16PtrFromString(root)
 	if err != nil {
-		return PathValidationResult{
-			ResolvedPath: resolved,
-			ErrorCode:    ipc.CodeDownloadFolderInaccessible,
-			Reason: fmt.Sprintf(
-				"Drive %s is a user-session mapping and is not reachable from the Windows Service (SYSTEM): %v. Use a UNC path (\\\\server\\share) or a local path instead.",
-				resolved[:2], err,
-			),
-		}
+		return windows.DRIVE_UNKNOWN
 	}
-
-	// Probe the resolved UNC for writability, but report the user-entered
-	// path as the resolved path (spec §13.4 forbids silent rewrite).
-	probe := probeWritable(unc)
-	if !probe.Reachable {
-		probe.ResolvedPath = resolved
-		return probe
-	}
-	return PathValidationResult{
-		Reachable:    true,
-		ResolvedPath: unc,
-		WasUNC:       true,
-	}
+	return windows.GetDriveType(rootPtr)
 }
 
 // wnetResolveReal calls WNetGetUniversalNameW. Returns the UNC form of a

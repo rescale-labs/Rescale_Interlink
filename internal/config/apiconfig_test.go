@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -151,6 +152,9 @@ api_key = partial-key
 func TestAPIConfigPathForUser(t *testing.T) {
 	path := APIConfigPathForUser("/Users/testuser")
 	expected := filepath.Join("/Users/testuser", ".config", "rescale", "apiconfig")
+	if runtime.GOOS == "windows" {
+		expected = filepath.Join("/Users/testuser", "AppData", "Roaming", "Rescale", "Interlink", "apiconfig")
+	}
 	if path != expected {
 		t.Errorf("APIConfigPathForUser() = %s, want %s", path, expected)
 	}

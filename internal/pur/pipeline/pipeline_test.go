@@ -46,7 +46,7 @@ func TestPipeline_PathNormalization(t *testing.T) {
 		},
 		{
 			JobName:         "test_2",
-			Directory:       "/absolute/path/Run_2",
+			Directory:       filepath.Join(t.TempDir(), "Run_2"), // "/absolute/..." has no drive on Windows
 			AnalysisCode:    "user_included",
 			AnalysisVersion: "1.0",
 			Command:         "./run.sh",

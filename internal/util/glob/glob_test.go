@@ -3,6 +3,7 @@ package glob
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -112,9 +113,27 @@ func TestUnderRoot(t *testing.T) {
 		t.Error("UnderRoot accepted a malformed pattern")
 	}
 
-	for _, bad := range []string{"../cases/*.inp", filepath.Join(root, "cases", "*.inp")} {
-		if _, err := UnderRoot(filepath.Join(root, "proj [v2]"), bad); err == nil {
-			t.Errorf("UnderRoot accepted %q, which names files outside the root", bad)
+	// Each refusal names the pattern as it was typed. The backslash rows hold
+	// one on every platform, and a Windows path must not come back doubled.
+	// Control characters and quotes are escaped, so a pattern cannot break the
+	// message across lines or send the terminal an escape sequence.
+	abs := filepath.Join(root, "cases", "*.inp")
+	for _, tc := range []struct{ bad, want string }{
+		{"../cases/*.inp", `"../cases/*.inp"`},
+		{`../cases\*.inp`, `"../cases\*.inp"`},
+		{abs, `"` + abs + `"`},
+		{filepath.Join(root, `cases\*.inp`), `"` + filepath.Join(root, `cases\*.inp`) + `"`},
+		{"../cases\n*.inp", `"../cases\n*.inp"`},
+		{"../cases\r*.inp", `"../cases\r*.inp"`},
+		{"../cases\x1b[2J*.inp", `"../cases\x1b[2J*.inp"`},
+		{`../"cases"/*.inp`, `"../\"cases\"/*.inp"`},
+		{abs + "\n", `"` + abs + `\n"`},
+	} {
+		_, err := UnderRoot(filepath.Join(root, "proj [v2]"), tc.bad)
+		if err == nil {
+			t.Errorf("UnderRoot accepted %q, which names files outside the root", tc.bad)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("error does not show the pattern as %s: %v", tc.want, err)
 		}
 	}
 }

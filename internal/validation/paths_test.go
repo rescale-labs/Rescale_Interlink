@@ -50,6 +50,13 @@ func TestValidateFilename(t *testing.T) {
 // plus the escape classes. Symlinks are never resolved, so a path naming one
 // is judged by its string form alone.
 func TestValidatePathInDirectory(t *testing.T) {
+	// "/etc/passwd" is only rooted on Windows; Abs puts it on the current drive,
+	// the one "/tmp/uploads" is resolved on, so it is absolute everywhere.
+	outside, err := filepath.Abs("/etc/passwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	tests := []struct {
 		name    string
 		path    string
@@ -62,7 +69,7 @@ func TestValidatePathInDirectory(t *testing.T) {
 		{"relative_base_made_absolute", "file.txt", "uploads", false},
 		{"escape_one_level", "../file.txt", "/tmp/uploads", true},
 		{"escape_via_interior_parent", "subdir/../../../etc/passwd", "/tmp/uploads", true},
-		{"absolute_outside_base", "/etc/passwd", "/tmp/uploads", true},
+		{"absolute_outside_base", outside, "/tmp/uploads", true},
 		{"empty_path", "", "/tmp/uploads", true},
 		{"empty_base", "file.txt", "", true},
 	}

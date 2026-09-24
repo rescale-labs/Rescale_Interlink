@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -75,14 +76,14 @@ func UnderRoot(root, pattern string) ([]string, error) {
 	// filepath.IsAbs first: a Windows "C:/x" survives fs.ValidPath, which only
 	// knows about the leading slash.
 	if filepath.IsAbs(pattern) {
-		return nil, fmt.Errorf("%q is an absolute path, but patterns are matched inside the scan root %s",
-			pattern, root)
+		return nil, fmt.Errorf("%s is an absolute path, but patterns are matched inside the scan root %s",
+			quoted(pattern), root)
 	}
 
 	cleaned := path.Clean(filepath.ToSlash(pattern))
 	if !fs.ValidPath(cleaned) {
-		return nil, fmt.Errorf("%q reaches outside the scan root %s; patterns must name files under the root",
-			pattern, root)
+		return nil, fmt.Errorf("%s reaches outside the scan root %s; patterns must name files under the root",
+			quoted(pattern), root)
 	}
 
 	matches, err := fs.Glob(os.DirFS(root), cleaned)
@@ -95,4 +96,10 @@ func UnderRoot(root, pattern string) ([]string, error) {
 		joined = append(joined, filepath.Join(root, filepath.FromSlash(m)))
 	}
 	return joined, nil
+}
+
+// quoted quotes a pattern for a message as %q does, but leaves each backslash
+// single, so a Windows path reads as it was typed.
+func quoted(pattern string) string {
+	return strings.ReplaceAll(strconv.Quote(pattern), `\\`, `\`)
 }

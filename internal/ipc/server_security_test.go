@@ -104,9 +104,9 @@ func TestServiceModeMutatingOpsUseCallerSID(t *testing.T) {
 	clientSuppliedSID := "S-1-5-21-OTHER-USER"
 
 	tests := []struct {
-		name     string
-		msgType  MessageType
-		getUID   func() string
+		name    string
+		msgType MessageType
+		getUID  func() string
 	}{
 		{"PauseUser", MsgPauseUser, func() string { return handler.lastPauseUserID }},
 		{"ResumeUser", MsgResumeUser, func() string { return handler.lastResumeUserID }},
@@ -207,6 +207,9 @@ func TestSubprocessModeUnchanged(t *testing.T) {
 
 	clientUserID := "user-from-client"
 	callerSID := "S-1-5-21-SOME-SID"
+	// Subprocess mode lets only the daemon's owner pause it; NewServer recorded
+	// this process's own SID, which a test SID never matches.
+	server.ownerSID = callerSID
 
 	// In subprocess mode, the client-supplied userID should be used directly
 	req := NewRequestWithUser(MsgPauseUser, clientUserID)

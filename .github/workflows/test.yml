@@ -51,12 +51,12 @@ jobs:
             ~/.cache/go-build
           key: go1.26.7-linux-${{ hashFiles('go.sum') }}
 
-      # internal/wailsapp is left out too until the product bug that fails its
-      # Linux-only portal test is fixed. It needs no WebKitGTK to build.
+      # internal/wailsapp builds here without WebKitGTK: the only C it pulls in
+      # is wails' signal reset, which needs libc headers alone (-race requires cgo).
       - name: Run Go tests
         run: |
           go list -e ./... |
-            grep -v -x -F -e github.com/rescale/rescale-int -e github.com/rescale/rescale-int/internal/wailsapp |
+            grep -v -x -F github.com/rescale/rescale-int |
             GOFIPS140=certified xargs go test -tags fips -count=1 -race
 
       - name: Check the Linux-only tests ran
@@ -126,11 +126,12 @@ jobs:
       - name: Check the Windows liveness tests ran
         if: ${{ !cancelled() }}
         env:
-          # No test file in internal/cloud/state is Windows-only; run here, these
-          # reach piddomain_windows.go and, for a live PID only, liveness_windows.go.
+          # The Windows-only exited-child test, and the tests that reach
+          # piddomain_windows.go and, for a live PID, liveness_windows.go.
           PLATFORM_TESTS: >-
             TestWindowsOpenProcessLiveness
             TestProbeProcessLiveness_AnswersAboutThisProcess
+            TestProbeProcessLiveness_AnExitedChildStillHeldOpenIsDead
             TestReadPIDDomain_TheSystemNamesOneAndGoesOnNamingIt
         run: |
           GOFIPS140=certified go test -tags fips -count=1 -v -run "^(${PLATFORM_TESTS// /|})\$" ./internal/cloud/state | tee state.log

@@ -1,9 +1,11 @@
 package pathutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -119,6 +121,75 @@ func TestValidateWritablePath(t *testing.T) {
 			}
 			if tt.extra != nil {
 				tt.extra(t, path)
+			}
+		})
+	}
+}
+
+// TestValidateWindowsStrict runs the Windows service check with fake drive-type
+// and WNet answers, so it runs on every platform. Only a network drive has to
+// resolve to a UNC path, and a drive Windows cannot type is refused unasked.
+func TestValidateWindowsStrict(t *testing.T) {
+	share := t.TempDir() // stands in for the UNC path behind a mapped drive
+	mapped := `Z:\Rescale\Downloads`
+
+	// A folder on a local drive: the temp folder on Windows; elsewhere, a
+	// relative folder named like one, inside a temp working directory.
+	local := t.TempDir()
+	if runtime.GOOS != "windows" {
+		t.Chdir(local)
+		local = `C:\Rescale\Downloads`
+	}
+
+	refused := PathValidationResult{ResolvedPath: mapped, ErrorCode: ipc.CodeDownloadFolderInaccessible}
+	unknown := "Windows does not recognize drive Z: as a local or network drive."
+	tests := []struct {
+		name      string
+		path      string
+		driveType uint32
+		unc       string // WNet's answer; empty means ERROR_NOT_CONNECTED
+		want      PathValidationResult
+		reason    string // part of a refusal's reason
+	}{
+		{"local drive is probed as it is", local, driveFixed, "", PathValidationResult{Reachable: true, ResolvedPath: local}, ""},
+		{"mapped drive that resolves is probed at its UNC path", mapped, driveRemote, share,
+			PathValidationResult{Reachable: true, ResolvedPath: share, WasUNC: true}, ""},
+		{"mapped drive that does not resolve is refused", mapped, driveRemote, "", refused,
+			"(SYSTEM): This network connection does not exist. Use a UNC path"},
+		// WNet would resolve these three, so they are refused only if it is not asked.
+		{"drive of unknown type is refused", mapped, 0, share, refused, unknown},
+		{"drive with no root directory is refused", mapped, 1, share, refused, unknown},
+		{"drive of an unexpected type is refused", mapped, 7, share, refused, unknown},
+	}
+
+	origDriveType, origWNet := driveTypeResolver, wnetResolver
+	t.Cleanup(func() { driveTypeResolver, wnetResolver = origDriveType, origWNet })
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			driveTypeResolver = func(root string) uint32 {
+				if want := tt.path[:2] + `\`; root != want {
+					t.Errorf("GetDriveType asked about %q, want the drive root %q", root, want)
+				}
+				return tt.driveType
+			}
+			wnetResolver = func(string) (string, error) {
+				if tt.driveType != driveRemote {
+					t.Errorf("WNetGetUniversalName asked about a drive of type %d, which is not a network drive", tt.driveType)
+				}
+				if tt.unc == "" {
+					return "", errors.New("This network connection does not exist.")
+				}
+				return tt.unc, nil
+			}
+
+			got := validateWindowsStrict(tt.path)
+			reason := got.Reason
+			got.Reason = ""
+			if got != tt.want {
+				t.Errorf("got %+v (%s), want %+v", got, reason, tt.want)
+			}
+			if !strings.Contains(reason, tt.reason) {
+				t.Errorf("reason %q does not say %q", reason, tt.reason)
 			}
 		})
 	}

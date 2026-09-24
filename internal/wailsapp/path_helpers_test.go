@@ -6,7 +6,7 @@ import (
 )
 
 func TestResolveSafeDownloadPath(t *testing.T) {
-	const dest = "/tmp/output"
+	dest := t.TempDir() // absolute everywhere; Windows puts "/tmp/output" on a drive
 
 	tests := []struct {
 		name    string

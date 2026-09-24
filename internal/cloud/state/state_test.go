@@ -609,7 +609,11 @@ func plantAbandonedLock(t *testing.T, deadPID int) string {
 	t.Helper()
 	withProcessLiveness(t, livenessOf(func(pid int) bool { return pid != deadPID }))
 
-	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temp dir: %v", err)
+	}
+	localPath := filepath.Join(dir, "testfile.bin")
 	if err := os.WriteFile(localPath, []byte("x"), 0600); err != nil {
 		t.Fatalf("write source file: %v", err)
 	}
