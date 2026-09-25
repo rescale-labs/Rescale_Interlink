@@ -66,7 +66,6 @@ type UploadResumeState struct {
 	// Streaming encryption fields (FormatVersion=1)
 	FormatVersion int    `json:"format_version"` // 0=legacy, 1=streaming
 	MasterKey     string `json:"master_key"`     // Base64-encoded master key (v1 only)
-	FileId        string `json:"file_id"`        // Base64-encoded file identifier (v1 only)
 	// PartSize is the size the attempt cut its parts to: plaintext parts for a
 	// streaming (v1) upload, ciphertext parts or Azure blocks for a pre-encrypt
 	// (v0) one. Both resumes need it — the plan is recomputed on every attempt,
@@ -91,10 +90,6 @@ type UploadResumeState struct {
 	// a set of completed parts is not a resume point: only a prefix is, because
 	// the chain IV names one boundary and the source is re-read from it.
 	StreamingParts []StreamingPart `json:"streaming_parts,omitempty"`
-
-	// Process locking fields
-	ProcessID      int       `json:"process_id"`       // PID of owning process
-	LockAcquiredAt time.Time `json:"lock_acquired_at"` // When lock was acquired
 }
 
 // CompletedPart represents a completed upload part (S3-specific).
@@ -246,13 +241,6 @@ func ValidateUploadState(state *UploadResumeState, localPath string) error {
 	if state.FormatVersion == 0 && state.EncryptedPath != "" {
 		if _, err := os.Stat(state.EncryptedPath); err != nil {
 			return fmt.Errorf("encrypted temp file no longer exists")
-		}
-	}
-
-	// Validate streaming format fields
-	if state.FormatVersion == 1 {
-		if state.MasterKey == "" || state.FileId == "" || state.PartSize <= 0 {
-			return fmt.Errorf("streaming format missing required fields")
 		}
 	}
 

@@ -119,32 +119,6 @@ func TestCooldownPropagatesAcrossClients(t *testing.T) {
 	}
 }
 
-func TestEmergencyCapWhenNoCoordinator(t *testing.T) {
-	// Test that EmergencyCap computes correct values for each scope
-	reg := ratelimit.NewRegistry()
-
-	tests := []struct {
-		scope        ratelimit.Scope
-		expectedRate float64
-	}{
-		{ratelimit.ScopeUser, (2.0 / 4.0) * 0.5},            // 0.25
-		{ratelimit.ScopeJobSubmission, (0.278 / 4.0) * 0.5}, // ~0.035
-		{ratelimit.ScopeJobsUsage, (25.0 / 4.0) * 0.5},      // 3.125
-	}
-
-	for _, tt := range tests {
-		cfg := reg.GetScopeConfig(tt.scope)
-		rate, burst := EmergencyCap(cfg)
-
-		if rate < tt.expectedRate*0.9 || rate > tt.expectedRate*1.1 {
-			t.Errorf("EmergencyCap(%s) rate = %v, want ~%v", tt.scope, rate, tt.expectedRate)
-		}
-		if burst != 1 {
-			t.Errorf("EmergencyCap(%s) burst = %v, want 1", tt.scope, burst)
-		}
-	}
-}
-
 func TestClientReconnectAfterCoordinatorRestart(t *testing.T) {
 	sockPath := testEndpoint(t)
 
@@ -193,14 +167,14 @@ func TestClientReconnectAfterCoordinatorRestart(t *testing.T) {
 }
 
 func TestGracefulFallbackTransition(t *testing.T) {
-	// Test the transition: connected → lease → emergency → reconnected
-	// This tests the lease fraction calculation and emergency cap independently
+	// The full rate a connected client runs at, and the fraction a lease grants.
+	// The emergency cap is pinned by the store's own tests.
 
 	reg := ratelimit.NewRegistry()
 	cfg := reg.GetScopeConfig(ratelimit.ScopeUser)
 
 	// 1. Full rate (connected)
-	rate1, burst1 := cfg.TargetRate, cfg.BurstCapacity
+	rate1 := cfg.TargetRate
 	if rate1 != ratelimit.UserScopeRatePerSec {
 		t.Errorf("full rate = %v, want %v", rate1, ratelimit.UserScopeRatePerSec)
 	}
@@ -213,19 +187,6 @@ func TestGracefulFallbackTransition(t *testing.T) {
 	if burst2 != ratelimit.UserScopeBurstCapacity/2 {
 		t.Errorf("lease burst (2 clients) = %v, want %v", burst2, ratelimit.UserScopeBurstCapacity/2)
 	}
-
-	// 3. Emergency cap
-	rate3, burst3 := EmergencyCap(cfg)
-	if rate3 >= rate2 {
-		t.Errorf("emergency rate %v should be less than lease rate %v", rate3, rate2)
-	}
-	if burst3 != 1 {
-		t.Errorf("emergency burst = %v, want 1", burst3)
-	}
-
-	// 4. Recovery: back to full rate
-	_ = rate1
-	_ = burst1
 }
 
 func TestConcurrentMultiClientAcquire(t *testing.T) {

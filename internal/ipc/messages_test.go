@@ -1,27 +1,26 @@
 package ipc
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
 
-func TestNewRequest(t *testing.T) {
-	req := NewRequest(MsgGetStatus)
-	if req.Type != MsgGetStatus {
-		t.Errorf("expected type %q, got %q", MsgGetStatus, req.Type)
-	}
-	if req.UserID != "" {
-		t.Errorf("expected empty user_id, got %q", req.UserID)
-	}
-}
-
-func TestNewRequestWithUser(t *testing.T) {
-	req := NewRequestWithUser(MsgPauseUser, "testuser")
-	if req.Type != MsgPauseUser {
-		t.Errorf("expected type %q, got %q", MsgPauseUser, req.Type)
-	}
-	if req.UserID != "testuser" {
-		t.Errorf("expected user_id %q, got %q", "testuser", req.UserID)
+func TestMessageConstructors(t *testing.T) {
+	status := &StatusData{ServiceState: "running"}
+	for _, tc := range []struct {
+		name      string
+		got, want any
+	}{
+		{"NewRequest", NewRequest(MsgGetStatus), &Request{Type: MsgGetStatus}},
+		{"NewRequestWithUser", NewRequestWithUser(MsgPauseUser, "testuser"), &Request{Type: MsgPauseUser, UserID: "testuser"}},
+		{"NewOKResponse", NewOKResponse(), &Response{Type: MsgOK, Success: true}},
+		{"NewErrorResponse", NewErrorResponse("something went wrong"), &Response{Type: MsgError, Error: "something went wrong"}},
+		{"NewStatusResponse", NewStatusResponse(status), &Response{Type: MsgStatusResponse, Success: true, Data: status}},
+	} {
+		if !reflect.DeepEqual(tc.got, tc.want) {
+			t.Errorf("%s = %+v, want %+v", tc.name, tc.got, tc.want)
+		}
 	}
 }
 
@@ -45,53 +44,6 @@ func TestRequestEncodeDecode(t *testing.T) {
 	}
 	if decoded.UserID != original.UserID {
 		t.Errorf("UserID mismatch: got %q, want %q", decoded.UserID, original.UserID)
-	}
-}
-
-func TestNewOKResponse(t *testing.T) {
-	resp := NewOKResponse()
-	if resp.Type != MsgOK {
-		t.Errorf("expected type %q, got %q", MsgOK, resp.Type)
-	}
-	if !resp.Success {
-		t.Error("expected Success = true")
-	}
-	if resp.Error != "" {
-		t.Errorf("expected empty error, got %q", resp.Error)
-	}
-}
-
-func TestNewErrorResponse(t *testing.T) {
-	resp := NewErrorResponse("something went wrong")
-	if resp.Type != MsgError {
-		t.Errorf("expected type %q, got %q", MsgError, resp.Type)
-	}
-	if resp.Success {
-		t.Error("expected Success = false")
-	}
-	if resp.Error != "something went wrong" {
-		t.Errorf("expected error %q, got %q", "something went wrong", resp.Error)
-	}
-}
-
-func TestNewStatusResponse(t *testing.T) {
-	now := time.Now()
-	status := &StatusData{
-		ServiceState:    "running",
-		Version:         "4.0.0",
-		LastScanTime:    &now,
-		ActiveDownloads: 2,
-		ActiveUsers:     3,
-		LastError:       "",
-		Uptime:          "1h30m",
-	}
-
-	resp := NewStatusResponse(status)
-	if resp.Type != MsgStatusResponse {
-		t.Errorf("expected type %q, got %q", MsgStatusResponse, resp.Type)
-	}
-	if !resp.Success {
-		t.Error("expected Success = true")
 	}
 }
 
@@ -225,48 +177,5 @@ func TestDecodeInvalidResponse(t *testing.T) {
 	_, err := DecodeResponse([]byte("not valid json"))
 	if err == nil {
 		t.Error("expected error for invalid JSON")
-	}
-}
-
-func TestStatusData_Fields(t *testing.T) {
-	now := time.Now()
-	s := StatusData{
-		ServiceState:    "running",
-		Version:         "4.0.0",
-		LastScanTime:    &now,
-		ActiveDownloads: 3,
-		ActiveUsers:     2,
-		LastError:       "test error",
-		Uptime:          "2h15m",
-	}
-
-	if s.ServiceState != "running" {
-		t.Error("ServiceState mismatch")
-	}
-	if s.ActiveDownloads != 3 {
-		t.Error("ActiveDownloads mismatch")
-	}
-	if s.LastError != "test error" {
-		t.Error("LastError mismatch")
-	}
-}
-
-func TestUserStatus_Fields(t *testing.T) {
-	now := time.Now()
-	u := UserStatus{
-		Username:       "testuser",
-		SID:            "S-1-5-21-123",
-		State:          "running",
-		DownloadFolder: "/downloads",
-		LastScanTime:   &now,
-		JobsDownloaded: 10,
-		LastError:      "",
-	}
-
-	if u.Username != "testuser" {
-		t.Error("Username mismatch")
-	}
-	if u.JobsDownloaded != 10 {
-		t.Error("JobsDownloaded mismatch")
 	}
 }

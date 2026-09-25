@@ -55,10 +55,8 @@ func init() {
 	// This happens before EnsureSoftwareRendering() because by the time
 	// that function runs, CGO has already loaded opengl32.dll.
 	if os.Getenv(reexecEnvVar) != "1" {
-		if tryExtractAndReexec() {
-			// Re-exec succeeded, this process will be replaced
-			// If we get here, re-exec failed - continue with normal flow
-		}
+		// Exits this process when it re-execs; otherwise carry on below.
+		tryExtractAndReexec()
 	}
 
 	// Run early diagnostics if debug mode is enabled

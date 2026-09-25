@@ -252,9 +252,8 @@ func TestGetState(t *testing.T) {
 
 func TestIdleTimeoutShutdown(t *testing.T) {
 	srv := NewServer()
-	srv.SetIdleTimeout(100 * time.Millisecond)
-	// Use a fast watchdog interval for testing
-	srv.setWatchdogInterval(200 * time.Millisecond)
+	srv.idleTimeout = 100 * time.Millisecond
+	srv.watchdogInterval = 200 * time.Millisecond
 
 	// Don't start the listener — just test the idle logic
 	// Manually set lastActivity in the past

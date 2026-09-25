@@ -20,7 +20,22 @@ func setupCmdTest(cmd *cobra.Command) {
 	SetCompatContext(cmd, &CompatContext{})
 }
 
+// isolateCredentials leaves a command no key to find: an empty home for every
+// config location and no credential environment. A command that gets as far
+// as resolving credentials fails there, before it could send a key anywhere.
+func isolateCredentials(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"} {
+		t.Setenv(name, home)
+	}
+	for _, name := range []string{"RESCALE_API_KEY", "RESCALE_API_URL", "RESCALE_CONFIG_FILE"} {
+		t.Setenv(name, "")
+	}
+}
+
 func TestCompatCmdValidation(t *testing.T) {
+	isolateCredentials(t) // the rows that "reach the API" stop at the missing key
 	tests := []struct {
 		name string
 		// newCmd builds the command under test; setupCmdTest supplies a
@@ -89,6 +104,7 @@ func TestCompatCmdValidation(t *testing.T) {
 // TestCompatRootCmdExecute drives commands through the root command so
 // PersistentPreRunE (auth) runs, which is what a real invocation does.
 func TestCompatRootCmdExecute(t *testing.T) {
+	isolateCredentials(t)
 	tests := []struct {
 		name    string
 		args    []string
@@ -188,26 +204,6 @@ func TestCompatCmdShorthandMappings(t *testing.T) {
 			}
 			if flag.Name != tt.wantFlag {
 				t.Errorf("-%s maps to %q, want %q", tt.shorthand, flag.Name, tt.wantFlag)
-			}
-		})
-	}
-}
-
-func TestDetectSubcommand_ProfileFlag(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		// --profile takes a value, which must not be read as the subcommand.
-		{name: "profile before command", args: []string{"--profile", "default", "upload", "-f", "a.txt"}, want: "upload"},
-		{name: "token and profile before command", args: []string{"-p", "TOKEN", "--profile", "eu", "status", "-j", "JOB1"}, want: "status"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := detectSubcommand(tt.args); got != tt.want {
-				t.Errorf("detectSubcommand() = %q, want %q", got, tt.want)
 			}
 		})
 	}

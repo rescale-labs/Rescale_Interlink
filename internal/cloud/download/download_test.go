@@ -149,16 +149,6 @@ func TestCheckDownloadChecksum(t *testing.T) {
 		t.Errorf("a mismatch under the spelling sha-512: got %v, want it refused", err)
 	}
 
-	if err := os.WriteFile(path, []byte("downloaded"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkDownloadChecksum(path, "", []models.FileChecksum{{HashFunction: "md5", FileHash: "abc"}}, false, &warnings); err != nil {
-		t.Errorf("a file with no SHA-512 was refused: %v", err)
-	}
-	if !strings.Contains(warnings.String(), "not verified") {
-		t.Errorf("a file with no SHA-512 passed without a warning; warnings: %q", warnings.String())
-	}
-
 	// An entry with no hash checks nothing: alone it is no checksum at all, and
 	// the warning does not name it among those the file has.
 	for _, tc := range []struct {

@@ -7,41 +7,12 @@ package cloud
 import (
 	"io"
 
-	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
 // ProgressCallback is called during transfers to report progress (0.0 to 1.0)
 type ProgressCallback func(progress float64)
-
-// UploadParams consolidates all parameters for upload operations.
-// This unified struct replaces the multiple function signatures that existed before.
-type UploadParams struct {
-	// Required fields
-	LocalPath string // Path to the local file to upload
-	FolderID  string // Target folder ID (empty = MyLibrary)
-
-	// API and credentials (provided by orchestrator)
-	APIClient   *api.Client
-	StorageInfo *models.StorageInfo
-
-	// Optional: Transfer handle for concurrent part uploads
-	// If nil or threads <= 1, uses sequential upload
-	TransferHandle *transfer.Transfer
-
-	// Optional: Progress reporting
-	// Called with values from 0.0 to 1.0
-	ProgressCallback ProgressCallback
-
-	// Optional: Output writer for status messages
-	OutputWriter io.Writer
-
-	// Encryption mode
-	// false (default) = streaming encryption (no temp file, saves disk space)
-	// true = pre-encryption (creates temp file, compatible with legacy clients)
-	PreEncrypt bool
-}
 
 // DownloadParams consolidates all parameters for download operations.
 // This unified struct replaces the multiple function signatures that existed before.
@@ -53,10 +24,6 @@ type DownloadParams struct {
 	// File metadata (from API or cached)
 	FileInfo *models.CloudFile
 
-	// API and credentials (provided by orchestrator)
-	APIClient   *api.Client
-	StorageInfo *models.StorageInfo
-
 	// Optional: Transfer handle for concurrent chunk downloads
 	// If nil or threads <= 1, uses sequential download
 	TransferHandle *transfer.Transfer
@@ -67,9 +34,6 @@ type DownloadParams struct {
 
 	// Optional: Output writer for status messages
 	OutputWriter io.Writer
-
-	// Options
-	SkipChecksum bool // If true, warn but don't fail on checksum mismatch
 }
 
 // UploadResult contains the result of a successful upload operation.

@@ -172,70 +172,34 @@ func TestMergeWithFlags(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  *Config
-		wantErr bool
+		name   string
+		mutate func(*Config) // nil leaves the config valid
 	}{
-		{
-			name: "valid config",
-			config: &Config{
-				APIKey:        "valid_key",
-				APIBaseURL:    "https://platform.rescale.com",
-				TarWorkers:    2,
-				UploadWorkers: 2,
-				JobWorkers:    2,
-			},
-			wantErr: false,
-		},
-		{
-			name: "missing API key",
-			config: &Config{
-				APIKey:     "",
-				APIBaseURL: "https://platform.rescale.com",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid workers (negative)",
-			config: &Config{
-				APIKey:     "valid_key",
-				APIBaseURL: "https://platform.rescale.com",
-				TarWorkers: -1,
-			},
-			wantErr: true,
-		},
+		{"valid config", nil},
+		{"missing API key", func(c *Config) { c.APIKey = "" }},
+		{"missing API base URL", func(c *Config) { c.APIBaseURL = "" }},
+		{"zero tar workers", func(c *Config) { c.TarWorkers = 0 }},
+		{"negative tar workers", func(c *Config) { c.TarWorkers = -1 }},
+		{"invalid upload workers", func(c *Config) { c.UploadWorkers = 0 }},
+		{"invalid job workers", func(c *Config) { c.JobWorkers = 0 }},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.config.Validate()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			cfg := &Config{APIKey: "valid_key", APIBaseURL: "https://platform.rescale.com", TarWorkers: 2, UploadWorkers: 2, JobWorkers: 2}
+			if tt.mutate != nil {
+				tt.mutate(cfg)
+			}
+			if err := cfg.Validate(); (err != nil) != (tt.mutate != nil) {
+				t.Errorf("Validate() error = %v, want an error: %v", err, tt.mutate != nil)
 			}
 		})
 	}
 }
 
 func TestEnvironmentVariables(t *testing.T) {
-	// Save original env vars
-	origKey := os.Getenv("RESCALE_API_KEY")
-	origURL := os.Getenv("RESCALE_API_URL")
-	defer func() {
-		if origKey != "" {
-			os.Setenv("RESCALE_API_KEY", origKey)
-		} else {
-			os.Unsetenv("RESCALE_API_KEY")
-		}
-		if origURL != "" {
-			os.Setenv("RESCALE_API_URL", origURL)
-		} else {
-			os.Unsetenv("RESCALE_API_URL")
-		}
-	}()
-
-	// Set test env vars
-	os.Setenv("RESCALE_API_KEY", "env_key")
-	os.Setenv("RESCALE_API_URL", "https://env.com")
+	t.Setenv("RESCALE_API_KEY", "env_key")
+	t.Setenv("RESCALE_API_URL", "https://env.com")
 
 	cfg := &Config{}
 	cfg.MergeWithFlags("", "", "", "", 0)
@@ -278,25 +242,8 @@ func TestConfigDefaults(t *testing.T) {
 // TestEnvVarOverridesDefault tests that RESCALE_API_URL env var overrides the default URL
 // This is a regression test for the bug where env var was ignored if default was set
 func TestEnvVarOverridesDefault(t *testing.T) {
-	// Save original env vars
-	origKey := os.Getenv("RESCALE_API_KEY")
-	origURL := os.Getenv("RESCALE_API_URL")
-	defer func() {
-		if origKey != "" {
-			os.Setenv("RESCALE_API_KEY", origKey)
-		} else {
-			os.Unsetenv("RESCALE_API_KEY")
-		}
-		if origURL != "" {
-			os.Setenv("RESCALE_API_URL", origURL)
-		} else {
-			os.Unsetenv("RESCALE_API_URL")
-		}
-	}()
-
-	// Set test env var to a different platform URL
-	os.Setenv("RESCALE_API_KEY", "test_key")
-	os.Setenv("RESCALE_API_URL", "https://kr.rescale.com")
+	t.Setenv("RESCALE_API_KEY", "test_key")
+	t.Setenv("RESCALE_API_URL", "https://kr.rescale.com") // a platform other than the default
 
 	// Load config with defaults (this sets APIBaseURL to platform.rescale.com)
 	cfg, err := LoadConfigCSV("")
@@ -432,8 +379,10 @@ func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 	csvPath := tmpDir + "/config.csv"
 
 	original := &Config{
-		TarWorkers:    4,
-		UploadWorkers: 4,
+		APIKey:        "FAKEKEY-never-saved",
+		ProxyPassword: "FAKEPASSWORD-never-saved",
+		TarWorkers:    2,
+		UploadWorkers: 3,
 		JobWorkers:    4,
 		ProxyMode:     "no-proxy",
 		APIBaseURL:    "https://platform.rescale.com",
@@ -445,6 +394,10 @@ func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 
 	if err := SaveConfigCSV(original, csvPath); err != nil {
 		t.Fatalf("SaveConfigCSV() error = %v", err)
+	}
+	// The key and the proxy password live elsewhere; a config file never holds them.
+	if saved, _ := os.ReadFile(csvPath); strings.Contains(string(saved), "never-saved") {
+		t.Errorf("the saved config holds a credential:\n%s", saved)
 	}
 
 	loaded, err := LoadConfigCSV(csvPath)
@@ -459,6 +412,9 @@ func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 	if loaded.TenantURL != "https://platform.rescale.com" {
 		t.Errorf("After round-trip: TenantURL = %q, want %q (should be synced)",
 			loaded.TenantURL, "https://platform.rescale.com")
+	}
+	if loaded.TarWorkers != 2 || loaded.UploadWorkers != 3 || loaded.JobWorkers != 4 {
+		t.Errorf("After round-trip: workers = %d/%d/%d, want 2/3/4", loaded.TarWorkers, loaded.UploadWorkers, loaded.JobWorkers)
 	}
 }
 
@@ -526,15 +482,7 @@ func TestMergeWithFlagsAndTokenFile(t *testing.T) {
 		t.Fatalf("Failed to write token file: %v", err)
 	}
 
-	// Save original env var
-	origKey := os.Getenv("RESCALE_API_KEY")
-	defer func() {
-		if origKey != "" {
-			os.Setenv("RESCALE_API_KEY", origKey)
-		} else {
-			os.Unsetenv("RESCALE_API_KEY")
-		}
-	}()
+	t.Setenv("RESCALE_API_KEY", "") // the subtests below change it; restored at the end
 
 	// Test priority: flag > env > token-file > default-token-file
 	// This matches common CLI conventions and user expectations

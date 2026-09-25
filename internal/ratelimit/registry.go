@@ -28,7 +28,6 @@ type ScopeConfig struct {
 	HardLimitPerH float64 // Rescale's hard limit (requests per hour)
 	HardLimitPerS float64 // Rescale's hard limit (requests per second), derived
 	TargetRate    float64 // Our target rate (requests per second)
-	TargetPercent float64 // Target as percentage of hard limit
 	BurstCapacity float64 // Token bucket burst capacity
 }
 
@@ -85,7 +84,6 @@ func NewRegistry() *Registry {
 				HardLimitPerH: UserScopeLimitPerHour,
 				HardLimitPerS: float64(UserScopeLimitPerHour) / 3600.0,
 				TargetRate:    UserScopeRatePerSec,
-				TargetPercent: UserScopeTargetPercent,
 				BurstCapacity: UserScopeBurstCapacity,
 			},
 			ScopeJobSubmission: {
@@ -93,7 +91,6 @@ func NewRegistry() *Registry {
 				HardLimitPerH: JobSubmissionLimitPerHour,
 				HardLimitPerS: float64(JobSubmissionLimitPerHour) / 3600.0,
 				TargetRate:    JobSubmissionRatePerSec,
-				TargetPercent: JobSubmissionTargetPercent,
 				BurstCapacity: JobSubmissionBurstCapacity,
 			},
 			ScopeJobsUsage: {
@@ -101,7 +98,6 @@ func NewRegistry() *Registry {
 				HardLimitPerH: JobsUsageLimitPerHour,
 				HardLimitPerS: float64(JobsUsageLimitPerHour) / 3600.0,
 				TargetRate:    JobsUsageRatePerSec,
-				TargetPercent: JobsUsageTargetPercent,
 				BurstCapacity: JobsUsageBurstCapacity,
 			},
 		},

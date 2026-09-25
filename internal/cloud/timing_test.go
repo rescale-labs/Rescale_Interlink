@@ -9,201 +9,105 @@ import (
 	"time"
 )
 
+// withTiming sets RESCALE_TIMING for the test, or unsets it when value is "".
+func withTiming(t *testing.T, value string) {
+	t.Setenv("RESCALE_TIMING", value)
+	if value == "" {
+		os.Unsetenv("RESCALE_TIMING")
+	}
+}
+
 func TestTimingEnabled(t *testing.T) {
-	// Save original value
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-
-	// Test disabled (not set)
-	os.Unsetenv("RESCALE_TIMING")
-	if TimingEnabled() {
-		t.Error("TimingEnabled() should return false when RESCALE_TIMING is not set")
-	}
-
-	// Test disabled (set to 0)
-	os.Setenv("RESCALE_TIMING", "0")
-	if TimingEnabled() {
-		t.Error("TimingEnabled() should return false when RESCALE_TIMING=0")
-	}
-
-	// Test enabled
-	os.Setenv("RESCALE_TIMING", "1")
-	if !TimingEnabled() {
-		t.Error("TimingEnabled() should return true when RESCALE_TIMING=1")
-	}
-
-	// Test with other value
-	os.Setenv("RESCALE_TIMING", "true")
-	if TimingEnabled() {
-		t.Error("TimingEnabled() should return false when RESCALE_TIMING is not exactly '1'")
+	for value, want := range map[string]bool{"": false, "0": false, "1": true, "true": false} {
+		withTiming(t, value)
+		if got := TimingEnabled(); got != want {
+			t.Errorf("TimingEnabled() with RESCALE_TIMING=%q = %v, want %v", value, got, want)
+		}
 	}
 }
 
 func TestTimingLog(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-
 	var buf bytes.Buffer
 
-	// Test with timing disabled
-	os.Unsetenv("RESCALE_TIMING")
+	withTiming(t, "")
 	TimingLog(&buf, "test message %d", 123)
 	if buf.Len() > 0 {
 		t.Error("TimingLog should not write when timing is disabled")
 	}
 
-	// Test with timing enabled
-	os.Setenv("RESCALE_TIMING", "1")
-	buf.Reset()
+	withTiming(t, "1")
 	TimingLog(&buf, "test message %d", 123)
-	output := buf.String()
-	if !strings.Contains(output, "[TIMING]") {
-		t.Error("TimingLog output should contain [TIMING] prefix")
+	if output := buf.String(); !strings.Contains(output, "[TIMING] test message 123") {
+		t.Errorf("TimingLog output = %q, want the prefixed, formatted message", output)
 	}
-	if !strings.Contains(output, "test message 123") {
-		t.Error("TimingLog output should contain the formatted message")
-	}
-}
 
-func TestTimingLogNilWriter(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-
-	// Test with nil writer (should not panic)
-	os.Setenv("RESCALE_TIMING", "1")
-	// This should not panic
-	TimingLog(nil, "test message")
+	TimingLog(nil, "test message") // a nil writer falls back to stderr
 }
 
 func TestTimer(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-	os.Setenv("RESCALE_TIMING", "1")
+	withTiming(t, "1")
 
 	var buf bytes.Buffer
-
-	// Test basic timer
 	timer := StartTimer(&buf, "test phase")
 	time.Sleep(10 * time.Millisecond)
-	elapsed := timer.Stop()
-
-	// Check elapsed is reasonable
-	if elapsed < 10*time.Millisecond {
-		t.Error("Timer elapsed should be at least 10ms")
+	if elapsed := timer.StopWithMessage("processed %d items", 42); elapsed < 10*time.Millisecond {
+		t.Errorf("elapsed = %v, want at least 10ms", elapsed)
 	}
 
-	// Check output contains expected strings
 	output := buf.String()
-	if !strings.Contains(output, "[TIMING] test phase: started") {
-		t.Error("Timer output should contain start message")
-	}
-	if !strings.Contains(output, "[TIMING] test phase:") {
-		t.Error("Timer output should contain stop message")
-	}
-}
-
-func TestTimerStopIdempotent(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-	os.Setenv("RESCALE_TIMING", "1")
-
-	var buf bytes.Buffer
-
-	timer := StartTimer(&buf, "idempotent test")
-	timer.Stop()
-	firstOutput := buf.String()
-
-	// Stop again - should not log again
-	timer.Stop()
-	secondOutput := buf.String()
-
-	// Output should be the same (no additional logging)
-	if firstOutput != secondOutput {
-		t.Error("Timer.Stop() should be idempotent - second call should not log")
+	for _, want := range []string{"[TIMING] test phase: started", "[TIMING] test phase:", "processed 42 items"} {
+		if !strings.Contains(output, want) {
+			t.Errorf("timer output %q does not contain %q", output, want)
+		}
 	}
 }
 
-func TestTimerConcurrentStop(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-	os.Setenv("RESCALE_TIMING", "1")
+// Only the first stop logs, however many goroutines race to stop the timer.
+func TestTimerStopsOnce(t *testing.T) {
+	withTiming(t, "1")
 
 	var buf bytes.Buffer
 	timer := StartTimer(&buf, "concurrent test")
-
-	// Concurrent Stop calls should be safe
 	var wg sync.WaitGroup
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			timer.Stop()
+			timer.StopWithThroughput(1024)
 		}()
 	}
 	wg.Wait()
+	timer.StopWithMessage("late")
 
-	// Should only have one stop message
-	output := buf.String()
-	stopCount := strings.Count(output, "concurrent test:")
-	// Should have start (1) + stop (1) = 2 occurrences
-	if stopCount != 2 {
-		t.Errorf("Expected 2 occurrences of timer name, got %d", stopCount)
+	if n := strings.Count(buf.String(), "concurrent test:"); n != 2 {
+		t.Errorf("timer name logged %d times, want 2 (start and one stop)", n)
 	}
 }
 
 func TestTimerStopWithThroughput(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-	os.Setenv("RESCALE_TIMING", "1")
+	withTiming(t, "1")
 
 	var buf bytes.Buffer
 	timer := StartTimer(&buf, "throughput test")
 	time.Sleep(10 * time.Millisecond)
 	timer.StopWithThroughput(1024 * 1024 * 10) // 10 MB
 
-	output := buf.String()
-	if !strings.Contains(output, "MB") {
-		t.Error("StopWithThroughput output should contain MB")
-	}
-	if !strings.Contains(output, "MB/s") {
-		t.Error("StopWithThroughput output should contain MB/s")
-	}
-}
-
-func TestTimerStopWithMessage(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-	os.Setenv("RESCALE_TIMING", "1")
-
-	var buf bytes.Buffer
-	timer := StartTimer(&buf, "message test")
-	time.Sleep(10 * time.Millisecond)
-	timer.StopWithMessage("processed %d items", 42)
-
-	output := buf.String()
-	if !strings.Contains(output, "processed 42 items") {
-		t.Error("StopWithMessage output should contain custom message")
+	if output := buf.String(); !strings.Contains(output, "MB/s") {
+		t.Errorf("StopWithThroughput output %q should contain MB/s", output)
 	}
 }
 
 func TestTimerDisabled(t *testing.T) {
-	original := os.Getenv("RESCALE_TIMING")
-	defer os.Setenv("RESCALE_TIMING", original)
-	os.Unsetenv("RESCALE_TIMING")
+	withTiming(t, "")
 
 	var buf bytes.Buffer
 	timer := StartTimer(&buf, "disabled test")
 	time.Sleep(10 * time.Millisecond)
-	elapsed := timer.Stop()
-
-	// Timer should still track time even when logging is disabled
-	if elapsed < 10*time.Millisecond {
-		t.Error("Timer should track time even when timing is disabled")
+	if elapsed := timer.StopWithThroughput(1); elapsed < 10*time.Millisecond {
+		t.Errorf("elapsed = %v, want at least 10ms even with timing disabled", elapsed)
 	}
-
-	// But should not output anything
 	if buf.Len() > 0 {
-		t.Error("Timer should not output when timing is disabled")
+		t.Errorf("timer wrote %q with timing disabled", buf.String())
 	}
 }
 

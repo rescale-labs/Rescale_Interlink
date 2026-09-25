@@ -502,7 +502,6 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			StorageType:    "S3Storage",
 			StorageID:      p.storageID(),
 			Container:      p.storageContainer(),
-			ProcessID:      os.Getpid(),
 		}
 		if !params.Stateless {
 			state.SaveUploadState(initialState, params.LocalPath)
@@ -606,7 +605,6 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				StorageType:    "S3Storage",
 				StorageID:      p.storageID(),
 				Container:      p.storageContainer(),
-				ProcessID:      os.Getpid(),
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
 		},
@@ -885,18 +883,6 @@ func abortMultipartUpload(ctx context.Context, s3Client *S3Client, objectKey, up
 		}
 		return err
 	})
-}
-
-// convertToCompletedParts converts state.CompletedPart slice to types.CompletedPart slice
-func convertToCompletedParts(parts []state.CompletedPart) []types.CompletedPart {
-	result := make([]types.CompletedPart, len(parts))
-	for i, p := range parts {
-		result[i] = types.CompletedPart{
-			ETag:       aws.String(p.ETag),
-			PartNumber: aws.Int32(p.PartNumber),
-		}
-	}
-	return result
 }
 
 // convertFromCompletedParts converts types.CompletedPart slice to state.CompletedPart slice

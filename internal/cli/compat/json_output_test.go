@@ -148,29 +148,6 @@ func TestWriteTransferEnvelope(t *testing.T) {
 	}
 }
 
-func TestWriteTransferEnvelopeRaw(t *testing.T) {
-	start := time.Date(2026, 4, 5, 22, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 4, 5, 22, 0, 1, 0, time.UTC)
-
-	raw := []json.RawMessage{json.RawMessage(`{"id":"abc","name":"test.txt"}`)}
-
-	var buf bytes.Buffer
-	err := writeTransferEnvelopeRaw(&buf, true, start, end, raw)
-	if err != nil {
-		t.Fatalf("writeTransferEnvelopeRaw error: %v", err)
-	}
-
-	var env map[string]interface{}
-	if err := json.Unmarshal(buf.Bytes(), &env); err != nil {
-		t.Fatalf("failed to parse: %v", err)
-	}
-
-	filesArr, ok := env["files"].([]interface{})
-	if !ok || len(filesArr) != 1 {
-		t.Error("files should be array with 1 entry")
-	}
-}
-
 func TestWriteJSON_CompactSingleLine(t *testing.T) {
 	var buf bytes.Buffer
 	data := map[string]string{"key": "value", "foo": "bar"}

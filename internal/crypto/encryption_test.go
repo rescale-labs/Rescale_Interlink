@@ -157,9 +157,9 @@ func TestPKCS7UnpadInvalid(t *testing.T) {
 		data []byte
 	}{
 		{"empty", []byte{}},
-		{"padding_too_large", []byte{0x01, 0x02, 0x03, 0x11}},      // Padding value 17 > 16
-		{"padding_exceeds_length", []byte{0x01, 0x02, 0x03, 0x05}}, // Padding 5 but only 4 bytes total
-		{"zero_padding", []byte{0x01, 0x02, 0x03, 0x00}},           // Padding value 0 is invalid
+		{"padding_too_large", []byte{0x01, 0x02, 0x03, 0x11}},                             // Padding value 17 > 16
+		{"padding_exceeds_length", []byte{0x01, 0x02, 0x03, 0x05}},                        // Padding 5 but only 4 bytes total
+		{"zero_padding", []byte{0x01, 0x02, 0x03, 0x00}},                                  // Padding value 0 is invalid
 		{"invalid_padding_bytes", []byte{0x01, 0x02, 0x03, 0x04, 0x04, 0x04, 0x03, 0x04}}, // Last byte says 4, but 3rd-from-last is 0x03 not 0x04
 	}
 
@@ -240,8 +240,8 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 			}
 
 			// Decrypt
-			if err := DecryptFile(encryptedFile, decryptedFile, key, iv); err != nil {
-				t.Fatalf("DecryptFile() failed: %v", err)
+			if _, err := DecryptFileWithHash(encryptedFile, decryptedFile, key, iv); err != nil {
+				t.Fatalf("DecryptFileWithHash() failed: %v", err)
 			}
 
 			// Read decrypted data
@@ -285,7 +285,7 @@ func TestEncryptDecryptWithWrongKey(t *testing.T) {
 	key2, _ := GenerateKey()
 
 	// Decryption should either fail or produce garbage
-	err := DecryptFile(encryptedFile, decryptedFile, key2, iv)
+	_, err := DecryptFileWithHash(encryptedFile, decryptedFile, key2, iv)
 	if err == nil {
 		// If decryption "succeeds", the data should be garbage (not match original)
 		decryptedData, _ := os.ReadFile(decryptedFile)
@@ -540,8 +540,8 @@ func TestEncryptFileShortReadsPreserveAllBytes(t *testing.T) {
 						len(ciphertext), wantLen, len(plaintext))
 				}
 
-				if err := DecryptFile(encryptedFile, decryptedFile, key, iv); err != nil {
-					t.Fatalf("DecryptFile() failed: %v", err)
+				if _, err := DecryptFileWithHash(encryptedFile, decryptedFile, key, iv); err != nil {
+					t.Fatalf("DecryptFileWithHash() failed: %v", err)
 				}
 
 				roundTripped, err := os.ReadFile(decryptedFile)
@@ -597,8 +597,8 @@ func TestEncryptFileShortReadMidStreamKeepsAllData(t *testing.T) {
 		t.Fatalf("Ciphertext is %d bytes, want %d", len(ciphertext), wantLen)
 	}
 
-	if err := DecryptFile(encryptedFile, decryptedFile, key, iv); err != nil {
-		t.Fatalf("DecryptFile() failed: %v", err)
+	if _, err := DecryptFileWithHash(encryptedFile, decryptedFile, key, iv); err != nil {
+		t.Fatalf("DecryptFileWithHash() failed: %v", err)
 	}
 	roundTripped, err := os.ReadFile(decryptedFile)
 	if err != nil {

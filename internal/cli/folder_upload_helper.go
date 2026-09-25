@@ -24,19 +24,6 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer/folder"
 )
 
-// DirectoryMapping tracks local path to remote folder ID
-type DirectoryMapping struct {
-	LocalPath string
-	Created   bool
-}
-
-// UploadTask represents a file to upload
-type UploadTask struct {
-	LocalPath    string
-	RelativePath string // Relative to root
-	Size         int64
-}
-
 // UploadResult tracks what happened during upload
 type UploadResult struct {
 	FoldersCreated  int

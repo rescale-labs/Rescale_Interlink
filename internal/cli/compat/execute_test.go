@@ -12,6 +12,7 @@ func TestExitCodeConstant(t *testing.T) {
 }
 
 func TestExecuteCompat_SpubPlaceholder(t *testing.T) {
+	isolateCredentials(t)
 	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"spub", "register"})
 

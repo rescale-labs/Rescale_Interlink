@@ -129,32 +129,6 @@ func TestClientAcquireLease(t *testing.T) {
 	}
 }
 
-func TestClientDrain(t *testing.T) {
-	client, _, cleanup := startTestServer(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	err := client.Drain(ctx, "https://platform.rescale.com", "abcdef01", ratelimit.ScopeUser)
-	if err != nil {
-		t.Fatalf("Drain() error: %v", err)
-	}
-}
-
-func TestClientSetCooldown(t *testing.T) {
-	client, _, cleanup := startTestServer(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	err := client.SetCooldown(ctx, "https://platform.rescale.com", "abcdef01", ratelimit.ScopeUser, 5*time.Second)
-	if err != nil {
-		t.Fatalf("SetCooldown() error: %v", err)
-	}
-}
-
 func TestClientGetState(t *testing.T) {
 	client, _, cleanup := startTestServer(t)
 	defer cleanup()

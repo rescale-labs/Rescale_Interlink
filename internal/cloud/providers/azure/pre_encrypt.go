@@ -686,7 +686,6 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 				StorageType:   "AzureStorage",
 				StorageID:     p.storageID(),
 				Container:     p.storageContainer(),
-				ProcessID:     os.Getpid(),
 			}
 			state.SaveUploadState(currentState, params.LocalPath)
 		},

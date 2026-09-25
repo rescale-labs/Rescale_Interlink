@@ -47,12 +47,7 @@ func TestUploadState_FilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
 	}
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "upload-state-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	localPath := filepath.Join(tmpDir, "testfile.bin")
 
@@ -99,24 +94,16 @@ func TestDownloadState_FilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
 	}
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "download-state-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	localPath := filepath.Join(tmpDir, "testfile.bin")
 
-	// Create and save download state with sensitive data
 	state := &DownloadResumeState{
-		LocalPath:       localPath,
-		RemotePath:      "test/object",
-		MasterKey:       "dGVzdC1tYXN0ZXIta2V5LWJhc2U2NA==", // Simulated base64 master key
-		StreamingFileId: "dGVzdC1maWxlLWlk",                 // Simulated base64 file ID
-		CreatedAt:       time.Now(),
-		LastUpdate:      time.Now(),
-		TotalSize:       1024,
+		LocalPath:  localPath,
+		RemotePath: "test/object",
+		CreatedAt:  time.Now(),
+		LastUpdate: time.Now(),
+		TotalSize:  1024,
 	}
 
 	if err := SaveDownloadState(state, localPath); err != nil {
@@ -144,12 +131,7 @@ func TestUploadLock_FilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
 	}
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "upload-lock-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	localPath := filepath.Join(tmpDir, "testfile.bin")
 
@@ -177,12 +159,7 @@ func TestUploadLock_FilePermissions(t *testing.T) {
 
 // TestUploadState_RoundTrip tests save/load functionality works correctly.
 func TestUploadState_RoundTrip(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "upload-state-roundtrip-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	localPath := filepath.Join(tmpDir, "testfile.bin")
 
@@ -193,24 +170,21 @@ func TestUploadState_RoundTrip(t *testing.T) {
 
 	// Create state
 	original := &UploadResumeState{
-		LocalPath:      localPath,
-		ObjectKey:      "bucket/key",
-		UploadID:       "test-upload-id",
-		TotalSize:      12,
-		OriginalSize:   12,
-		UploadedBytes:  0,
-		EncryptionKey:  "enc-key",
-		IV:             "iv-value",
-		RandomSuffix:   "abc123",
-		CreatedAt:      time.Now().Truncate(time.Second),
-		LastUpdate:     time.Now().Truncate(time.Second),
-		StorageType:    "S3Storage",
-		FormatVersion:  1,
-		MasterKey:      "master-key",
-		FileId:         "file-id",
-		PartSize:       1024 * 1024,
-		ProcessID:      os.Getpid(),
-		LockAcquiredAt: time.Now().Truncate(time.Second),
+		LocalPath:     localPath,
+		ObjectKey:     "bucket/key",
+		UploadID:      "test-upload-id",
+		TotalSize:     12,
+		OriginalSize:  12,
+		UploadedBytes: 0,
+		EncryptionKey: "enc-key",
+		IV:            "iv-value",
+		RandomSuffix:  "abc123",
+		CreatedAt:     time.Now().Truncate(time.Second),
+		LastUpdate:    time.Now().Truncate(time.Second),
+		StorageType:   "S3Storage",
+		FormatVersion: 1,
+		MasterKey:     "master-key",
+		PartSize:      1024 * 1024,
 	}
 
 	// Save
@@ -247,12 +221,7 @@ func TestUploadState_RoundTrip(t *testing.T) {
 
 // TestDownloadState_RoundTrip tests save/load functionality works correctly.
 func TestDownloadState_RoundTrip(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "download-state-roundtrip-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+	tmpDir := t.TempDir()
 
 	localPath := filepath.Join(tmpDir, "testfile.bin")
 
@@ -268,9 +237,6 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 		LastUpdate:      time.Now().Truncate(time.Second),
 		StorageType:     "S3Storage",
 		FormatVersion:   1,
-		MasterKey:       "master-key",
-		StreamingFileId: "streaming-file-id",
-		PartSize:        64 * 1024,
 	}
 
 	// Save
@@ -293,12 +259,6 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 	}
 	if loaded.RemotePath != original.RemotePath {
 		t.Errorf("RemotePath: expected %q, got %q", original.RemotePath, loaded.RemotePath)
-	}
-	if loaded.MasterKey != original.MasterKey {
-		t.Errorf("MasterKey: expected %q, got %q", original.MasterKey, loaded.MasterKey)
-	}
-	if loaded.StreamingFileId != original.StreamingFileId {
-		t.Errorf("StreamingFileId: expected %q, got %q", original.StreamingFileId, loaded.StreamingFileId)
 	}
 	if loaded.FormatVersion != original.FormatVersion {
 		t.Errorf("FormatVersion: expected %d, got %d", original.FormatVersion, loaded.FormatVersion)

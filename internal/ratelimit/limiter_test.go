@@ -8,20 +8,21 @@ import (
 	"time"
 )
 
-// TestTryAcquireConsumesToken verifies token consumption.
+// TestTryAcquireConsumesToken verifies token consumption, through the exported
+// wrapper.
 func TestTryAcquireConsumesToken(t *testing.T) {
 	rl := NewRateLimiter(1.0, 5.0)
 
 	// Should succeed 5 times (burst capacity)
 	for i := 0; i < 5; i++ {
-		if !rl.tryAcquire() {
-			t.Fatalf("tryAcquire() failed on attempt %d", i+1)
+		if !rl.TryAcquire() {
+			t.Fatalf("TryAcquire() failed on attempt %d", i+1)
 		}
 	}
 
 	// 6th should fail (bucket exhausted, no time for refill)
-	if rl.tryAcquire() {
-		t.Error("tryAcquire() should fail when bucket is empty")
+	if rl.TryAcquire() {
+		t.Error("TryAcquire() should fail when bucket is empty")
 	}
 }
 
@@ -210,66 +211,46 @@ func TestCooldownExpires(t *testing.T) {
 	}
 }
 
-// TestConcurrentAccess verifies thread safety under contention.
-func TestConcurrentAccess(t *testing.T) {
-	rl := NewRateLimiter(100.0, 50.0) // Fast refill
-
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	// Launch 20 goroutines all trying to acquire tokens
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 10; j++ {
-				if err := rl.Wait(ctx); err != nil {
-					return // Context cancelled, that's fine
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
-	// If we get here without deadlock or panic, the test passes
-}
-
-// TestConcurrentDrainAndWait verifies no race between Drain and Wait.
-func TestConcurrentDrainAndWait(t *testing.T) {
-	rl := NewRateLimiter(100.0, 100.0)
-
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	// Waiters
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 20; j++ {
-				if err := rl.Wait(ctx); err != nil {
-					return
-				}
-			}
-		}()
-	}
-
-	// Drainer
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 10; i++ {
-			rl.Drain()
-			time.Sleep(10 * time.Millisecond)
+// TestConcurrentUse has no assertions of its own: under -race it checks that
+// Wait, Drain and SetCooldown can run together, with and without coordinator
+// hooks, and that none of them deadlocks.
+func TestConcurrentUse(t *testing.T) {
+	for _, hooked := range []bool{false, true} {
+		rl := NewRateLimiter(100.0, 50.0)
+		if hooked {
+			rl.SetCoordinatorHook(func(ctx context.Context) error { return nil }, func() {}, func(d time.Duration) {})
 		}
-	}()
-
-	wg.Wait()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for j := 0; j < 20 && rl.Wait(ctx) == nil; j++ {
+				}
+			}()
+		}
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				rl.Drain()
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 10; i++ {
+				rl.SetCooldown(10 * time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+			}
+		}()
+		wg.Wait()
+		cancel()
+	}
 }
 
-// --- Phase 2: Coordinator hooks and Reconfigure tests ---
+// --- Coordinator hooks and Reconfigure tests ---
 
 // TestCoordinatorHookWaitDelegation verifies Wait delegates to coordinator hook.
 func TestCoordinatorHookWaitDelegation(t *testing.T) {
@@ -417,23 +398,6 @@ func TestReconfigurePreservesTokensWhenPossible(t *testing.T) {
 	tokens := rl.GetCurrentTokens()
 	if tokens < 3.0 || tokens > 7.0 {
 		t.Errorf("after Reconfigure with higher burst: tokens = %.2f, want ~5", tokens)
-	}
-}
-
-// TestTryAcquireExported verifies the exported TryAcquire works the same as tryAcquire.
-func TestTryAcquireExported(t *testing.T) {
-	rl := NewRateLimiter(1.0, 3.0)
-
-	// Should succeed 3 times
-	for i := 0; i < 3; i++ {
-		if !rl.TryAcquire() {
-			t.Fatalf("TryAcquire() failed on attempt %d", i+1)
-		}
-	}
-
-	// 4th should fail
-	if rl.TryAcquire() {
-		t.Error("TryAcquire() should fail when bucket is empty")
 	}
 }
 
@@ -625,56 +589,6 @@ func TestNotifyFuncNilSafe(t *testing.T) {
 
 	// Should not panic
 	rl.emitUtilizationNotice(500 * time.Millisecond)
-}
-
-// TestConcurrentCoordinatorHooks verifies no race with hooks and Wait/Drain/SetCooldown.
-func TestConcurrentCoordinatorHooks(t *testing.T) {
-	rl := NewRateLimiter(100.0, 50.0)
-
-	rl.SetCoordinatorHook(
-		func(ctx context.Context) error { return nil },
-		func() {},
-		func(d time.Duration) {},
-	)
-
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer cancel()
-
-	// Concurrent Wait calls
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < 20; j++ {
-				if err := rl.Wait(ctx); err != nil {
-					return
-				}
-			}
-		}()
-	}
-
-	// Concurrent Drain calls
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 10; i++ {
-			rl.Drain()
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-
-	// Concurrent SetCooldown calls
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 10; i++ {
-			rl.SetCooldown(10 * time.Millisecond)
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
-
-	wg.Wait()
 }
 
 // TestWaitFIFOOrder verifies that Wait() grants tokens in FIFO order under contention.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/models"
 )
@@ -54,7 +55,7 @@ func TestDownloadRefusesALinkAtAnyPathItWrites(t *testing.T) {
 	}
 
 	const partSize = int64(64)
-	hkdf, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	hkdf, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 	concurrentV1 := func(localPath string) error {
 		mock := &mockHKDFPartDownloader{ciphertext: hkdf, failFrom: -1}
 		prep := &DownloadPrep{
@@ -177,7 +178,7 @@ func TestDownloadRechecksTheDestinationBeforeWritingIt(t *testing.T) {
 		t.Fatalf("EncryptPart: %v", err)
 	}
 	const partSize = int64(64)
-	hkdf, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	hkdf, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	for name, run := range map[string]func(localPath string, plant func()) error{
 		"v0": func(localPath string, plant func()) error {
@@ -252,7 +253,7 @@ func (m *exitingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, 
 func TestDownloadStreamingConcurrentReclaimsAKilledAttemptsScratchFile(t *testing.T) {
 	const partSize = int64(64)
 	plaintext := bytes.Repeat([]byte("interlink"), 40)
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 	download := func(dir string, mock StreamingPartDownloader, threads int) error {
 		return NewDownloader(mock).downloadStreamingConcurrent(context.Background(), &DownloadPrep{
 			Params: cloud.DownloadParams{

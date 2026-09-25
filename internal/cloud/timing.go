@@ -8,9 +8,10 @@
 // Output format: [TIMING] phase_name: duration (optional_details)
 //
 // Example output:
-//   [TIMING] Upload initialization: 45ms
-//   [TIMING] Part 1/10: encrypted=12ms uploaded=850ms size=32.0 MB
-//   [TIMING] Streaming upload: 9.2s (total 320.0 MB at 34.8 MB/s)
+//
+//	[TIMING] Upload initialization: 45ms
+//	[TIMING] Part 1/10: encrypted=12ms uploaded=850ms size=32.0 MB
+//	[TIMING] Streaming upload: 9.2s (total 320.0 MB at 34.8 MB/s)
 package cloud
 
 import (
@@ -75,9 +76,8 @@ func TimingLog(w io.Writer, format string, args ...interface{}) {
 	}
 }
 
-// Timer tracks elapsed time for a named phase.
-// Use StartTimer to create a timer and Stop to log the elapsed time.
-// Thread-safe and idempotent (Stop can be called multiple times safely).
+// Timer tracks elapsed time for a named phase. Only the first of its Stop*
+// calls logs, so they are safe to repeat and to call from several goroutines.
 type Timer struct {
 	name    string
 	start   time.Time
@@ -100,18 +100,6 @@ func StartTimer(w io.Writer, name string) *Timer {
 		fmt.Fprintf(w, "[TIMING] %s: started\n", name)
 	}
 	return t
-}
-
-// Stop logs the elapsed time and returns the duration.
-// Safe to call multiple times; only the first call logs and returns accurate timing.
-func (t *Timer) Stop() time.Duration {
-	elapsed := time.Since(t.start)
-	if atomic.CompareAndSwapInt32(&t.stopped, 0, 1) {
-		if TimingEnabled() {
-			fmt.Fprintf(t.w, "[TIMING] %s: %v\n", t.name, elapsed)
-		}
-	}
-	return elapsed
 }
 
 // StopWithThroughput logs elapsed time with throughput information.

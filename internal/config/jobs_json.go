@@ -1,15 +1,9 @@
-// Package config provides job specification loading and saving in various formats.
-// The JSON functions provide a JSON alternative to CSV for job templates.
-// Note: Some functions (LoadJobsJSON, SaveJobsJSON, DetectJobFileFormat, LoadJobs)
-// are infrastructure for future CLI integration and may appear as "unreachable"
-// in deadcode analysis. They are intentionally available.
 package config
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/rescale/rescale-int/internal/models"
 )
@@ -44,47 +38,3 @@ func LoadJobsJSON(path string) ([]models.JobSpec, error) {
 
 	return []models.JobSpec{singleJob}, nil
 }
-
-// SaveJobsJSON writes job specifications to a JSON file.
-// Saves as array (even for single job) for consistency.
-func SaveJobsJSON(path string, jobs []models.JobSpec) error {
-	data, err := json.MarshalIndent(jobs, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal jobs to JSON: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write jobs JSON file: %w", err)
-	}
-
-	return nil
-}
-
-// SaveJobJSON writes a single job specification to a JSON file.
-// Saves as single object (not array) for single-job templates.
-func SaveJobJSON(path string, job models.JobSpec) error {
-	data, err := json.MarshalIndent(job, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal job to JSON: %w", err)
-	}
-
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write job JSON file: %w", err)
-	}
-
-	return nil
-}
-
-// DetectJobFileFormat attempts to detect if a file is CSV or JSON based on extension.
-// Returns "csv", "json", or "unknown".
-func DetectJobFileFormat(path string) string {
-	lower := strings.ToLower(path)
-	if strings.HasSuffix(lower, ".csv") {
-		return "csv"
-	}
-	if strings.HasSuffix(lower, ".json") {
-		return "json"
-	}
-	return "unknown"
-}
-

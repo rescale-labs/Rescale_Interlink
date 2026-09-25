@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/diskspace"
 	"github.com/rescale/rescale-int/internal/models"
@@ -454,32 +455,6 @@ func (m *mockHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, rem
 	return out, "", nil
 }
 
-// hkdfObject builds a multi-part HKDF object the concurrent path can take apart:
-// the parts are exactly partSize of plaintext each, so the encrypted part size
-// the downloader computes lines up with the concatenated ciphertext.
-func hkdfObject(t *testing.T, plaintext []byte, partSize int64) (ciphertext []byte, masterKey, fileID []byte) {
-	t.Helper()
-
-	enc, err := encryption.NewStreamingEncryptor(partSize)
-	if err != nil {
-		t.Fatalf("NewStreamingEncryptor: %v", err)
-	}
-
-	for i, off := int64(0), int64(0); off < int64(len(plaintext)); i, off = i+1, off+partSize {
-		end := off + partSize
-		if end > int64(len(plaintext)) {
-			end = int64(len(plaintext))
-		}
-		part, err := enc.EncryptPart(i, plaintext[off:end])
-		if err != nil {
-			t.Fatalf("EncryptPart(%d): %v", i, err)
-		}
-		ciphertext = append(ciphertext, part...)
-	}
-
-	return ciphertext, enc.GetMasterKey(), enc.GetFileId()
-}
-
 // The concurrent HKDF path used to download straight into LocalPath, and its
 // first act was to pre-allocate that file to the full part span. A part that
 // failed left the whole allocation behind: a file at the destination, the size
@@ -494,7 +469,7 @@ func TestDownloadStreamingConcurrentLeavesNothingBehindOnFailure(t *testing.T) {
 	// the size at which the daemon adopts a file it finds already there.
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24)
 
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	localPath := filepath.Join(t.TempDir(), "results.dat")
 	mock := &mockHKDFPartDownloader{ciphertext: ciphertext, failFrom: 0}
@@ -535,7 +510,7 @@ func TestDownloadStreamingConcurrentRenamesIntoPlace(t *testing.T) {
 	const partSize = int64(64)
 	plaintext := bytes.Repeat([]byte("interlink"), 40) // 360 bytes: six parts, the last one short
 
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	localPath := filepath.Join(t.TempDir(), "results.dat")
 	mock := &mockHKDFPartDownloader{ciphertext: ciphertext, failFrom: -1}
@@ -862,7 +837,7 @@ func TestDownloadStreamingConcurrentRefusesToCallCancellationSuccess(t *testing.
 	const partSize = int64(64)
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4*8) // eight whole parts
 
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -926,7 +901,7 @@ func TestDownloadStreamingConcurrentJoinsProducerOnFailure(t *testing.T) {
 	// blocked on a send when the first part's failure cancels the operation.
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 4*8)
 
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	localPath := filepath.Join(t.TempDir(), "results.dat")
 	mock := &slowFailHKDFPartDownloader{ciphertext: ciphertext}
@@ -993,7 +968,7 @@ func (m *tickingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, 
 func TestDownloadStreamingConcurrentJoinsTheProgressTicker(t *testing.T) {
 	const partSize = int64(64)
 	plaintext := bytes.Repeat([]byte("interlink"), 64) // nine parts, the last one short
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -1382,7 +1357,7 @@ func TestDownloadStreamingConcurrentPinsEveryPartToTheSizeCallVersion(t *testing
 	const partSize = int64(64)
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24) // six whole parts
 
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	localPath := filepath.Join(t.TempDir(), "results.dat")
 	mock := &versionedHKDFPartDownloader{ciphertext: ciphertext}
@@ -1577,7 +1552,7 @@ func (m *evidenceHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context,
 func TestDownloadStreamingConcurrentHoldsEveryPartToOneObjectVersion(t *testing.T) {
 	const partSize = int64(64)
 	plaintext := bytes.Repeat([]byte("0123456789abcdef"), 24) // six whole parts
-	ciphertext, masterKey, fileID := hkdfObject(t, plaintext, partSize)
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	mock := &evidenceHKDFPartDownloader{
 		ciphertext: ciphertext,

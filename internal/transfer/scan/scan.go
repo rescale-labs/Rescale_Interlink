@@ -45,19 +45,8 @@ type ScanProgress struct {
 	BytesFound   int64
 }
 
-// ScanRemoteFolderRecursive recursively scans a remote folder structure.
-// Exported for GUI reuse.
-func ScanRemoteFolderRecursive(
-	ctx context.Context,
-	apiClient *api.Client,
-	folderID string,
-	relativePath string,
-) ([]RemoteFolderInfo, []RemoteFileTask, error) {
-	return scanRemoteFolderRecursiveImpl(ctx, apiClient, folderID, relativePath, nil)
-}
-
-// ScanRemoteFolderRecursiveWithProgress is like ScanRemoteFolderRecursive but calls
-// onProgress after each subfolder is scanned, enabling live scan feedback in CLI.
+// ScanRemoteFolderRecursiveWithProgress recursively scans a remote folder
+// structure, calling onProgress (when non-nil) after each subfolder is scanned.
 func ScanRemoteFolderRecursiveWithProgress(
 	ctx context.Context,
 	apiClient *api.Client,
@@ -68,7 +57,6 @@ func ScanRemoteFolderRecursiveWithProgress(
 	return scanRemoteFolderRecursiveImpl(ctx, apiClient, folderID, relativePath, onProgress)
 }
 
-// scanRemoteFolderRecursiveImpl is the shared implementation for both scan variants.
 func scanRemoteFolderRecursiveImpl(
 	ctx context.Context,
 	apiClient *api.Client,

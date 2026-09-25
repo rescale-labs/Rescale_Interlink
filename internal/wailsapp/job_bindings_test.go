@@ -316,6 +316,10 @@ func TestGetHistoricalJobRows_PathTraversal(t *testing.T) {
 }
 
 func TestGetHistoricalJobRows_MissingFile(t *testing.T) {
+	// The lookup creates the states directory, so keep it out of the real home.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	app := &App{}
 	_, err := app.GetHistoricalJobRows("nonexistent_run_12345")
 	if err == nil {

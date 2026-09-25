@@ -17,100 +17,24 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
+// TestNewTransferService pins what a new service is built with — the default
+// concurrency is constants.MaxMaxConcurrent, a configured one wins — and that
+// an empty service has nothing to report, clear or cancel.
 func TestNewTransferService(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-
-	// Test with default config
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
-	if ts == nil {
-		t.Fatal("NewTransferService returned nil")
-	}
-
-	// Queue should be initialized
-	if ts.queue == nil {
-		t.Error("Queue not initialized")
-	}
-
-	// Semaphore should be initialized with default capacity (MaxMaxConcurrent=20)
-	if cap(ts.semaphore) != 20 {
-		t.Errorf("Semaphore capacity = %d, want 20", cap(ts.semaphore))
+	for _, tc := range []struct{ configured, want int }{{0, 20}, {3, 3}} {
+		ts := NewTransferService(nil, events.NewEventBus(100), TransferServiceConfig{MaxConcurrent: tc.configured})
+		if ts.GetQueue() == nil || cap(ts.GetSemaphore()) != tc.want {
+			t.Errorf("MaxConcurrent %d: queue set %v, semaphore capacity %d, want %d",
+				tc.configured, ts.GetQueue() != nil, cap(ts.GetSemaphore()), tc.want)
+		}
+		ts.ClearCompleted()
+		ts.CancelAll()
+		if total := ts.GetStats().Total(); total != 0 {
+			t.Errorf("an empty service reports %d transfers", total)
+		}
 	}
 }
 
-func TestNewTransferServiceWithCustomConcurrency(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{
-		MaxConcurrent: 10,
-	})
-	if ts == nil {
-		t.Fatal("NewTransferService returned nil")
-	}
-
-	if cap(ts.semaphore) != 10 {
-		t.Errorf("Semaphore capacity = %d, want 10", cap(ts.semaphore))
-	}
-}
-
-func TestTransferStats(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
-
-	stats := ts.GetStats()
-	if stats.Total() != 0 {
-		t.Errorf("Initial stats total = %d, want 0", stats.Total())
-	}
-}
-
-func TestGetQueue(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
-
-	queue := ts.GetQueue()
-	if queue == nil {
-		t.Error("GetQueue returned nil")
-	}
-}
-
-func TestGetSemaphore(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{
-		MaxConcurrent: 3,
-	})
-
-	sem := ts.GetSemaphore()
-	if sem == nil {
-		t.Error("GetSemaphore returned nil")
-	}
-	if cap(sem) != 3 {
-		t.Errorf("Semaphore capacity = %d, want 3", cap(sem))
-	}
-}
-
-func TestClearCompleted(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
-
-	// Should not panic with empty queue
-	ts.ClearCompleted()
-
-	stats := ts.GetStats()
-	if stats.Total() != 0 {
-		t.Errorf("Stats total after clear = %d, want 0", stats.Total())
-	}
-}
-
-func TestCancelAllEmpty(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
-
-	// Should not panic with empty queue
-	ts.CancelAll()
-}
-
-// TestStreamingDownloadBatchAdaptiveConcurrency verifies that
-// StartStreamingDownloadBatch uses RunBatchFromChannel with adaptive concurrency
-// from the ResourceManager, not hardcoded workers.
 func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 	eventBus := events.NewEventBus(100)
 	ts := NewTransferService(nil, eventBus, TransferServiceConfig{
@@ -164,145 +88,89 @@ func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 	}
 }
 
-// TestCheckBatchCompletion_TotalWipeout verifies that a batch where ALL tasks failed
-// triggers a report via the standard ClassifyAndPublish path.
-func TestCheckBatchCompletion_TotalWipeout(t *testing.T) {
+// newBatchFixture is a transfer service whose reportable errors the test sees.
+func newBatchFixture(t *testing.T) (*TransferService, <-chan events.Event) {
 	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
+	t.Cleanup(eb.Close)
+	return NewTransferService(nil, eb, TransferServiceConfig{}), eb.Subscribe(events.EventReportableError)
+}
 
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
-	q := ts.GetQueue()
-
-	// Create 5 tasks, fail all of them with a 500 error (reportable via standard path)
-	for i := 0; i < 5; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("file%d.dat", i), 1024, transfer.TaskTypeUpload,
-			"/src", "/dst", "FileBrowser", "batch-total", "TestBatch",
-		)
-		q.Fail(task.ID, fmt.Errorf("500 internal server error"))
+// awaitReport returns the report checkBatchCompletion filed, failing the test
+// when whether one was filed does not match want.
+func awaitReport(t *testing.T, ch <-chan events.Event, want bool) *events.ReportableErrorEvent {
+	t.Helper()
+	wait := 200 * time.Millisecond
+	if want {
+		wait = time.Second
 	}
-
-	ts.checkBatchCompletion("batch-total", "upload")
-
 	select {
 	case event := <-ch:
 		re := event.(*events.ReportableErrorEvent)
-		if re.Category != "transfer" {
-			t.Errorf("expected category 'transfer', got %q", re.Category)
+		if !want {
+			t.Fatalf("unexpected report: %s", re.ErrorMessage)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("expected ReportableErrorEvent for total wipeout, got none")
+		return re
+	case <-time.After(wait):
+		if want {
+			t.Fatal("expected a report, got none")
+		}
+		return nil
 	}
 }
 
-// TestCheckBatchCompletion_PartialNetworkFailure verifies that a batch with partial
-// network failures publishes a report (overriding IsReportable suppression).
-func TestCheckBatchCompletion_PartialNetworkFailure(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
-	q := ts.GetQueue()
-
-	// 8 completed + 2 failed with DNS error
-	for i := 0; i < 8; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeUpload,
-			"/src", "/dst", "FileBrowser", "batch-partial", "TestBatch",
-		)
-		q.Complete(task.ID)
-	}
-	for i := 0; i < 2; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("fail%d.dat", i), 1024, transfer.TaskTypeUpload,
-			"/src", "/dst", "FileBrowser", "batch-partial", "TestBatch",
-		)
-		q.Fail(task.ID, fmt.Errorf("dial tcp: lookup api.rescale.com: no such host"))
-	}
-
-	ts.checkBatchCompletion("batch-partial", "upload")
-
-	select {
-	case event := <-ch:
-		re := event.(*events.ReportableErrorEvent)
-		if re.Category != "transfer" {
-			t.Errorf("expected category 'transfer', got %q", re.Category)
-		}
-		// Should contain partial failure context
-		if re.ErrorMessage == "" {
-			t.Error("expected non-empty ErrorMessage with batch context")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected ReportableErrorEvent for partial network failure, got none")
-	}
-}
-
-// TestCheckBatchCompletion_PartialAuthFailure verifies that partial auth failures
-// are NOT published (batch context doesn't contradict auth errors).
-func TestCheckBatchCompletion_PartialAuthFailure(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
-	q := ts.GetQueue()
-
-	// 5 completed + 2 failed with auth error
-	for i := 0; i < 5; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeDownload,
-			"/src", "/dst", "FileBrowser", "batch-auth", "TestBatch",
-		)
-		q.Complete(task.ID)
-	}
-	for i := 0; i < 2; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("fail%d.dat", i), 1024, transfer.TaskTypeDownload,
-			"/src", "/dst", "FileBrowser", "batch-auth", "TestBatch",
-		)
-		q.Fail(task.ID, fmt.Errorf("403 Forbidden"))
-	}
-
-	ts.checkBatchCompletion("batch-auth", "download")
-
-	select {
-	case <-ch:
-		t.Fatal("expected NO ReportableErrorEvent for partial auth failure, but got one")
-	case <-time.After(200 * time.Millisecond):
-		// Expected — auth errors in partial batch should NOT be reported
-	}
-}
-
-// A transfer refused by another transfer's upload lock is the user's to act
-// on, so a batch of them reports nothing: the refusal reaches the classifier as
-// the error it is, not as its text.
-func TestCheckBatchCompletion_LockRefusalsAreNotReported(t *testing.T) {
+// TestCheckBatchCompletion pins which finished batches file a report. A total
+// wipeout is reported only when its representative per-task error is the
+// server's; a partial failure is reported for server and network errors but
+// not for auth. A lock refusal is the user's to act on, never a report.
+func TestCheckBatchCompletion(t *testing.T) {
+	server := errors.New("500 internal server error")
 	refused := fmt.Errorf("S3Storage upload failed: failed to acquire upload lock: %w", state.ErrUploadLocked)
-	for name, completed := range map[string]int{"every transfer refused": 0, "some transfers refused": 3} {
-		t.Run(name, func(t *testing.T) {
-			eb := events.NewEventBus(100)
-			defer eb.Close()
-			ch := eb.Subscribe(events.EventReportableError)
-			ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	tests := []struct {
+		name              string
+		download          bool
+		completed, failed int
+		err               error
+		wantReport        bool
+		wantClass         string // checked when set
+	}{
+		{"total wipeout", false, 0, 5, server, true, ""},
+		{"partial network failure", false, 8, 2, errors.New("dial tcp: lookup api.rescale.com: no such host"), true, ""},
+		{"partial server error", false, 3, 1, server, true, "server_error"},
+		{"partial auth failure", true, 5, 2, errors.New("403 Forbidden"), false, ""},
+		{"every transfer refused by a lock", false, 0, 2, refused, false, ""},
+		{"some transfers refused by a lock", false, 3, 2, refused, false, ""},
+		{"no failures", false, 5, 0, nil, false, ""},
+		{"wipeout, local filesystem", true, 0, 5, errors.New("open /Users/x/Downloads/out/f.dat: permission denied"), false, ""},
+		{"wipeout, disk full", true, 0, 5, errors.New("write /Volumes/ext/f.dat: no space left on device"), false, ""},
+		{"wipeout, network down", true, 0, 5, errors.New("dial tcp: lookup api.rescale.com: no such host"), false, ""},
+		{"wipeout, server error", true, 0, 5, errors.New("API returned 500 internal server error"), true, "server_error"},
+		{"wipeout with no task error recorded", false, 0, 3, nil, false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts, ch := newBatchFixture(t)
 			q := ts.GetQueue()
-			for i := 0; i < completed+2; i++ {
-				task := q.TrackTransferWithBatch(fmt.Sprintf("file%d.dat", i), 1024, transfer.TaskTypeUpload,
-					"/src", "/dst", "FileBrowser", "batch-locked", "TestBatch")
-				if i < completed {
+			taskType, direction := transfer.TaskTypeUpload, "upload"
+			if tt.download {
+				taskType, direction = transfer.TaskTypeDownload, "download"
+			}
+			for i := 0; i < tt.completed+tt.failed; i++ {
+				task := q.TrackTransferWithBatch(fmt.Sprintf("file%d.dat", i), 1024, taskType,
+					"/src", "/dst", "FileBrowser", "batch", "TestBatch")
+				if i < tt.completed {
 					q.Complete(task.ID)
 				} else {
-					q.Fail(task.ID, refused)
+					q.Fail(task.ID, tt.err)
 				}
 			}
 
-			ts.checkBatchCompletion("batch-locked", "upload")
+			ts.checkBatchCompletion("batch", direction)
 
-			select {
-			case event := <-ch:
-				t.Fatalf("reported a lock refusal: %s", event.(*events.ReportableErrorEvent).ErrorMessage)
-			case <-time.After(200 * time.Millisecond):
+			re := awaitReport(t, ch, tt.wantReport)
+			if re != nil && (re.Category != "transfer" || re.ErrorMessage == "" || tt.wantClass != "" && re.ErrorClass != tt.wantClass) {
+				t.Errorf("report: category %q, class %q, message %q; want transfer, a message and class %q",
+					re.Category, re.ErrorClass, re.ErrorMessage, tt.wantClass)
 			}
 		})
 	}
@@ -329,71 +197,6 @@ func TestServicesLogNoCredentials(t *testing.T) {
 	printed, _ := os.ReadFile(stderr.Name())
 	if strings.Contains(string(printed), "SECRET") || strings.Count(string(printed), "=REDACTED") != 4 {
 		t.Errorf("logged %q, want every credential redacted", printed)
-	}
-}
-
-// TestCheckBatchCompletion_NoFailures verifies that a fully successful batch
-// does NOT trigger any report.
-func TestCheckBatchCompletion_NoFailures(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
-	q := ts.GetQueue()
-
-	for i := 0; i < 5; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeUpload,
-			"/src", "/dst", "FileBrowser", "batch-ok", "TestBatch",
-		)
-		q.Complete(task.ID)
-	}
-
-	ts.checkBatchCompletion("batch-ok", "upload")
-
-	select {
-	case <-ch:
-		t.Fatal("expected NO ReportableErrorEvent for successful batch, but got one")
-	case <-time.After(200 * time.Millisecond):
-		// Expected — no failures means no report
-	}
-}
-
-// TestCheckBatchCompletion_PartialServerError verifies that partial server errors
-// use the standard ClassifyAndPublish path (server errors are already reportable).
-func TestCheckBatchCompletion_PartialServerError(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
-	q := ts.GetQueue()
-
-	// 3 completed + 1 failed with 500 server error
-	for i := 0; i < 3; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("ok%d.dat", i), 1024, transfer.TaskTypeUpload,
-			"/src", "/dst", "FileBrowser", "batch-5xx", "TestBatch",
-		)
-		q.Complete(task.ID)
-	}
-	task := q.TrackTransferWithBatch(
-		"fail.dat", 1024, transfer.TaskTypeUpload,
-		"/src", "/dst", "FileBrowser", "batch-5xx", "TestBatch",
-	)
-	q.Fail(task.ID, fmt.Errorf("500 internal server error"))
-
-	ts.checkBatchCompletion("batch-5xx", "upload")
-
-	select {
-	case event := <-ch:
-		re := event.(*events.ReportableErrorEvent)
-		if re.ErrorClass != "server_error" {
-			t.Errorf("expected error class 'server_error', got %q", re.ErrorClass)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected ReportableErrorEvent for partial server error, got none")
 	}
 }
 
@@ -618,11 +421,7 @@ func TestRegisterEmptyBatchPlaceholder(t *testing.T) {
 // tasks ended up recording. This is the #27 path: cancelling a large batch
 // produced a wipeout "report this error" modal.
 func TestCheckBatchCompletion_CancelledBatchNotReported(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	ts, ch := newBatchFixture(t)
 	q := ts.GetQueue()
 
 	// Some tasks failed for real before the user hit Cancel, the rest were
@@ -649,21 +448,13 @@ func TestCheckBatchCompletion_CancelledBatchNotReported(t *testing.T) {
 
 	ts.checkBatchCompletion("batch-cancelled", "download")
 
-	select {
-	case event := <-ch:
-		t.Fatalf("expected NO ReportableErrorEvent for a cancelled batch, got %+v", event)
-	case <-time.After(200 * time.Millisecond):
-	}
+	awaitReport(t, ch, false)
 }
 
 // Cancelling ONE task must not hide the rest of the batch's real failures:
 // only a batch-level cancel (CancelRequested) suppresses reporting.
 func TestCheckBatchCompletion_PerTaskCancelDoesNotSuppress(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
+	ts, ch := newBatchFixture(t)
 	q := ts.GetQueue()
 
 	for i := 0; i < 3; i++ {
@@ -685,92 +476,7 @@ func TestCheckBatchCompletion_PerTaskCancelDoesNotSuppress(t *testing.T) {
 
 	ts.checkBatchCompletion("batch-mixed", "download")
 
-	select {
-	case <-ch:
-		// Reported, as it must be.
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a ReportableErrorEvent when real failures coexist with a single per-task cancel")
-	}
-}
-
-// A total wipeout is reported by classifying a representative REAL per-task
-// error. Local-filesystem and disk-space causes are the user's own machine, so
-// they stay suppressed; the old synthetic "N/N transfers failed" message
-// classified as internal and always raised the modal.
-func TestCheckBatchCompletion_TotalWipeoutUsesRepresentativeError(t *testing.T) {
-	cases := []struct {
-		name       string
-		taskErr    string
-		wantReport bool
-	}{
-		{"local filesystem", "open /Users/x/Downloads/out/f.dat: permission denied", false},
-		{"disk full", "write /Volumes/ext/f.dat: no space left on device", false},
-		{"network down", "dial tcp: lookup api.rescale.com: no such host", false},
-		{"server error", "API returned 500 internal server error", true},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			eb := events.NewEventBus(100)
-			defer eb.Close()
-			ch := eb.Subscribe(events.EventReportableError)
-
-			ts := NewTransferService(nil, eb, TransferServiceConfig{})
-			q := ts.GetQueue()
-
-			batchID := "batch-wipeout-" + tc.name
-			for i := 0; i < 5; i++ {
-				task := q.TrackTransferWithBatch(
-					fmt.Sprintf("file%d.dat", i), 1024, transfer.TaskTypeDownload,
-					"/src", "/dst", "FileBrowser", batchID, "TestBatch",
-				)
-				q.Fail(task.ID, fmt.Errorf("%s", tc.taskErr))
-			}
-
-			ts.checkBatchCompletion(batchID, "download")
-
-			select {
-			case event := <-ch:
-				if !tc.wantReport {
-					t.Fatalf("expected NO report for %s, got %+v", tc.name, event)
-				}
-				re := event.(*events.ReportableErrorEvent)
-				if re.ErrorClass != "server_error" {
-					t.Errorf("expected the representative per-task error to be classified, got class %q", re.ErrorClass)
-				}
-			case <-time.After(200 * time.Millisecond):
-				if tc.wantReport {
-					t.Fatalf("expected a report for %s, got none", tc.name)
-				}
-			}
-		})
-	}
-}
-
-// A wipeout with no per-task error recorded has nothing trustworthy to report.
-func TestCheckBatchCompletion_TotalWipeoutWithoutTaskErrors(t *testing.T) {
-	eb := events.NewEventBus(100)
-	defer eb.Close()
-	ch := eb.Subscribe(events.EventReportableError)
-
-	ts := NewTransferService(nil, eb, TransferServiceConfig{})
-	q := ts.GetQueue()
-
-	for i := 0; i < 3; i++ {
-		task := q.TrackTransferWithBatch(
-			fmt.Sprintf("f%d.dat", i), 1024, transfer.TaskTypeUpload,
-			"/src", "/dst", "FileBrowser", "batch-noerr", "TestBatch",
-		)
-		q.Fail(task.ID, nil)
-	}
-
-	ts.checkBatchCompletion("batch-noerr", "upload")
-
-	select {
-	case event := <-ch:
-		t.Fatalf("expected NO report when no per-task error was recorded, got %+v", event)
-	case <-time.After(200 * time.Millisecond):
-	}
+	awaitReport(t, ch, true)
 }
 
 // A batch cancelled before its scan registers any task must still leave a

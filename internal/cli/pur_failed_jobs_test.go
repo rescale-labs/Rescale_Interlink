@@ -102,17 +102,9 @@ func TestPURCommandsNameFailedJobs(t *testing.T) {
 		return api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"}), nil
 	}
 
-	run := func(cmd *cobra.Command, args ...string) (string, error) {
-		stderr, err := os.Create(cmd.Name() + ".stderr")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func(orig *os.File) { os.Stderr = orig }(os.Stderr)
-		os.Stderr = stderr
-		runErr := runPURCommand(t, cmd, args...)
-		_ = stderr.Close()
-		printed, _ := os.ReadFile(stderr.Name())
-		return string(printed), runErr
+	run := func(cmd *cobra.Command, args ...string) (printed string, err error) {
+		printed = captureStderr(t, func() { err = runPURCommand(t, cmd, args...) })
+		return printed, err
 	}
 	for _, cmd := range []*cobra.Command{newRunCmd(), newSubmitExistingCmd()} {
 		printed, err := run(cmd, "--jobs-csv", jobsCSV, "--state", cmd.Name()+".csv")

@@ -81,10 +81,10 @@ func fakeFailingJobServer(t *testing.T, jobID string) (string, *atomic.Int32) {
 	return srv.URL, &attempts
 }
 
-// A failed job waits 5, 10, 20 and then 30 minutes before each new attempt,
-// and after the fifth failed attempt the daemon stops trying. Each wait is
-// checked from both sides: a poll a minute short of it leaves the job alone,
-// and a poll a minute past it tries again.
+// A failed job waits 5, 10, 20 and then 30 minutes before each new attempt.
+// Each wait is checked from both sides: a poll a minute short of it leaves the
+// job alone, and a poll a minute past it tries again. That there is no sixth
+// attempt is pinned by TestPoll_DaemonRetryReleasesAJobThatStoppedRetrying.
 func TestPoll_FailedJobWaitsOutItsBackoff(t *testing.T) {
 	const jobID = "backoff1"
 	url, attempts := fakeFailingJobServer(t, jobID)
@@ -106,13 +106,6 @@ func TestPoll_FailedJobWaitsOutItsBackoff(t *testing.T) {
 		if got := attempts.Load(); got != failed+1 {
 			t.Fatalf("after %d failed attempts, a poll past the %s wait left %d attempts in all, want %d", failed, wait, got, failed+1)
 		}
-	}
-
-	// Five attempts have failed; however long ago that was, there is no sixth.
-	ageLastAttempt(d.state, jobID, 24*time.Hour)
-	d.poll(ctx)
-	if got := attempts.Load(); got != 5 {
-		t.Errorf("a poll after the fifth failed attempt tried again: %d attempts, want 5", got)
 	}
 }
 

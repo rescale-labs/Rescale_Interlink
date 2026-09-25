@@ -668,29 +668,3 @@ func TestState_PendingTagApply(t *testing.T) {
 			entry != nil && entry.PendingTagApply)
 	}
 }
-
-// TestFindCompletedJobs_RespectsPendingSet — jobs in the pendingSet are skipped
-// with ReasonPendingTagApply, never reach CheckEligibility, and therefore
-// cannot be re-enqueued for download while their tag is still being retried.
-//
-// Note: this test drives the monitor with a local state and mock job list
-// since the monitor's API client isn't mockable
-// without broader refactoring. The test shape targets the pendingSet code path
-// directly. Full eligibility integration testing is covered by integration
-// suites.
-func TestFindCompletedJobs_RespectsPendingSet(t *testing.T) {
-	isolateHome(t)
-	s := NewState(filepath.Join(t.TempDir(), "state.json"))
-	if err := s.Load(); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	s.MarkDownloaded("pending-job", "Pending", "/tmp", 1, 100)
-	s.MarkPendingTagApply("pending-job")
-
-	// A direct assertion: PendingTagApplyJobs reports the job, so poll would
-	// wrap it into pendingSet and FindCompletedJobs would skip it.
-	pending := s.PendingTagApplyJobs()
-	if len(pending) != 1 || pending[0] != "pending-job" {
-		t.Errorf("PendingTagApplyJobs = %v, want [pending-job]", pending)
-	}
-}

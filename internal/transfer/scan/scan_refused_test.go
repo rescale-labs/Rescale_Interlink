@@ -76,7 +76,7 @@ func TestScansReportRefusedNamesAndKeepTheRest(t *testing.T) {
 		listed = nil
 	}
 
-	folders, files, err := ScanRemoteFolderRecursive(context.Background(), client, "root", "")
+	folders, files, err := ScanRemoteFolderRecursiveWithProgress(context.Background(), client, "root", "", nil)
 	if err != nil {
 		t.Errorf("recursive scan: %v", err)
 	}

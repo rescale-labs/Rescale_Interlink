@@ -27,11 +27,7 @@ import (
 func runStatelessBatch(t *testing.T, jobs []models.JobSpec, apiURL string) (*Pipeline, error) {
 	t.Helper()
 
-	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
-	p, err := NewPipeline(cfg, nil, jobs, PipelineOptions{StateFile: ""})
-	if err != nil {
-		t.Fatalf("NewPipeline: %v", err)
-	}
+	p := newPipelineWith(t, jobs, PipelineOptions{})
 	p.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: apiURL, APIKey: "test"})
 	p.analysisResolver = &mockAnalysisResolver{}
 	p.SetSyncUploader(&stubUploader{})

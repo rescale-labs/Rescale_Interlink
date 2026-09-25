@@ -1,5 +1,5 @@
 // Package encryption provides cryptographic functions for Rescale Interlink.
-// This file implements HKDF-based key derivation for per-part streaming encryption.
+// This file implements the HKDF key derivation of the legacy per-part format.
 package encryption
 
 import (
@@ -13,12 +13,6 @@ const (
 	// FileIdSize is the size of the random file identifier (32 bytes)
 	FileIdSize = 32
 )
-
-// GenerateFileId generates a random 32-byte file identifier for key derivation.
-// The FileId is used with HKDF to derive unique per-part keys and IVs.
-func GenerateFileId() ([]byte, error) {
-	return GenerateKey() // Same size and randomness requirements as encryption key
-}
 
 // DerivePartKeyIV derives a unique key and IV for a specific part using HKDF-SHA256.
 // This is FIPS 140-3 approved for key derivation.

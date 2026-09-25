@@ -21,24 +21,24 @@ func formatRescaleTime(t time.Time) string {
 // upload/download -e fixture. Fields are declared in fixture order so
 // json.Marshal produces matching field ordering.
 type compatFileEntry struct {
-	Name                 string                   `json:"name"`
+	Name                 string                     `json:"name"`
 	PathParts            *models.CloudFilePathParts `json:"pathParts"`
-	Storage              *compatFileStorage       `json:"storage"`
-	EncodedEncryptionKey string                   `json:"encodedEncryptionKey"`
-	IsUploaded           bool                     `json:"isUploaded"`
-	DecryptedSize        int64                    `json:"decryptedSize"`
-	TypeID               int                      `json:"typeId"`
-	FileChecksums        []models.FileChecksum    `json:"fileChecksums"`
-	ID                   string                   `json:"id"`
+	Storage              *compatFileStorage         `json:"storage"`
+	EncodedEncryptionKey string                     `json:"encodedEncryptionKey"`
+	IsUploaded           bool                       `json:"isUploaded"`
+	DecryptedSize        int64                      `json:"decryptedSize"`
+	TypeID               int                        `json:"typeId"`
+	FileChecksums        []models.FileChecksum      `json:"fileChecksums"`
+	ID                   string                     `json:"id"`
 }
 
 // compatFileStorage mirrors CloudFileStorage but always includes connectionSettings
 // (no omitempty) to match rescale-cli output.
 type compatFileStorage struct {
-	StorageType        string                      `json:"storageType"`
-	ID                 string                      `json:"id"`
-	EncryptionType     string                      `json:"encryptionType"`
-	ConnectionSettings compatConnectionSettings    `json:"connectionSettings"`
+	StorageType        string                   `json:"storageType"`
+	ID                 string                   `json:"id"`
+	EncryptionType     string                   `json:"encryptionType"`
+	ConnectionSettings compatConnectionSettings `json:"connectionSettings"`
 }
 
 // compatConnectionSettings mirrors models.ConnectionSettings but with omitempty on
@@ -97,16 +97,6 @@ type transferEnvelope struct {
 }
 
 func writeTransferEnvelope(w io.Writer, success bool, start, end time.Time, files []compatFileEntry) error {
-	env := transferEnvelope{
-		Success:   success,
-		StartTime: formatRescaleTime(start),
-		EndTime:   formatRescaleTime(end),
-		Files:     files,
-	}
-	return writeJSON(w, env)
-}
-
-func writeTransferEnvelopeRaw(w io.Writer, success bool, start, end time.Time, files []json.RawMessage) error {
 	env := transferEnvelope{
 		Success:   success,
 		StartTime: formatRescaleTime(start),

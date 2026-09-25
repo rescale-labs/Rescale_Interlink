@@ -1639,7 +1639,7 @@ func (u *resumableStreamingUploader) UploadLimits() resources.UploadLimits {
 }
 
 func (u *resumableStreamingUploader) InitStreamingUpload(_ context.Context, params transfer.StreamingUploadInitParams) (*transfer.StreamingUpload, error) {
-	encryptState, err := transfer.NewStreamingEncryptionState(u.partSize)
+	encryptState, err := encryption.NewCBCStreamingEncryptor()
 	if err != nil {
 		return nil, err
 	}
@@ -1668,8 +1668,8 @@ func (u *resumableStreamingUploader) InitStreamingUpload(_ context.Context, para
 }
 
 func (u *resumableStreamingUploader) InitStreamingUploadFromState(_ context.Context, params transfer.StreamingUploadResumeParams) (*transfer.StreamingUpload, error) {
-	encryptState, err := transfer.NewStreamingEncryptionStateFromKey(
-		params.MasterKey, params.InitialIV, params.CurrentIV, params.PartSize)
+	encryptState, err := encryption.NewCBCStreamingEncryptorWithKey(
+		params.MasterKey, params.InitialIV, params.CurrentIV)
 	if err != nil {
 		return nil, err
 	}
@@ -1835,9 +1835,9 @@ func (u *resumableStreamingUploader) waitForUploaded(ctx context.Context, count 
 func uninterruptedCiphertext(t *testing.T, data, masterKey, initialIV []byte, partSize int64) []byte {
 	t.Helper()
 	// currentIV = initialIV places the chain at part 0, where every upload starts.
-	encryptState, err := transfer.NewStreamingEncryptionStateFromKey(masterKey, initialIV, initialIV, partSize)
+	encryptState, err := encryption.NewCBCStreamingEncryptorWithKey(masterKey, initialIV, initialIV)
 	if err != nil {
-		t.Fatalf("NewStreamingEncryptionStateFromKey: %v", err)
+		t.Fatalf("NewCBCStreamingEncryptorWithKey: %v", err)
 	}
 
 	totalParts := transfer.CalculateTotalParts(int64(len(data)), partSize)

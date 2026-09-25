@@ -10,21 +10,13 @@ import (
 )
 
 func TestFormatSLF4JTimestamp(t *testing.T) {
-	// Fixed time: 2026-03-15 14:30:45.123
-	ts := time.Date(2026, 3, 15, 14, 30, 45, 123000000, time.UTC)
-	got := FormatSLF4JTimestamp(ts)
-	want := "2026-03-15 14:30:45,123"
-	if got != want {
-		t.Errorf("FormatSLF4JTimestamp() = %q, want %q", got, want)
-	}
-}
-
-func TestFormatSLF4JTimestamp_MillisZero(t *testing.T) {
-	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	got := FormatSLF4JTimestamp(ts)
-	want := "2026-01-01 00:00:00,000"
-	if got != want {
-		t.Errorf("FormatSLF4JTimestamp() = %q, want %q", got, want)
+	for ts, want := range map[time.Time]string{
+		time.Date(2026, 3, 15, 14, 30, 45, 123000000, time.UTC): "2026-03-15 14:30:45,123",
+		time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC):             "2026-01-01 00:00:00,000",
+	} {
+		if got := FormatSLF4JTimestamp(ts); got != want {
+			t.Errorf("FormatSLF4JTimestamp(%v) = %q, want %q", ts, got, want)
+		}
 	}
 }
 
@@ -155,19 +147,5 @@ func TestGetCompatContext_NilContext(t *testing.T) {
 	got := GetCompatContext(cmd)
 	if got != nil {
 		t.Errorf("GetCompatContext() = %v, want nil for command with no context", got)
-	}
-}
-
-func TestCompatContext_CredentialPrecedence(t *testing.T) {
-	// Test that -p flag takes precedence over env var.
-	// We can't fully test GetAPIClient without a real API server,
-	// but we can verify the field is populated correctly.
-	cc := &CompatContext{
-		APIKey:     "flag-key",
-		APIBaseURL: "https://platform.rescale.com",
-	}
-	// The key from the flag should be used
-	if cc.APIKey != "flag-key" {
-		t.Errorf("APIKey = %q, want %q", cc.APIKey, "flag-key")
 	}
 }

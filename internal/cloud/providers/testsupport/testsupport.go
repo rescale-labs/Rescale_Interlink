@@ -6,7 +6,10 @@
 package testsupport
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/tls"
 	"encoding/json"
 	"net"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/resources"
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
 )
@@ -79,4 +83,29 @@ func WriteResumeState(t *testing.T, localPath string, resumeState *state.UploadR
 	if err := os.WriteFile(localPath+".upload.resume", data, 0600); err != nil {
 		t.Fatalf("failed to write resume state: %v", err)
 	}
+}
+
+// HKDFObject encrypts plaintext in the legacy per-part HKDF format (format
+// version 1), partSize bytes to a part, under a fresh master key and file ID.
+// Nothing uploads that format any more, but downloads still have to read it.
+func HKDFObject(t *testing.T, plaintext []byte, partSize int64) (ciphertext, masterKey, fileID []byte) {
+	t.Helper()
+	masterKey, _ = encryption.GenerateKey()
+	fileID, _ = encryption.GenerateKey() // same size as a key
+	for index := int64(0); index*partSize < int64(len(plaintext)); index++ {
+		part := plaintext[index*partSize : min((index+1)*partSize, int64(len(plaintext)))]
+		key, iv, err := encryption.DerivePartKeyIV(masterKey, fileID, index)
+		if err != nil {
+			t.Fatalf("DerivePartKeyIV(%d): %v", index, err)
+		}
+		block, err := aes.NewCipher(key)
+		if err != nil {
+			t.Fatalf("aes.NewCipher: %v", err)
+		}
+		pad := aes.BlockSize - len(part)%aes.BlockSize
+		padded := append(bytes.Clone(part), bytes.Repeat([]byte{byte(pad)}, pad)...)
+		cipher.NewCBCEncrypter(block, iv).CryptBlocks(padded, padded)
+		ciphertext = append(ciphertext, padded...)
+	}
+	return ciphertext, masterKey, fileID
 }

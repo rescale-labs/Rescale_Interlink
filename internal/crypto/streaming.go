@@ -8,7 +8,8 @@
 //   - Sequential part encryption required (maintains CBC state)
 //   - Rescale platform can decrypt files with key + IV
 //
-// Legacy Design (v3.1.x - HKDF per-part, kept for backward compatibility):
+// Legacy Design (HKDF per-part, format version 1; decryption only, for files
+// uploaded in that format):
 //   - Per-part keys and IVs derived using HKDF-SHA256
 //   - PKCS7 padding applied to each part independently
 //   - Not compatible with Rescale platform decryption
@@ -267,27 +268,12 @@ func (d *CBCStreamingDecryptor) DecryptPart(ciphertext []byte, isFinal bool) ([]
 }
 
 // =============================================================================
-// LEGACY: HKDF Per-Part Streaming Encryption (for backward compatibility)
-// These types are used for downloading files uploaded with v3.1.x and earlier.
-// DO NOT use for new uploads - use CBCStreamingEncryptor instead.
+// LEGACY: HKDF Per-Part Streaming Decryption, for files uploaded in format
+// version 1. Nothing writes this format any more.
 // =============================================================================
 
-// StreamingEncryptor provides per-part encryption for streaming multipart uploads.
-// DEPRECATED: Use CBCStreamingEncryptor for new uploads. This type is kept only
-// for backward compatibility with files uploaded using the old format.
-//
-// It generates a unique key/IV for each part using HKDF, enabling:
-//   - Resume: re-encrypt any part without re-encrypting previous parts
-//   - Determinism: same plaintext + same parameters = same ciphertext
-//   - No temp file: encrypt directly during upload
-type StreamingEncryptor struct {
-	masterKey []byte
-	fileId    []byte
-	partSize  int64
-}
-
 // StreamingDecryptor provides per-part decryption for streaming downloads.
-// Used for files uploaded with the legacy HKDF format (v3.1.x and earlier).
+// Used for files uploaded with the legacy HKDF format (format version 1).
 // It derives the same key/IV for each part that was used during encryption.
 type StreamingDecryptor struct {
 	masterKey []byte
@@ -295,140 +281,8 @@ type StreamingDecryptor struct {
 	partSize  int64
 }
 
-// NewStreamingEncryptor creates an encryptor for streaming uploads.
-// DEPRECATED: Use NewCBCStreamingEncryptor for new uploads.
-//
-// It generates a new random masterKey and fileId for this upload.
-//
-// Parameters:
-//   - partSize: size of each plaintext part in bytes (e.g., 16MB)
-//
-// The masterKey should be stored in the Rescale API after upload.
-// The fileId should be stored in cloud object metadata.
-func NewStreamingEncryptor(partSize int64) (*StreamingEncryptor, error) {
-	if partSize <= 0 {
-		return nil, fmt.Errorf("part size must be positive, got %d", partSize)
-	}
-
-	masterKey, err := GenerateKey()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate master key: %w", err)
-	}
-
-	fileId, err := GenerateFileId()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate file ID: %w", err)
-	}
-
-	return &StreamingEncryptor{
-		masterKey: masterKey,
-		fileId:    fileId,
-		partSize:  partSize,
-	}, nil
-}
-
-// NewStreamingEncryptorWithKey creates an encryptor with an existing masterKey and fileId.
-// DEPRECATED: Use NewCBCStreamingEncryptorWithKey for new uploads.
-//
-// This is used for resuming uploads where we need to use the same encryption parameters.
-//
-// Parameters:
-//   - masterKey: 32-byte encryption key (from resume state)
-//   - fileId: 32-byte file identifier (from resume state)
-//   - partSize: size of each plaintext part in bytes
-func NewStreamingEncryptorWithKey(masterKey, fileId []byte, partSize int64) (*StreamingEncryptor, error) {
-	if len(masterKey) != KeySize {
-		return nil, fmt.Errorf("master key must be %d bytes, got %d", KeySize, len(masterKey))
-	}
-	if len(fileId) != FileIdSize {
-		return nil, fmt.Errorf("file ID must be %d bytes, got %d", FileIdSize, len(fileId))
-	}
-	if partSize <= 0 {
-		return nil, fmt.Errorf("part size must be positive, got %d", partSize)
-	}
-
-	// Make copies to prevent external modification
-	keyCopy := make([]byte, KeySize)
-	copy(keyCopy, masterKey)
-
-	idCopy := make([]byte, FileIdSize)
-	copy(idCopy, fileId)
-
-	return &StreamingEncryptor{
-		masterKey: keyCopy,
-		fileId:    idCopy,
-		partSize:  partSize,
-	}, nil
-}
-
-// EncryptPart encrypts a single part using AES-256-CBC with PKCS7 padding.
-// DEPRECATED: Use CBCStreamingEncryptor.EncryptPart for new uploads.
-//
-// The key and IV for this part are derived deterministically from (masterKey, fileId, partIndex).
-//
-// Parameters:
-//   - partIndex: 0-based index of the part (0 for first part, 1 for second, etc.)
-//   - plaintext: the plaintext data for this part (may be smaller than partSize for last part)
-//
-// Returns:
-//   - ciphertext: encrypted data with PKCS7 padding (always a multiple of 16 bytes)
-//   - error: if encryption fails
-//
-// Important: The ciphertext will be slightly larger than plaintext due to PKCS7 padding (1-16 bytes).
-func (se *StreamingEncryptor) EncryptPart(partIndex int64, plaintext []byte) ([]byte, error) {
-	if partIndex < 0 {
-		return nil, fmt.Errorf("part index must be non-negative, got %d", partIndex)
-	}
-	if len(plaintext) == 0 {
-		// Empty part is valid (empty file = 0 parts, or edge case)
-		// Return encrypted empty data with full padding block
-		plaintext = []byte{}
-	}
-
-	// Derive key and IV for this specific part
-	key, iv, err := DerivePartKeyIV(se.masterKey, se.fileId, partIndex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive key for part %d: %w", partIndex, err)
-	}
-
-	// Create AES cipher
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cipher for part %d: %w", partIndex, err)
-	}
-
-	// Apply PKCS7 padding
-	paddedPlaintext := pkcs7Pad(plaintext, aes.BlockSize)
-
-	// Encrypt with CBC mode
-	ciphertext := make([]byte, len(paddedPlaintext))
-	mode := cipher.NewCBCEncrypter(block, iv)
-	mode.CryptBlocks(ciphertext, paddedPlaintext)
-
-	return ciphertext, nil
-}
-
-// GetMasterKey returns the master encryption key (for storage in Rescale API).
-func (se *StreamingEncryptor) GetMasterKey() []byte {
-	result := make([]byte, KeySize)
-	copy(result, se.masterKey)
-	return result
-}
-
-// GetFileId returns the file identifier (for storage in cloud object metadata).
-func (se *StreamingEncryptor) GetFileId() []byte {
-	result := make([]byte, FileIdSize)
-	copy(result, se.fileId)
-	return result
-}
-
-// GetPartSize returns the part size in bytes.
-func (se *StreamingEncryptor) GetPartSize() int64 {
-	return se.partSize
-}
-
 // NewStreamingDecryptor creates a decryptor from metadata and master key.
-// Used for files uploaded with the legacy HKDF format (v3.1.x and earlier).
+// Used for files uploaded with the legacy HKDF format (format version 1).
 //
 // Parameters:
 //   - masterKey: 32-byte encryption key (from Rescale API)
@@ -460,7 +314,7 @@ func NewStreamingDecryptor(masterKey, fileId []byte, partSize int64) (*Streaming
 }
 
 // DecryptPart decrypts a single part using AES-256-CBC and removes PKCS7 padding.
-// Used for files uploaded with the legacy HKDF format (v3.1.x and earlier).
+// Used for files uploaded with the legacy HKDF format (format version 1).
 //
 // The key and IV for this part are derived deterministically from (masterKey, fileId, partIndex).
 //

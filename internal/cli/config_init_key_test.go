@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 // At a terminal the API key is read without echo, so it never reaches the
@@ -30,5 +32,9 @@ func TestConfigInitReadsTheAPIKeyWithoutEcho(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(filepath.Dir(path), "token")); strings.TrimSpace(string(got)) != "FAKEKEY-typed" {
 		t.Errorf("token file holds %q, want the key typed at the terminal", got)
+	}
+	// Without --config, the answers land at the default location.
+	if cfg, err := config.LoadConfigCSV(path); err != nil || cfg.TarWorkers != 7 {
+		t.Errorf("config at the default path %s: %+v, %v; want 7 tar workers", path, cfg, err)
 	}
 }

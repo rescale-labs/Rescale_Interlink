@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
-	"github.com/rescale/rescale-int/internal/crypto"
 )
 
 // TestUploadProgressReaderSeek verifies that uploadProgressReader implements
@@ -275,33 +275,20 @@ func (h *hkdfObjectBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Reque
 func newHKDFObject(t *testing.T, parts int, partSize int64) (*hkdfObjectBackend, []byte, []byte) {
 	t.Helper()
 
-	encryptor, err := encryption.NewStreamingEncryptor(partSize)
-	if err != nil {
-		t.Fatalf("NewStreamingEncryptor: %v", err)
-	}
-
 	plaintext := make([]byte, int64(parts)*partSize)
 	for i := range plaintext {
 		plaintext[i] = byte(i*11 + 3)
 	}
-
-	var ciphertext []byte
-	for index := 0; index < parts; index++ {
-		part, err := encryptor.EncryptPart(int64(index), plaintext[int64(index)*partSize:int64(index+1)*partSize])
-		if err != nil {
-			t.Fatalf("EncryptPart(%d): %v", index, err)
-		}
-		ciphertext = append(ciphertext, part...)
-	}
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	return &hkdfObjectBackend{
 		ciphertext: ciphertext,
 		metadata: map[string]string{
 			"formatversion": "1",
-			"fileid":        base64.StdEncoding.EncodeToString(encryptor.GetFileId()),
+			"fileid":        base64.StdEncoding.EncodeToString(fileID),
 			"partsize":      strconv.FormatInt(partSize, 10),
 		},
-	}, encryptor.GetMasterKey(), plaintext
+	}, masterKey, plaintext
 }
 
 // TestDownloadStreamingAbortsWhenTheObjectIsReplaced is the v1 half of pinning a

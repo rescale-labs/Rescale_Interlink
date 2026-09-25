@@ -319,13 +319,7 @@ func (eb *EventBus) Publish(event Event) {
 			// Successfully sent
 		default:
 			// Channel full - event dropped
-			// Increment atomic counter for monitoring
-			dropped := eb.droppedEvents.Add(1)
-			// Log warning every 100 drops to avoid log spam
-			if dropped%100 == 0 {
-				// Note: In production, this should use structured logging
-				// For now, we just track the metric
-			}
+			eb.droppedEvents.Add(1)
 		}
 	}
 

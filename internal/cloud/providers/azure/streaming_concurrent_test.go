@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/cloud/providers/testsupport"
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
-	"github.com/rescale/rescale-int/internal/crypto"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
 )
@@ -309,21 +309,8 @@ func (h *hkdfBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 func newHKDFBlob(t *testing.T, parts int, partSize int64) (*hkdfBlobBackend, []byte, []byte) {
 	t.Helper()
 
-	encryptor, err := encryption.NewStreamingEncryptor(partSize)
-	if err != nil {
-		t.Fatalf("NewStreamingEncryptor: %v", err)
-	}
-	masterKey, fileID := encryptor.GetMasterKey(), encryptor.GetFileId()
-
 	plaintext := streamingTestData(parts, partSize)
-	var ciphertext []byte
-	for index := 0; index < parts; index++ {
-		part, err := encryptor.EncryptPart(int64(index), plaintext[int64(index)*partSize:int64(index+1)*partSize])
-		if err != nil {
-			t.Fatalf("EncryptPart(%d): %v", index, err)
-		}
-		ciphertext = append(ciphertext, part...)
-	}
+	ciphertext, masterKey, fileID := testsupport.HKDFObject(t, plaintext, partSize)
 
 	return &hkdfBlobBackend{
 		ciphertext: ciphertext,

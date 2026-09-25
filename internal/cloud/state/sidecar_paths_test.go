@@ -40,41 +40,38 @@ func TestCleanupExpiredDownloadResumeRemovesOnlyItsOwnTempFile(t *testing.T) {
 	}
 }
 
+// sidecarSavers writes each kind of sidecar for localPath, keyed by its suffix.
+var sidecarSavers = map[string]func(localPath string) error{
+	".upload.resume": func(p string) error {
+		return SaveUploadState(&UploadResumeState{LocalPath: p, EncryptionKey: "FAKEKEY"}, p)
+	},
+	".download.resume": func(p string) error {
+		return SaveDownloadState(&DownloadResumeState{LocalPath: p}, p)
+	},
+}
+
 // Sidecars were written through a fixed "<sidecar>.tmp" name with
 // os.WriteFile, whose mode applies only when it creates the file: a stale temp
 // file kept its looser mode. (A link at that name is refused; see
 // paths.TestWritePrivateFileReclaimsWhatAKilledWriteLeft.)
 func TestSidecarsIgnoreWhateverIsAtTheOldTempName(t *testing.T) {
-	type sidecar struct {
-		name string
-		save func(localPath string) error
-	}
-	sidecars := []sidecar{
-		{".upload.resume", func(p string) error {
-			return SaveUploadState(&UploadResumeState{LocalPath: p, EncryptionKey: "FAKEKEY"}, p)
-		}},
-		{".download.resume", func(p string) error {
-			return SaveDownloadState(&DownloadResumeState{LocalPath: p, MasterKey: "FAKEKEY"}, p)
-		}},
-	}
-
-	for _, sc := range sidecars {
-		t.Run(sc.name+" stale temp", func(t *testing.T) {
+	for suffix, save := range sidecarSavers {
+		t.Run(suffix+" stale temp", func(t *testing.T) {
 			if runtime.GOOS == "windows" {
 				t.Skip("Windows keeps no Unix permission bits")
 			}
 			localPath := filepath.Join(t.TempDir(), "data.bin")
-			tmp := localPath + sc.name + ".tmp"
+			tmp := localPath + suffix + ".tmp"
 			if err := os.WriteFile(tmp, nil, 0666); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Chmod(tmp, 0666); err != nil {
 				t.Fatal(err)
 			}
-			if err := sc.save(localPath); err != nil {
+			if err := save(localPath); err != nil {
 				t.Fatalf("save: %v", err)
 			}
-			info, err := os.Stat(localPath + sc.name)
+			info, err := os.Stat(localPath + suffix)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -91,14 +88,7 @@ func TestSidecarsIgnoreWhateverIsAtTheOldTempName(t *testing.T) {
 // back to a short one there.
 func TestSidecarsFitAtTheNameLengthLimit(t *testing.T) {
 	for _, first := range []string{"a", "é"} { // 1 and 2 bytes
-		for suffix, save := range map[string]func(localPath string) error{
-			".upload.resume": func(p string) error {
-				return SaveUploadState(&UploadResumeState{LocalPath: p, EncryptionKey: "FAKEKEY"}, p)
-			},
-			".download.resume": func(p string) error {
-				return SaveDownloadState(&DownloadResumeState{LocalPath: p, MasterKey: "FAKEKEY"}, p)
-			},
-		} {
+		for suffix, save := range sidecarSavers {
 			name := first + strings.Repeat("a", 255-len(first)-len(suffix))
 			localPath := filepath.Join(t.TempDir(), name)
 			if err := save(localPath); err != nil {

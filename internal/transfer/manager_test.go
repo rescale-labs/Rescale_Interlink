@@ -6,170 +6,42 @@ import (
 	"github.com/rescale/rescale-int/internal/resources"
 )
 
-func TestNewManager(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 10, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	if transferMgr == nil {
-		t.Fatal("NewManager returned nil")
-	}
-}
-
-func TestAllocateTransfer(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 10, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	transfer := transferMgr.AllocateTransfer(1024*1024*1024, 1) // 1GB file
-	if transfer == nil {
-		t.Fatal("AllocateTransfer returned nil")
+// The manager only wraps resources.Manager, whose tests pin the thread
+// policy. These pin the wrapper: it hands back the pool's allocation (one
+// thread for a small file, several for a large one), releases it on Complete,
+// which is idempotent, and gives every transfer its own ID.
+func TestManagerWrapsResourceManager(t *testing.T) {
+	// A pinned 16-core machine, so the per-file cap is not the host's core count.
+	transferMgr := NewManager(resources.NewManager(resources.Config{MaxThreads: 16, AutoScale: true, CPUCores: 16, MemoryBudget: 8 << 30}))
+	initial := transferMgr.GetStats()
+	if initial.TotalThreads != 16 || initial.ActiveTransfers != 0 {
+		t.Fatalf("fresh manager stats = %+v, want 16 threads and no transfers", initial)
 	}
 
-	threads := transfer.GetThreads()
-	if threads < 1 {
-		t.Errorf("Expected at least 1 thread, got %d", threads)
+	small := transferMgr.AllocateTransfer(50*1024*1024, 1)
+	if small.GetThreads() != 1 {
+		t.Errorf("a 50 MB file got %d threads, want 1", small.GetThreads())
+	}
+	small.Complete()
+
+	large := transferMgr.AllocateTransfer(10*1024*1024*1024, 1)
+	if large.GetThreads() < 5 {
+		t.Errorf("a 10 GB file got %d threads, want at least 5", large.GetThreads())
+	}
+	other := transferMgr.AllocateTransfer(2*1024*1024*1024, 1)
+	if large.GetID() == "" || large.GetID() == other.GetID() || large.String() == "" {
+		t.Errorf("IDs %q and %q, String %q: want two distinct IDs and a description", large.GetID(), other.GetID(), large.String())
+	}
+	if stats := transferMgr.GetStats(); stats.ActiveTransfers != 2 || stats.ActiveThreads == 0 {
+		t.Errorf("stats with two transfers = %+v", stats)
 	}
 
-	if transfer.GetID() == "" {
-		t.Error("Transfer ID should not be empty")
+	for i := 0; i < 3; i++ {
+		large.Complete()
 	}
-
-	// Complete the transfer
-	transfer.Complete()
-}
-
-func TestTransferComplete(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 10, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	initialStats := transferMgr.GetStats()
-
-	transfer := transferMgr.AllocateTransfer(500*1024*1024, 1)
-	threads := transfer.GetThreads()
-
-	activeStats := transferMgr.GetStats()
-	if activeStats.ActiveTransfers != initialStats.ActiveTransfers+1 {
-		t.Error("Active transfers should increase after allocation")
-	}
-
-	// Complete the transfer
-	transfer.Complete()
-
-	completedStats := transferMgr.GetStats()
-	if completedStats.AvailableThreads != initialStats.AvailableThreads {
-		t.Errorf("Expected %d available threads after completion, got %d",
-			initialStats.AvailableThreads, completedStats.AvailableThreads)
-	}
-
-	// Multiple Complete() calls should be safe
-	transfer.Complete()
-	transfer.Complete()
-
-	// Verify threads allocation
-	if threads < 1 {
-		t.Errorf("Expected at least 1 thread allocated")
-	}
-}
-
-func TestMultipleTransfers(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 20, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	// Allocate multiple transfers
-	transfers := make([]*Transfer, 5)
-	for i := 0; i < 5; i++ {
-		transfers[i] = transferMgr.AllocateTransfer(1024*1024*1024, 5)
-		if transfers[i] == nil {
-			t.Fatalf("Failed to allocate transfer %d", i)
-		}
-	}
-
-	stats := transferMgr.GetStats()
-	if stats.ActiveTransfers != 5 {
-		t.Errorf("Expected 5 active transfers, got %d", stats.ActiveTransfers)
-	}
-
-	// Complete all transfers
-	for _, transfer := range transfers {
-		transfer.Complete()
-	}
-
-	finalStats := transferMgr.GetStats()
-	if finalStats.ActiveTransfers != 0 {
-		t.Errorf("Expected 0 active transfers after completion, got %d", finalStats.ActiveTransfers)
-	}
-	if finalStats.AvailableThreads != finalStats.TotalThreads {
-		t.Error("All threads should be available after all transfers complete")
-	}
-}
-
-func TestGetStats(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 15, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	stats := transferMgr.GetStats()
-	if stats.TotalThreads != 15 {
-		t.Errorf("Expected total threads 15, got %d", stats.TotalThreads)
-	}
-	if stats.ActiveTransfers != 0 {
-		t.Errorf("Expected 0 active transfers, got %d", stats.ActiveTransfers)
-	}
-
-	// Allocate a transfer
-	transfer := transferMgr.AllocateTransfer(2*1024*1024*1024, 1)
-	defer transfer.Complete()
-
-	stats = transferMgr.GetStats()
-	if stats.ActiveTransfers != 1 {
-		t.Errorf("Expected 1 active transfer, got %d", stats.ActiveTransfers)
-	}
-	if stats.ActiveThreads == 0 {
-		t.Error("Expected some active threads")
-	}
-}
-
-func TestTransferString(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 10, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	transfer := transferMgr.AllocateTransfer(1024*1024*1024, 1)
-	defer transfer.Complete()
-
-	str := transfer.String()
-	if str == "" {
-		t.Error("Transfer.String() should not be empty")
-	}
-
-	// Should contain transfer ID
-	if transfer.GetID() == "" {
-		t.Error("Transfer ID should not be empty")
-	}
-}
-
-func TestSmallFileAllocation(t *testing.T) {
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 16, AutoScale: true})
-	transferMgr := NewManager(resourceMgr)
-
-	// Small file should get 1 thread
-	transfer := transferMgr.AllocateTransfer(50*1024*1024, 1) // 50MB
-	defer transfer.Complete()
-
-	if transfer.GetThreads() != 1 {
-		t.Errorf("Small file should get 1 thread, got %d", transfer.GetThreads())
-	}
-}
-
-func TestLargeFileAllocation(t *testing.T) {
-	// Per-file allocation is capped at the core count, so pin a 16-core machine:
-	// on a smaller host the pool size (16) would not be the binding constraint.
-	resourceMgr := resources.NewManager(resources.Config{MaxThreads: 16, AutoScale: true, CPUCores: 16})
-	transferMgr := NewManager(resourceMgr)
-
-	// Large file should get multiple threads
-	transfer := transferMgr.AllocateTransfer(10*1024*1024*1024, 1) // 10GB
-	defer transfer.Complete()
-
-	if transfer.GetThreads() < 5 {
-		t.Errorf("Large file should get at least 5 threads, got %d", transfer.GetThreads())
+	other.Complete()
+	if stats := transferMgr.GetStats(); stats.ActiveTransfers != 0 || stats.AvailableThreads != initial.AvailableThreads {
+		t.Errorf("stats after completion = %+v, want everything returned (%+v)", stats, initial)
 	}
 }
 

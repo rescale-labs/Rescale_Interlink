@@ -39,12 +39,7 @@ type DownloadResumeState struct {
 	// Byte range tracking for accurate resume
 	CompletedRanges []ByteRange `json:"completed_ranges,omitempty"` // Exact byte ranges written to disk
 
-	// Streaming decryption fields (FormatVersion=1)
-	FormatVersion   int     `json:"format_version"`              // 0=legacy, 1=streaming
-	MasterKey       string  `json:"master_key,omitempty"`        // Base64-encoded master key (v1 only)
-	StreamingFileId string  `json:"streaming_file_id,omitempty"` // Base64-encoded file ID from metadata (v1 only)
-	PartSize        int64   `json:"part_size,omitempty"`         // Plaintext part size (v1 only)
-	CompletedParts  []int64 `json:"completed_parts,omitempty"`   // Completed part indices (v1 only)
+	FormatVersion int `json:"format_version"` // 0=legacy, 1=streaming
 }
 
 // =============================================================================

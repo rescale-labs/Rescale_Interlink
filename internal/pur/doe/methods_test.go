@@ -36,20 +36,6 @@ func TestMethods_CoverEveryMethodInOrder(t *testing.T) {
 	}
 }
 
-func TestMethodInfoFor(t *testing.T) {
-	info, ok := MethodInfoFor(MethodSobol)
-	if !ok {
-		t.Fatal("MethodInfoFor(sobol) reported not found")
-	}
-	if info.MaxParameters != sobolMaxDimensions {
-		t.Errorf("sobol MaxParameters = %d, want %d", info.MaxParameters, sobolMaxDimensions)
-	}
-
-	if _, ok := MethodInfoFor(Method("nonsense")); ok {
-		t.Error("MethodInfoFor reported an unknown method as found")
-	}
-}
-
 // Every MethodInfo field is a claim about what validation does, checked against
 // validation itself rather than against a second copy of the expectations.
 func TestMethods_MetadataAgreesWithValidation(t *testing.T) {

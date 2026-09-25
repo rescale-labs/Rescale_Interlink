@@ -386,48 +386,31 @@ func sha512Of(t *testing.T, data []byte) []models.FileChecksum {
 	return []models.FileChecksum{{HashFunction: "sha512", FileHash: hex.EncodeToString(sum[:])}}
 }
 
-// sameSizeLocalFile is what an interrupted download of "hello" leaves behind:
-// the right length, other bytes.
-func sameSizeLocalFile(t *testing.T) string {
-	t.Helper()
+// alreadyDownloaded adopts a same-size file only when a SHA-512, however it is
+// spelled, matches it; it once matched three exact spellings and adopted the
+// rest by length. With nothing to check against it adopts by length, and warns
+// when the file carried some other checksum, as downloads do; a file with no
+// checksum at all stays quiet.
+func TestAlreadyDownloadedChecksums(t *testing.T) {
 	localPath := filepath.Join(t.TempDir(), "out1.txt")
-	if err := os.WriteFile(localPath, []byte("world"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	return localPath
-}
-
-// alreadyDownloaded matched three exact spellings of SHA-512, so a same-size
-// file whose checksum came spelled any other way was adopted by its length.
-func TestAlreadyDownloadedChecksAnySpellingOfSHA512(t *testing.T) {
-	localPath := sameSizeLocalFile(t)
+	writeFile(t, localPath, "world") // what an interrupted download of "hello" leaves
 	remote := sha512Of(t, []byte("hello"))[0].FileHash
-	for _, spelling := range []string{"sha512", "SHA-512", "sha-512", "Sha512"} {
-		d := &Daemon{logger: logging.NewLoggerWithWriter(new(bytes.Buffer))}
-		f := models.JobFile{DecryptedSize: 5, FileChecksums: []models.FileChecksum{{HashFunction: spelling, FileHash: remote}}}
-		if d.alreadyDownloaded(localPath, f) {
-			t.Errorf("%s: a same-size file with other contents was adopted", spelling)
-		}
-	}
-}
-
-// A file whose checksums include no SHA-512 can only be adopted by its length.
-// Downloads warn that such a file was not verified; the daemon said so only at
-// debug level. A file with no checksums at all stays quiet, as downloads do.
-func TestAlreadyDownloadedWarnsWhenNothingCanVerifyTheFile(t *testing.T) {
-	localPath := sameSizeLocalFile(t)
 	for _, tc := range []struct {
-		checksums []models.FileChecksum
-		warn      bool
+		checksums   []models.FileChecksum
+		adopt, warn bool
 	}{
-		{[]models.FileChecksum{{HashFunction: "md5", FileHash: "abc"}}, true},
-		{nil, false},
-		{[]models.FileChecksum{{HashFunction: "sha512"}}, false}, // no hash: no checksum
+		{[]models.FileChecksum{{HashFunction: "md5", FileHash: "abc"}}, true, true},
+		{nil, true, false},
+		{[]models.FileChecksum{{HashFunction: "sha512"}}, true, false}, // no hash: no checksum
+		{[]models.FileChecksum{{HashFunction: "sha512", FileHash: remote}}, false, true},
+		{[]models.FileChecksum{{HashFunction: "SHA-512", FileHash: remote}}, false, true},
+		{[]models.FileChecksum{{HashFunction: "sha-512", FileHash: remote}}, false, true},
+		{[]models.FileChecksum{{HashFunction: "Sha512", FileHash: remote}}, false, true},
 	} {
 		var logs bytes.Buffer
 		d := &Daemon{logger: logging.NewLoggerWithWriter(&logs)}
-		if !d.alreadyDownloaded(localPath, models.JobFile{DecryptedSize: 5, FileChecksums: tc.checksums}) {
-			t.Errorf("checksums %v: a same-size file with nothing to check it against was not adopted", tc.checksums)
+		if got := d.alreadyDownloaded(localPath, models.JobFile{DecryptedSize: 5, FileChecksums: tc.checksums}); got != tc.adopt {
+			t.Errorf("checksums %v: adopted %v, want %v", tc.checksums, got, tc.adopt)
 		}
 		if warned := strings.Contains(logs.String(), `"level":"warn"`); warned != tc.warn {
 			t.Errorf("checksums %v: warned %v, want %v; logged %s", tc.checksums, warned, tc.warn, logs.String())

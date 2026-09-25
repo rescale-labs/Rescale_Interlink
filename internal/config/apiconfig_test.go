@@ -25,62 +25,19 @@ func TestNewAPIConfig(t *testing.T) {
 	}
 }
 
-func TestSaveAndLoadAPIConfig(t *testing.T) {
-	// Create temp directory
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-
-	// Create test config
-	cfg := &APIConfig{
-		PlatformURL: "https://test.rescale.com",
-		APIKey:      "test-api-key-12345",
-		Notifications: NotificationConfig{
-			Enabled:              true,
-			ShowDownloadComplete: false,
-			ShowDownloadFailed:   true,
-		},
-	}
-
-	// Save config
-	if err := SaveAPIConfig(cfg, configPath); err != nil {
-		t.Fatalf("SaveAPIConfig failed: %v", err)
-	}
-
-	// Verify file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		t.Fatal("config file was not created")
-	}
-
-	// Load config back
-	loadedCfg, err := LoadAPIConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadAPIConfig failed: %v", err)
-	}
-
-	// Verify values
-	if loadedCfg.PlatformURL != cfg.PlatformURL {
-		t.Errorf("PlatformURL mismatch: expected %s, got %s", cfg.PlatformURL, loadedCfg.PlatformURL)
-	}
-	// API key is intentionally NOT written to file.
-	// SaveAPIConfig strips legacy keys on save.
-	if loadedCfg.APIKey != "" {
-		t.Errorf("APIKey should not be saved to file, but loaded as %q", loadedCfg.APIKey)
-	}
-	if loadedCfg.Notifications != cfg.Notifications {
-		t.Errorf("Notifications mismatch: expected %+v, got %+v", cfg.Notifications, loadedCfg.Notifications)
-	}
-}
-
 func TestLoadAPIConfig(t *testing.T) {
+	defaults := NewAPIConfig().Notifications
 	tests := []struct {
 		name string
-		// content, when set, is written to a temp apiconfig; path overrides it.
+		// content, when set, is written to a temp apiconfig, or to the default
+		// location of an isolated home when atDefault is set; path overrides it.
 		content    string
+		atDefault  bool
 		path       string
 		wantErr    bool
 		wantURL    string
 		wantAPIKey string
-		wantNonNil bool
+		wantNotify *NotificationConfig // nil: the defaults
 	}{
 		{
 			// A missing file is not an error: the defaults stand in.
@@ -89,11 +46,15 @@ func TestLoadAPIConfig(t *testing.T) {
 			wantURL: "https://platform.rescale.com",
 		},
 		{
-			// An empty path means "the default location", which may or may not
-			// exist on the machine running the test; either way it must not error.
-			name:       "empty path uses the default location",
-			path:       "",
-			wantNonNil: true,
+			name:      "empty path reads the default location",
+			content:   "[rescale]\nplatform_url = https://test.rescale.com\n",
+			atDefault: true,
+			wantURL:   "https://test.rescale.com",
+		},
+		{
+			name:       "notification settings load",
+			content:    "[interlink.notifications]\nenabled = true\nshow_download_complete = false\nshow_download_failed = true\n",
+			wantNotify: &NotificationConfig{Enabled: true, ShowDownloadComplete: false, ShowDownloadFailed: true},
 		},
 		{
 			name:    "invalid INI is an error",
@@ -121,8 +82,24 @@ api_key = partial-key
 			configPath := tt.path
 			if tt.content != "" {
 				configPath = filepath.Join(t.TempDir(), "apiconfig")
+				if tt.atDefault {
+					home := t.TempDir()
+					for _, name := range []string{"HOME", "USERPROFILE", "APPDATA"} {
+						t.Setenv(name, home)
+					}
+					var err error
+					if configPath, err = DefaultAPIConfigPath(); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := os.WriteFile(configPath, []byte(tt.content), 0600); err != nil {
 					t.Fatalf("failed to write test file: %v", err)
+				}
+				if tt.atDefault {
+					configPath = ""
 				}
 			}
 
@@ -145,6 +122,13 @@ api_key = partial-key
 			if tt.wantAPIKey != "" && cfg.APIKey != tt.wantAPIKey {
 				t.Errorf("APIKey = %q, want %q", cfg.APIKey, tt.wantAPIKey)
 			}
+			wantNotify := defaults
+			if tt.wantNotify != nil {
+				wantNotify = *tt.wantNotify
+			}
+			if cfg.Notifications != wantNotify {
+				t.Errorf("Notifications = %+v, want %+v", cfg.Notifications, wantNotify)
+			}
 		})
 	}
 }
@@ -157,25 +141,6 @@ func TestAPIConfigPathForUser(t *testing.T) {
 	}
 	if path != expected {
 		t.Errorf("APIConfigPathForUser() = %s, want %s", path, expected)
-	}
-}
-
-func TestSaveAPIConfig_CreatesDirectory(t *testing.T) {
-	tmpDir := t.TempDir()
-	// Use a nested path that doesn't exist yet
-	configPath := filepath.Join(tmpDir, "nested", "dir", "apiconfig")
-
-	cfg := NewAPIConfig()
-	cfg.PlatformURL = "https://test.rescale.com"
-	cfg.APIKey = "test-key"
-
-	if err := SaveAPIConfig(cfg, configPath); err != nil {
-		t.Fatalf("SaveAPIConfig should create parent directories: %v", err)
-	}
-
-	// Verify file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		t.Fatal("config file was not created")
 	}
 }
 
@@ -274,34 +239,5 @@ func TestLoadCompatProfile_MissingFileNonFatal(t *testing.T) {
 	}
 	if key != "" || url != "" {
 		t.Errorf("expected empty results for missing file, got key=%q url=%q", key, url)
-	}
-}
-
-// Verify SaveAPIConfig strips legacy api_key from disk.
-func TestSaveAPIConfig_StripsLegacyKey(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "apiconfig")
-
-	// Write an INI with api_key
-	content := "[rescale]\nplatform_url = https://test.rescale.com\napi_key = old-key\n"
-	if err := os.WriteFile(configPath, []byte(content), 0600); err != nil {
-		t.Fatalf("failed to write test file: %v", err)
-	}
-
-	// Save a new config (with APIKey field set — it should still not be written)
-	cfg := NewAPIConfig()
-	cfg.PlatformURL = "https://test.rescale.com"
-	cfg.APIKey = "should-not-be-written"
-	if err := SaveAPIConfig(cfg, configPath); err != nil {
-		t.Fatalf("SaveAPIConfig failed: %v", err)
-	}
-
-	// Read back and verify api_key is gone
-	loaded, err := LoadAPIConfig(configPath)
-	if err != nil {
-		t.Fatalf("LoadAPIConfig failed: %v", err)
-	}
-	if loaded.APIKey != "" {
-		t.Errorf("expected APIKey to be stripped, got %q", loaded.APIKey)
 	}
 }

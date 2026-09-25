@@ -1250,10 +1250,6 @@ func destinationBlocker(saved *state.UploadResumeState, dest uploadDestination) 
 // streamingResumeBlocker names the reason this state cannot be resumed, or ""
 // when it can. Every check answers the same question: do the parts already on
 // the backend still describe the file we are about to register?
-//
-// state.ValidateUploadState is deliberately not called here even though the
-// checks overlap: its streaming branch demands the file_id of the HKDF format,
-// which a CBC upload has never had, so it rejects every state this path writes.
 func streamingResumeBlocker(saved *state.UploadResumeState, localPath string, sourceInfo os.FileInfo, storageType string, dest uploadDestination, fileSize int64) string {
 	if saved.FormatVersion != 1 {
 		return "the saved state belongs to a pre-encrypt upload"
@@ -1447,7 +1443,7 @@ func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []by
 	// reaches the end of the file carries the padding CBC adds.
 	uploaded := int64(len(prefix)) * c.upload.PartSize
 	if int64(len(prefix)) == c.upload.TotalParts {
-		uploaded = transfer.CiphertextSize(c.upload.TotalSize)
+		uploaded = encryption.CalculateEncryptedPartSize(c.upload.TotalSize)
 	}
 
 	err := saveUploadState(&state.UploadResumeState{
@@ -1455,7 +1451,7 @@ func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []by
 		ObjectKey:      c.upload.StoragePath,
 		UploadID:       c.upload.UploadID,
 		OriginalSize:   c.upload.TotalSize,
-		TotalSize:      transfer.CiphertextSize(c.upload.TotalSize),
+		TotalSize:      encryption.CalculateEncryptedPartSize(c.upload.TotalSize),
 		SourceModTime:  c.sourceInfo.ModTime(),
 		UploadedBytes:  uploaded,
 		RandomSuffix:   c.upload.RandomSuffix,
@@ -1470,7 +1466,6 @@ func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []by
 		InitialIV:      encryption.EncodeBase64(c.upload.InitialIV),
 		ChainIV:        encryption.EncodeBase64(chainIV),
 		StreamingParts: parts,
-		ProcessID:      os.Getpid(),
 	}, c.params.LocalPath)
 
 	if err != nil {

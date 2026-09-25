@@ -13,7 +13,7 @@ import (
 
 // APIConfig holds the platform URL, notification settings, and the legacy
 // on-disk API key. Prefer ResolveAPIKey() for the key: this file is only one
-// of its sources, and SaveAPIConfig never writes the key back.
+// of its sources.
 //
 // Config file location:
 //   - Windows: %APPDATA%\Rescale\Interlink\apiconfig
@@ -28,8 +28,7 @@ import (
 //
 // NOTE: API key is read from this file for backwards compatibility with older versions
 // that stored keys here. New code should use config.ResolveAPIKey() which prefers
-// the token file. SaveAPIConfig intentionally does NOT write the API key —
-// saves act as a migration step, stripping any legacy plaintext key from disk.
+// the token file.
 // Platform URL comes from the main config.csv or defaults to https://platform.rescale.com
 type APIConfig struct {
 	// PlatformURL is kept for backwards compatibility with existing apiconfig files.
@@ -152,71 +151,6 @@ func LoadAPIConfig(path string) (*APIConfig, error) {
 	cfg.Notifications.ShowDownloadFailed = notifySection.Key("show_download_failed").MustBool(true)
 
 	return cfg, nil
-}
-
-// SaveAPIConfig saves configuration to an INI file.
-// Creates parent directories if they don't exist.
-// NOTE: The API key is intentionally NOT written to the file (security policy).
-// This means saves will strip any legacy api_key that was previously in the file.
-// LoadAPIConfig still reads legacy api_key values for backwards compatibility.
-func SaveAPIConfig(cfg *APIConfig, path string) error {
-	// If no path provided, use default
-	if path == "" {
-		var err error
-		path, err = DefaultAPIConfigPath()
-		if err != nil {
-			return fmt.Errorf("failed to determine config path: %w", err)
-		}
-	}
-
-	// Ensure directory exists
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	// Create INI file
-	iniFile := ini.Empty()
-
-	// Write [rescale] section
-	rescaleSection, err := iniFile.NewSection("rescale")
-	if err != nil {
-		return fmt.Errorf("failed to create rescale section: %w", err)
-	}
-	rescaleSection.Key("platform_url").SetValue(cfg.PlatformURL)
-	// API key intentionally NOT written — saves strip legacy plaintext keys from disk
-
-	// Write [interlink.notifications] section
-	notifySection, err := iniFile.NewSection("interlink.notifications")
-	if err != nil {
-		return fmt.Errorf("failed to create notifications section: %w", err)
-	}
-	notifySection.Key("enabled").SetValue(fmt.Sprintf("%t", cfg.Notifications.Enabled))
-	notifySection.Key("show_download_complete").SetValue(fmt.Sprintf("%t", cfg.Notifications.ShowDownloadComplete))
-	notifySection.Key("show_download_failed").SetValue(fmt.Sprintf("%t", cfg.Notifications.ShowDownloadFailed))
-
-	// Save to file with restricted permissions (user read/write only)
-	// Use temporary file + rename for atomicity
-	tmpPath := path + ".tmp"
-	if err := iniFile.SaveTo(tmpPath); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
-	}
-
-	// Set restrictive permissions (config may contain platform URL)
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(tmpPath, 0600); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to set config permissions: %w", err)
-		}
-	}
-
-	// Atomic rename
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	return nil
 }
 
 // LoadCompatProfile reads API credentials from an INI config file's named profile section.

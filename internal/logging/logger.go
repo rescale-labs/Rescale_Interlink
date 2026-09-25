@@ -51,11 +51,6 @@ func NewLogger(mode string, eventBus *events.EventBus) *Logger {
 	}
 }
 
-// NewDefaultCLILogger creates a default CLI logger.
-func NewDefaultCLILogger() *Logger {
-	return NewLogger("cli", nil)
-}
-
 // NewLoggerWithWriter creates a logger that writes to the specified writer.
 // Used by daemon to capture logs for IPC streaming.
 func NewLoggerWithWriter(writer io.Writer) *Logger {

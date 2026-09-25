@@ -2,8 +2,6 @@ package cli
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,22 +14,15 @@ import (
 // returns what reached stderr: cobra prints the error itself, as "Error: ...".
 func printedError(t *testing.T, err error) string {
 	t.Helper()
-	stderr, createErr := os.Create(filepath.Join(t.TempDir(), "stderr"))
-	if createErr != nil {
-		t.Fatal(createErr)
-	}
-	defer stderr.Close()
-	defer func(orig *os.File) { os.Stderr = orig }(os.Stderr)
-	os.Stderr = stderr
-
-	rootCmd := NewRootCmd()
-	rootCmd.PersistentPreRun = nil // replaces process-wide state; not under test
-	rootCmd.SilenceUsage = true
-	rootCmd.AddCommand(&cobra.Command{Use: "fail", RunE: func(*cobra.Command, []string) error { return err }})
-	rootCmd.SetArgs([]string{"fail"})
-	_ = rootCmd.Execute()
-	printed, _ := os.ReadFile(stderr.Name())
-	return string(printed)
+	return captureStderr(t, func() {
+		// NewRootCmd binds os.Stderr, so it is built inside the capture.
+		rootCmd := NewRootCmd()
+		rootCmd.PersistentPreRun = nil // replaces process-wide state; not under test
+		rootCmd.SilenceUsage = true
+		rootCmd.AddCommand(&cobra.Command{Use: "fail", RunE: func(*cobra.Command, []string) error { return err }})
+		rootCmd.SetArgs([]string{"fail"})
+		_ = rootCmd.Execute()
+	})
 }
 
 // Every place the CLI prints a failure, cobra's Error: line, its logger and

@@ -243,11 +243,6 @@ type JobStatusContent struct {
 	Content string `json:"statusReason,omitempty"` // Status reason/details
 }
 
-// JobSubmitRequest represents a job submission request (v2 API)
-type JobSubmitRequest struct {
-	JobID string `json:"job"`
-}
-
 // CoreType represents a hardware core type from the API.
 // Note: All core types returned by the API are available for use.
 type CoreType struct {
@@ -356,12 +351,6 @@ type Automation struct {
 	OSFamily             string             `json:"osFamily,omitempty"`
 	AnalysisDependencies []string           `json:"analysisDependencies,omitempty"`
 	Command              string             `json:"command,omitempty"`
-}
-
-// JobAutomation represents an automation attached to a job (from API response).
-type JobAutomation struct {
-	Automation           Automation        `json:"automation"`
-	EnvironmentVariables map[string]string `json:"environmentVariables,omitempty"`
 }
 
 // AutomationRef wraps an automation ID for the Rescale API's nested object format.

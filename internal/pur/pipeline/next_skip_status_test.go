@@ -6,7 +6,7 @@ import "testing"
 // "pending" → "skipped" is the remoteFiles case; terminal values
 // "success" / "failed" / "skipped" must be preserved so Single Job
 // localFiles uploads (which set "success" or "failed" via
-// Engine.ReportUploadProgress before RunFromSpecs starts) are not
+// Engine.ReportUploadProgress before RunFromSpecsWithOptions starts) are not
 // overwritten.
 func TestNextSkipStatus(t *testing.T) {
 	cases := []struct {

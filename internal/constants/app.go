@@ -32,19 +32,12 @@ const (
 	// Used by dynamic chunk sizing to cap memory usage per chunk.
 	MaxChunkSize = 64 * 1024 * 1024
 
-	// MinPartSize - AWS S3 minimum part size (5 MB, except last part)
-	// Azure has no equivalent minimum (can use any size)
-	MinPartSize = 5 * 1024 * 1024
-
 	// MaxS3PartSize - AWS S3 maximum part size (5 GB)
 	MaxS3PartSize = 5 * 1024 * 1024 * 1024
 
 	// MaxAzureBlockSize - Azure maximum block size (4000 MB with large block support)
 	// Standard accounts support 100 MB max, but we use 4 GB for premium/large block accounts
 	MaxAzureBlockSize = 4000 * 1024 * 1024
-
-	// MinAzureBlockSize - Azure minimum block size (1 byte, but we use 1 MB for practical purposes)
-	MinAzureBlockSize = 1 * 1024 * 1024
 
 	// MaxS3UploadParts - AWS S3 rejects part numbers above 10,000. A multipart
 	// upload that needs part 10,001 fails mid-transfer, after every earlier part
@@ -84,10 +77,6 @@ const (
 	// handed static session credentials, so a multi-gigabyte transfer outlives
 	// its own token unless something refreshes on a timer.
 	PeriodicCredentialRefreshInterval = 8 * time.Minute
-
-	// LargeFileThreshold - files larger than this trigger periodic credential refresh (1 GB)
-	// Only applies to Azure backend (S3 uses AWS SDK automatic refresh)
-	LargeFileThreshold = 1 * 1024 * 1024 * 1024
 
 	// CredentialFreshnessThreshold - proactive refresh threshold (8 minutes)
 	// If credentials are older than this when a transfer is about to start,
@@ -163,9 +152,6 @@ const (
 	// Queue size = workers * multiplier for optimal throughput
 	DefaultQueueMultiplier = 2
 
-	// MaxQueueSize - absolute maximum queue size to prevent unbounded growth
-	MaxQueueSize = 1000
-
 	// UploadQueueDepthPerWorker - encrypted-part queue slots per upload worker (3).
 	// Encryption is sequential (CBC chaining) so it has to run ahead of the upload
 	// workers to keep them busy; three slots per worker is the depth that does it.
@@ -199,15 +185,6 @@ const (
 	TableRefreshBatchInterval = 1 * time.Second
 )
 
-// Activity Log
-const (
-	// ActivityLogInitialCapacity - initial capacity for activity log entries
-	ActivityLogInitialCapacity = 100
-
-	// ActivityLogMaxEntries - maximum number of log entries to retain
-	ActivityLogMaxEntries = 10000
-)
-
 // Thread Pool
 const (
 	// AbsoluteMaxThreads - absolute maximum threads allowed
@@ -222,9 +199,6 @@ const (
 const (
 	// JobPollInterval - interval for polling job status updates (30 seconds)
 	JobPollInterval = 30 * time.Second
-
-	// HealthCheckInterval - interval for system health checks (60 seconds)
-	HealthCheckInterval = 60 * time.Second
 
 	// MinWatchInterval - minimum watch polling interval (prevent API abuse)
 	MinWatchInterval = 5 * time.Second
@@ -332,34 +306,6 @@ const (
 	EncryptionChunkSize = 16 * 1024
 )
 
-// GUI Operation Timeouts
-const (
-	// GUITransferTimeout - timeout for upload/download operations (30 minutes)
-	// Applies to bulk file transfer operations in the GUI
-	GUITransferTimeout = 30 * time.Minute
-
-	// GUIOperationTimeout - timeout for individual operations (5 minutes)
-	// Applies to single-file operations and folder listing
-	GUIOperationTimeout = 5 * time.Minute
-)
-
-// Overall Operation Timeouts
-const (
-	// MaxOperationTimeout - absolute maximum time for any single file transfer (4 hours)
-	// This is a safety limit to prevent zombie operations consuming resources indefinitely.
-	// Even the largest files (100GB+) should complete within 4 hours on reasonable connections.
-	// Individual parts have their own timeouts (10 minutes), but this caps the overall operation.
-	MaxOperationTimeout = 4 * time.Hour
-
-	// LargeFileOperationTimeout - timeout for large file transfers (2 hours)
-	// Applied to files > 10GB that use concurrent multipart transfers
-	LargeFileOperationTimeout = 2 * time.Hour
-
-	// SmallFileOperationTimeout - timeout for small file transfers (30 minutes)
-	// Applied to files < 100MB that use single-part transfers
-	SmallFileOperationTimeout = 30 * time.Minute
-)
-
 // API and Context Timeouts
 const (
 	// APIContextTimeout - default timeout for API operations (30 seconds)
@@ -425,12 +371,6 @@ const (
 
 // Pipeline and Job Timeouts
 const (
-	// PipelineTickerInterval - interval for pipeline progress updates (2 seconds)
-	PipelineTickerInterval = 2 * time.Second
-
-	// PipelineStateCheckInterval - interval for checking pipeline state (10 seconds)
-	PipelineStateCheckInterval = 10 * time.Second
-
 	// JobTailTickerInterval - interval for job tail updates (5 seconds)
 	JobTailTickerInterval = 5 * time.Second
 

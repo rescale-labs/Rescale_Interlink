@@ -93,13 +93,3 @@ func Methods() []MethodInfo {
 		},
 	}
 }
-
-// MethodInfoFor returns the description of one method.
-func MethodInfoFor(m Method) (MethodInfo, bool) {
-	for _, info := range Methods() {
-		if info.Method == m {
-			return info, true
-		}
-	}
-	return MethodInfo{}, false
-}

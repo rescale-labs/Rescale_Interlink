@@ -121,6 +121,7 @@ func TestFolderUploadErrorsCarryNoCredentials(t *testing.T) {
 	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
 	folderUploadAPI = func(*App) *api.Client { return client }
 	a, eng := appWithEngine(t)
+	eng.TransferService().SetAPIClient(client) // its credential warm-up goes here too, not to the platform
 	scans := eng.Events().Subscribe(events.EventEnumerationCompleted)
 
 	result := a.StartFolderUpload(t.TempDir(), "parent", nil)

@@ -309,22 +309,3 @@ func TestConfigInitRefusesAConfigurationLinkedToTheToken(t *testing.T) {
 		}
 	}
 }
-
-// Without --config, 'config init' still writes the default location.
-func TestConfigInitWithoutConfigFlagWritesDefault(t *testing.T) {
-	defaultPath, err := runConfigInit(t)
-	if err != nil {
-		t.Fatalf("config init: %v", err)
-	}
-
-	if _, err := os.Stat(defaultPath); err != nil {
-		t.Fatalf("nothing at the default path: %v", err)
-	}
-	cfg, err := config.LoadConfigCSV(defaultPath)
-	if err != nil {
-		t.Fatalf("load %s: %v", defaultPath, err)
-	}
-	if cfg.TarWorkers != 7 {
-		t.Errorf("tar workers in the default file = %d, want 7", cfg.TarWorkers)
-	}
-}

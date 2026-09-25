@@ -109,9 +109,6 @@ func TestAPITransportErrorsQuoteNoCredentials(t *testing.T) {
 			return errors.New(readResponseBody(io.NopCloser(iotest.ErrReader(readErr)))), fmt.Errorf("(failed to read response body: %s)", readErr)
 		}},
 		// the shared wrapper answers for a network error anywhere in its chain
-		{"a timeout", func() (error, error) {
-			return reporting.RedactedError(stallErr{timeout: true}), stallErr{timeout: true}
-		}},
 		{"a wrapped timeout", func() (error, error) {
 			raw := fmt.Errorf("read failed: %w", stallErr{timeout: true})
 			return reporting.RedactedError(raw), raw

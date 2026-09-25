@@ -92,13 +92,6 @@ func NewTransferTask(taskType TaskType, name, source, dest string, size int64) *
 	}
 }
 
-// NewTransferTaskWithLabel creates a new transfer task with a source label.
-func NewTransferTaskWithLabel(taskType TaskType, name, source, dest string, size int64, sourceLabel string) *TransferTask {
-	task := NewTransferTask(taskType, name, source, dest, size)
-	task.SourceLabel = sourceLabel
-	return task
-}
-
 // GetState returns the current state (thread-safe).
 func (t *TransferTask) GetState() TaskState {
 	t.mu.RLock()

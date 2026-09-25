@@ -70,9 +70,9 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	}
 
 	// Create streaming encryption state (CBC chaining)
-	encryptState, err := transfer.NewStreamingEncryptionState(partSize)
+	encryptState, err := encryption.NewCBCStreamingEncryptor()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption state: %w", err)
+		return nil, fmt.Errorf("failed to create encryption state: failed to create CBC streaming encryptor: %w", err)
 	}
 
 	// Create multipart upload on S3 with retry.
@@ -98,11 +98,6 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 
 	// Calculate total parts
 	totalParts := transfer.CalculateTotalParts(params.FileSize, partSize)
-
-	// Note: "Initialized streaming upload" message removed to prevent visual artifacts
-	// during concurrent multi-file uploads. The message was low-value information
-	// that caused ghost progress bar copies when interleaved with mpb output.
-	_ = params.OutputWriter // Suppress unused warning - writer still used for other messages
 
 	uploadID, err := required(createResp.UploadId, "UploadId")
 	if err != nil {
@@ -131,7 +126,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 // s3ProviderData contains S3-specific data for the upload.
 type s3ProviderData struct {
 	bucket       string
-	encryptState *transfer.StreamingEncryptionState
+	encryptState *encryption.CBCStreamingEncryptor
 	s3Client     *S3Client
 }
 
@@ -307,17 +302,17 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 	}
 
 	// Create encryption state from existing keys using CBC chaining with InitialIV and CurrentIV
-	var encryptState *transfer.StreamingEncryptionState
+	var encryptState *encryption.CBCStreamingEncryptor
 	if params.InitialIV != nil && params.CurrentIV != nil {
 		// CBC format resume
-		encryptState, err = transfer.NewStreamingEncryptionStateFromKey(
-			params.MasterKey, params.InitialIV, params.CurrentIV, params.PartSize)
+		encryptState, err = encryption.NewCBCStreamingEncryptorWithKey(
+			params.MasterKey, params.InitialIV, params.CurrentIV)
 	} else {
 		// Cannot resume legacy HKDF format with new code - start fresh
 		return nil, fmt.Errorf("cannot resume legacy HKDF upload with v3.2.0; please restart upload")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption state from resume: %w", err)
+		return nil, fmt.Errorf("failed to create encryption state from resume: failed to create CBC streaming encryptor with key: %w", err)
 	}
 
 	// Calculate total parts

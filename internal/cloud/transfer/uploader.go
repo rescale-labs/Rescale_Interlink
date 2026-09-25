@@ -11,6 +11,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
@@ -139,7 +140,7 @@ type StreamingUpload struct {
 	// here. A provider that leaves this nil is uploading in one shot as far as
 	// the orchestrator is concerned — its uploads still work, they just cannot
 	// be resumed, because nothing would know where to pick the chain back up.
-	EncryptState *StreamingEncryptionState
+	EncryptState *encryption.CBCStreamingEncryptor
 
 	// File info
 	LocalPath    string

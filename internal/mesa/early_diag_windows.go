@@ -75,33 +75,6 @@ func checkDLLAlreadyLoaded(dllName string) {
 	}
 }
 
-// DiagnoseLoadTiming runs comprehensive timing diagnostics.
-// Call this from --mesa-doctor to understand DLL loading sequence.
-func DiagnoseLoadTiming() {
-	fmt.Println("[TIMING ANALYSIS]")
-	fmt.Println("  This section helps determine WHEN opengl32.dll gets loaded.")
-	fmt.Println()
-
-	// Check what's loaded NOW
-	dllsToCheck := []string{"opengl32.dll", "libgallium_wgl.dll", "libglapi.dll", "glfw.dll", "gdi32.dll"}
-
-	fmt.Println("  Current DLL load state:")
-	for _, dll := range dllsToCheck {
-		namePtr, _ := syscall.UTF16PtrFromString(dll)
-		ret, _, _ := procGetModuleHandleW.Call(uintptr(unsafe.Pointer(namePtr)))
-		if ret == 0 {
-			fmt.Printf("    %s: not loaded\n", dll)
-		} else {
-			handle := windows.Handle(ret)
-			var path [260]uint16
-			n, _ := windows.GetModuleFileName(handle, &path[0], 260)
-			pathStr := syscall.UTF16ToString(path[:n])
-			fmt.Printf("    %s: LOADED from %s\n", dll, pathStr)
-		}
-	}
-	fmt.Println()
-}
-
 // Helper functions to avoid importing strings package (keeps init() fast)
 func repeatStr(s string, n int) string {
 	result := ""

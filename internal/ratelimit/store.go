@@ -75,7 +75,7 @@ type CoordinatorEnsurer func() (CoordinatorClient, error)
 //   - Config update with same account → preserves limiter state (no fresh bucket)
 //   - Config update with different account → gets new limiters
 //
-// Phase 2: Coordinator awareness
+// Coordinator awareness
 // When a CoordinatorEnsurer is registered, the store attempts to connect on first
 // use and injects coordinator hooks into each limiter. On coordinator failure,
 // limiters are created at emergency cap rates. Periodic retry (30s backoff) allows
@@ -210,7 +210,7 @@ func (s *LimiterStore) hasCoordinatorEnsurer() bool {
 // GetLimiter returns the shared rate limiter for the given account and scope.
 // If no limiter exists for this combination, one is created.
 //
-// With coordinator awareness (Phase 2):
+// With coordinator awareness:
 //   - If coordinator is available: limiter at full target rate with coordinator hooks
 //   - If coordinator is unavailable: limiter at emergency cap rate (fail-safe invariant)
 //   - On subsequent calls: retries coordinator connection every 30s
@@ -407,7 +407,9 @@ func (s *LimiterStore) handleCoordinatorDisconnect(
 }
 
 // emergencyCap computes conservative rate and burst for when the coordinator is unreachable.
-// Formula: rate = (hardLimit/4) * 0.5, burst = 1
+// Formula: rate = (hardLimit/4) * 0.5, burst = 1. The /4 assumes at most four
+// processes share the account (GUI, daemon and one or two CLIs); the *0.5 is a
+// safety margin on top.
 //
 // Burst is set to 1 (not 0) because the token bucket requires tokens >= 1.0 to grant
 // a request. With maxTokens=0, tokens would always be capped at 0 and no request could

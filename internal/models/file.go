@@ -98,13 +98,6 @@ type CloudFileRequest struct {
 	FileChecksums        []FileChecksum     `json:"fileChecksums"`
 }
 
-// FileListResponse represents the response from file list API
-type FileListResponse struct {
-	Count   int         `json:"count"`
-	Next    *string     `json:"next"`
-	Results []CloudFile `json:"results"`
-}
-
 // RootFolders represents user's root folders
 type RootFolders struct {
 	MyJobs    string `json:"myJobs"`

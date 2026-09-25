@@ -58,6 +58,9 @@ func TestDetectSubcommand(t *testing.T) {
 		{"flag only", []string{"-p", "TOKEN"}, ""},
 		{"empty", nil, ""},
 		{"boolean flags before", []string{"-q", "status"}, "status"},
+		// --profile takes a value, which must not be read as the subcommand.
+		{"profile before command", []string{"--profile", "default", "upload", "-f", "a.txt"}, "upload"},
+		{"token and profile before command", []string{"-p", "TOKEN", "--profile", "eu", "status", "-j", "JOB1"}, "status"},
 	}
 
 	for _, tt := range tests {

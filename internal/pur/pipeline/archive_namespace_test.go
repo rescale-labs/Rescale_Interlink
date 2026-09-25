@@ -33,14 +33,14 @@ func namespaceTestRoot(t *testing.T) string {
 // file naming the run.
 func newBatch(t *testing.T, jobs []models.JobSpec, stateFile string) *Pipeline {
 	t.Helper()
+	return newPipelineWith(t, jobs, PipelineOptions{StateFile: stateFile})
+}
 
-	cfg := &config.Config{
-		TarWorkers:     1,
-		UploadWorkers:  1,
-		JobWorkers:     1,
-		TarCompression: "gzip",
-	}
-	p, err := NewPipeline(cfg, nil, jobs, PipelineOptions{StateFile: stateFile})
+// newPipelineWith builds a pipeline with one worker per stage over jobs.
+func newPipelineWith(t *testing.T, jobs []models.JobSpec, opts PipelineOptions) *Pipeline {
+	t.Helper()
+	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
+	p, err := NewPipeline(cfg, nil, jobs, opts)
 	if err != nil {
 		t.Fatalf("NewPipeline: %v", err)
 	}

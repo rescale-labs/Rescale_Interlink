@@ -147,7 +147,7 @@ func TestStoreRegistryIsAccessible(t *testing.T) {
 	}
 }
 
-// --- Phase 2: Coordinator-aware store tests ---
+// --- Coordinator-aware store tests ---
 
 // mockCoordClient implements CoordinatorClient for testing.
 type mockCoordClient struct {
@@ -197,29 +197,33 @@ func (m *mockCoordClient) getPingCalls() int {
 	return m.pingCalls
 }
 
-func TestStoreCoordinatorHookInjected(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
+// The store wires each limiter to the coordinator: Wait, Drain and SetCooldown
+// each reach it exactly once.
+func TestStoreCoordinatorHooks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		call  func(*RateLimiter) error
+		calls func(*mockCoordClient) int
+	}{
+		{"Wait", func(l *RateLimiter) error { return l.Wait(context.Background()) }, func(m *mockCoordClient) int { return m.acquireCalls }},
+		{"Drain", func(l *RateLimiter) error { l.Drain(); return nil }, func(m *mockCoordClient) int { return m.drainCalls }},
+		{"SetCooldown", func(l *RateLimiter) error { l.SetCooldown(10 * time.Second); return nil }, func(m *mockCoordClient) int { return m.cooldownCalls }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetGlobalStore()
+			s := GlobalStore()
+			mock := &mockCoordClient{}
+			s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) { return mock, nil })
 
-	mock := &mockCoordClient{}
-	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
-		return mock, nil
-	})
-
-	limiter := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-
-	// Wait should delegate to coordinator
-	ctx := context.Background()
-	err := limiter.Wait(ctx)
-	if err != nil {
-		t.Fatalf("Wait() error: %v", err)
-	}
-
-	mock.mu.Lock()
-	calls := mock.acquireCalls
-	mock.mu.Unlock()
-	if calls != 1 {
-		t.Errorf("expected 1 Acquire call, got %d", calls)
+			if err := tc.call(s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			mock.mu.Lock()
+			defer mock.mu.Unlock()
+			if n := tc.calls(mock); n != 1 {
+				t.Errorf("coordinator saw %d %s calls, want 1", n, tc.name)
+			}
+		})
 	}
 }
 
@@ -333,51 +337,11 @@ func TestStoreNoCoordinatorEnsurer(t *testing.T) {
 	ResetGlobalStore()
 	s := GlobalStore()
 
-	// No coordinator ensurer set — should behave exactly as Phase 1
+	// No coordinator ensurer set: a plain limiter at the full target rate
 	limiter := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
 	tokens := limiter.GetCurrentTokens()
 	if tokens < float64(UserScopeBurstCapacity)-1 {
 		t.Errorf("without coordinator, expected full target rate tokens, got %.2f", tokens)
-	}
-}
-
-func TestStoreCoordinatorDrainHook(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
-
-	mock := &mockCoordClient{}
-	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
-		return mock, nil
-	})
-
-	limiter := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-	limiter.Drain()
-
-	mock.mu.Lock()
-	calls := mock.drainCalls
-	mock.mu.Unlock()
-	if calls != 1 {
-		t.Errorf("expected 1 Drain call to coordinator, got %d", calls)
-	}
-}
-
-func TestStoreCoordinatorCooldownHook(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
-
-	mock := &mockCoordClient{}
-	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
-		return mock, nil
-	})
-
-	limiter := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-	limiter.SetCooldown(10 * time.Second)
-
-	mock.mu.Lock()
-	calls := mock.cooldownCalls
-	mock.mu.Unlock()
-	if calls != 1 {
-		t.Errorf("expected 1 SetCooldown call to coordinator, got %d", calls)
 	}
 }
 
@@ -455,30 +419,6 @@ func (d *delayingMockCoordClient) Acquire(ctx context.Context, baseURL, keyHash 
 // =============================================================================
 // Coordinator self-healing tests
 // =============================================================================
-
-func TestIsDegraded(t *testing.T) {
-	rl := NewRateLimiter(1.0, 1)
-
-	if rl.IsDegraded() {
-		t.Error("new limiter should not be degraded")
-	}
-
-	rl.mu.Lock()
-	rl.degraded = true
-	rl.mu.Unlock()
-
-	if !rl.IsDegraded() {
-		t.Error("limiter should be degraded after setting flag")
-	}
-
-	rl.mu.Lock()
-	rl.degraded = false
-	rl.mu.Unlock()
-
-	if rl.IsDegraded() {
-		t.Error("limiter should not be degraded after clearing flag")
-	}
-}
 
 func TestHasCoordinatorHooks(t *testing.T) {
 	rl := NewRateLimiter(1.0, 1)

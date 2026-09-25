@@ -177,8 +177,8 @@ func WatchNewerThan(ctx context.Context, refJobID string, cfg Config, lister Job
 	cfg.applyDefaults()
 
 	// Per-job state
-	jobStatus := make(map[string]string)      // last known status
-	jobTerminal := make(map[string]bool)       // reached terminal?
+	jobStatus := make(map[string]string)         // last known status
+	jobTerminal := make(map[string]bool)         // reached terminal?
 	jobDownload := make(map[string]DownloadFunc) // cached download closures
 
 	// Initial discovery
@@ -218,20 +218,17 @@ func WatchNewerThan(ctx context.Context, refJobID string, cfg Config, lister Job
 				continue
 			}
 
-			newJobDiscovered := false
 			for _, j := range newJobs {
 				if _, exists := jobStatus[j.ID]; !exists {
 					jobStatus[j.ID] = ""
 					jobDownload[j.ID] = dlFactory(j.ID)
-					newJobDiscovered = true
 				}
 			}
-			_ = newJobDiscovered
 
 			// Process all non-terminal jobs
 			processJobs(ctx, jobStatus, jobTerminal, jobDownload, statusFn, cb)
 
-			// Exit when all jobs are terminal and no new jobs were discovered
+			// Exit once every job, including any discovered this tick, is terminal
 			if allTerminal(jobTerminal, jobStatus) {
 				return nil
 			}

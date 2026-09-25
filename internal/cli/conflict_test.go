@@ -220,80 +220,26 @@ func TestConflictResolver_ConcurrentEscalation(t *testing.T) {
 	}
 }
 
-// --- Tests for each conflict type's convenience constructor ---
-
-func TestFileConflictResolver_Basic(t *testing.T) {
-	cr := NewFileConflictResolver(FileSkipOnce)
-
-	// Once mode prompts
-	action, _ := cr.Resolve(func() (FileConflictAction, error) {
-		return FileOverwriteAll, nil
-	})
-	if action != FileOverwriteAll {
-		t.Fatalf("expected FileOverwriteAll, got %v", action)
-	}
-
-	// All mode skips prompt
-	called := false
-	action, _ = cr.Resolve(func() (FileConflictAction, error) {
-		called = true
-		return FileSkipOnce, nil
-	})
-	if called {
-		t.Fatal("prompt should not be called after escalation")
-	}
-	if action != FileOverwriteAll {
-		t.Fatalf("expected FileOverwriteAll, got %v", action)
-	}
+// escalates reports whether cr prompts in its starting mode and, once the
+// prompt answers all, stops prompting and keeps returning all.
+func escalates[A comparable](cr *ConflictResolver[A], all, other A) bool {
+	first, _ := cr.Resolve(func() (A, error) { return all, nil })
+	prompted := false
+	second, _ := cr.Resolve(func() (A, error) { prompted = true; return other, nil })
+	return first == all && second == all && !prompted
 }
 
-func TestFolderDownloadConflictResolver_Basic(t *testing.T) {
-	cr := NewFolderDownloadConflictResolver(FolderDownloadMergeOnce)
-
-	// Once mode prompts
-	action, _ := cr.Resolve(func() (FolderDownloadConflictAction, error) {
-		return FolderDownloadMergeAll, nil
-	})
-	if action != FolderDownloadMergeAll {
-		t.Fatalf("expected FolderDownloadMergeAll, got %v", action)
+// Each convenience constructor classifies its own type's actions: the "Once"
+// starting mode prompts and an "All" answer escalates.
+func TestConvenienceConstructorsEscalate(t *testing.T) {
+	if !escalates(NewFileConflictResolver(FileSkipOnce), FileOverwriteAll, FileSkipOnce) {
+		t.Error("file conflicts did not escalate to FileOverwriteAll")
 	}
-
-	// All mode skips prompt
-	called := false
-	action, _ = cr.Resolve(func() (FolderDownloadConflictAction, error) {
-		called = true
-		return FolderDownloadSkipOnce, nil
-	})
-	if called {
-		t.Fatal("prompt should not be called after escalation")
+	if !escalates(NewFolderDownloadConflictResolver(FolderDownloadMergeOnce), FolderDownloadMergeAll, FolderDownloadSkipOnce) {
+		t.Error("folder download conflicts did not escalate to FolderDownloadMergeAll")
 	}
-	if action != FolderDownloadMergeAll {
-		t.Fatalf("expected FolderDownloadMergeAll, got %v", action)
-	}
-}
-
-func TestErrorActionResolver_Basic(t *testing.T) {
-	cr := NewErrorActionResolver(ErrorContinueOnce)
-
-	// Once mode prompts
-	action, _ := cr.Resolve(func() (ErrorAction, error) {
-		return ErrorContinueAll, nil
-	})
-	if action != ErrorContinueAll {
-		t.Fatalf("expected ErrorContinueAll, got %v", action)
-	}
-
-	// All mode skips prompt
-	called := false
-	action, _ = cr.Resolve(func() (ErrorAction, error) {
-		called = true
-		return ErrorAbort, nil
-	})
-	if called {
-		t.Fatal("prompt should not be called after escalation")
-	}
-	if action != ErrorContinueAll {
-		t.Fatalf("expected ErrorContinueAll, got %v", action)
+	if !escalates(NewErrorActionResolver(ErrorContinueOnce), ErrorContinueAll, ErrorAbort) {
+		t.Error("error prompts did not escalate to ErrorContinueAll")
 	}
 }
 

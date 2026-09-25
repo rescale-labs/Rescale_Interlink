@@ -2,9 +2,21 @@
 package daemon
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -244,81 +256,33 @@ func TestSanitizeDirectoryName(t *testing.T) {
 // Eligibility Engine Tests
 // =============================================================================
 
-func TestDefaultEligibilityConfig(t *testing.T) {
-	cfg := DefaultEligibilityConfig()
-
-	if cfg == nil {
-		t.Fatal("DefaultEligibilityConfig() returned nil")
+// TestMonitorEligibilityConfig pins where a monitor's eligibility config comes
+// from: the defaults (autoDownload, seven days) when none is given, the
+// caller's own when one is, none at all from NewMonitor, and SetEligibility.
+func TestMonitorEligibilityConfig(t *testing.T) {
+	defaults := EligibilityConfig{AutoDownloadTag: "autoDownload", LookbackDays: 7}
+	if got := DefaultEligibilityConfig(); got == nil || *got != defaults {
+		t.Errorf("DefaultEligibilityConfig() = %+v, want %+v", got, defaults)
+	}
+	if m := NewMonitorWithEligibility(nil, nil, nil, nil, nil); m.eligibility == nil || *m.eligibility != defaults {
+		t.Errorf("NewMonitorWithEligibility(nil config) uses %+v, want the defaults", m.eligibility)
+	}
+	custom := &EligibilityConfig{AutoDownloadTag: "custom:tag", LookbackDays: 14}
+	if m := NewMonitorWithEligibility(nil, nil, nil, custom, nil); m.eligibility != custom {
+		t.Errorf("NewMonitorWithEligibility(custom) uses %+v, want the custom config", m.eligibility)
 	}
 
-	// EligibilityConfig has only AutoDownloadTag and LookbackDays
-	if cfg.AutoDownloadTag != "autoDownload" {
-		t.Errorf("AutoDownloadTag = %q, want %q", cfg.AutoDownloadTag, "autoDownload")
-	}
-	if cfg.LookbackDays != 7 {
-		t.Errorf("LookbackDays = %d, want %d", cfg.LookbackDays, 7)
-	}
-}
-
-func TestNewMonitorWithEligibility_NilConfig(t *testing.T) {
-	// When nil eligibility config is passed, should use defaults
-	m := NewMonitorWithEligibility(nil, nil, nil, nil, nil)
-
-	if m.eligibility == nil {
-		t.Fatal("expected non-nil eligibility config when nil passed")
-	}
-
-	// Should have default values
-	if m.eligibility.AutoDownloadTag != "autoDownload" {
-		t.Errorf("expected default AutoDownloadTag, got %q", m.eligibility.AutoDownloadTag)
-	}
-	if m.eligibility.LookbackDays != 7 {
-		t.Errorf("expected default LookbackDays=7, got %d", m.eligibility.LookbackDays)
-	}
-}
-
-func TestNewMonitorWithEligibility_CustomConfig(t *testing.T) {
-	// EligibilityConfig has only AutoDownloadTag and LookbackDays
-	customCfg := &EligibilityConfig{
-		AutoDownloadTag: "custom:tag",
-		LookbackDays:    14,
-	}
-
-	m := NewMonitorWithEligibility(nil, nil, nil, customCfg, nil)
-
-	if m.eligibility != customCfg {
-		t.Error("expected custom config to be used")
-	}
-	if m.eligibility.AutoDownloadTag != "custom:tag" {
-		t.Errorf("expected custom AutoDownloadTag, got %q", m.eligibility.AutoDownloadTag)
-	}
-	if m.eligibility.LookbackDays != 14 {
-		t.Errorf("expected custom LookbackDays=14, got %d", m.eligibility.LookbackDays)
-	}
-}
-
-func TestSetEligibility(t *testing.T) {
-	m := &Monitor{}
-
-	// Initially nil
+	m := NewMonitor(nil, nil, nil, nil)
 	if m.eligibility != nil {
-		t.Error("expected nil eligibility initially")
+		t.Errorf("NewMonitor set eligibility %+v, want none", m.eligibility)
 	}
-
-	cfg := &EligibilityConfig{AutoDownloadTag: "test:tag", LookbackDays: 30}
-	m.SetEligibility(cfg)
-
-	if m.eligibility != cfg {
+	m.SetEligibility(custom)
+	if m.eligibility != custom {
 		t.Error("SetEligibility did not set the config")
 	}
-	if m.eligibility.AutoDownloadTag != "test:tag" {
-		t.Errorf("expected test:tag, got %q", m.eligibility.AutoDownloadTag)
-	}
-
-	// Can set to nil
 	m.SetEligibility(nil)
 	if m.eligibility != nil {
-		t.Error("SetEligibility(nil) did not clear config")
+		t.Error("SetEligibility(nil) did not clear the config")
 	}
 }
 
@@ -353,10 +317,9 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 		ReasonFieldCheckAPIError:       true,
 		ReasonInRetryBackoff:           true,
 		ReasonOutsideLookbackWindow:    false,
-		// Plan 3: tag-first semantics make ReasonHasDownloadedTag the common
-		// case every poll (N per-poll API calls), so it is silent to avoid
-		// log noise. Also new in Plan 3: ReasonPendingTagApply (transient
-		// retry state).
+		// ReasonHasDownloadedTag is the common case on every poll, so it is
+		// silent to avoid log noise; ReasonPendingTagApply is a transient
+		// retry state.
 		ReasonHasDownloadedTag:            true,
 		ReasonPendingTagApply:             true,
 		ReasonConditionalMissingTag:       false,
@@ -376,11 +339,54 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 	}
 }
 
-func TestNewMonitor_NoEligibility(t *testing.T) {
-	// Original NewMonitor should not set eligibility
-	m := NewMonitor(nil, nil, nil, nil)
+// A job whose files are down but whose downloaded tag is still being applied is
+// skipped before any eligibility lookup, so the poll's tag retry is not raced
+// by a second download of the same job.
+func TestFindCompletedJobsSkipsJobsPendingTheirTag(t *testing.T) {
+	var mu sync.Mutex
+	var requested []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requested = append(requested, r.URL.Path)
+		mu.Unlock()
+		var body any
+		switch r.URL.Path {
+		case "/api/v3/jobs/":
+			body = map[string]any{"results": []models.JobResponse{
+				{ID: "pending-job", Name: "pending", JobStatus: models.JobStatusContent{Status: "Completed"}},
+				{ID: "ready-job", Name: "ready", JobStatus: models.JobStatusContent{Status: "Completed"}},
+			}}
+		case "/api/v3/jobs/ready-job/statuses/":
+			body = map[string]any{"results": []models.JobStatusEntry{{Status: "Completed", StatusDate: time.Now().UTC().Format(time.RFC3339)}}}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(server.Close)
+	client := api.NewClientForTest(&config.Config{APIKey: "test-key", APIBaseURL: server.URL, ProxyMode: "no-proxy"})
+	m := NewMonitorWithEligibility(client, nil, nil, DefaultEligibilityConfig(), logging.NewLoggerWithWriter(io.Discard))
 
-	if m.eligibility != nil {
-		t.Error("NewMonitor should not set eligibility config")
+	result, err := m.FindCompletedJobs(context.Background(), map[string]struct{}{"pending-job": {}})
+	if err != nil {
+		t.Fatalf("FindCompletedJobs: %v", err)
+	}
+	var candidates []string
+	for _, job := range result.Candidates {
+		candidates = append(candidates, job.ID)
+	}
+	if !slices.Equal(candidates, []string{"ready-job"}) {
+		t.Errorf("candidates = %v, want only ready-job", candidates)
+	}
+	if n := result.Summary.SkipBuckets[ReasonPendingTagApply]; n != 1 {
+		t.Errorf("skipped %d jobs as pending their tag, want 1 (buckets %v)", n, result.Summary.SkipBuckets)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// The ready job's completion time was looked up, so the pending one would have been.
+	if !slices.Contains(requested, "/api/v3/jobs/ready-job/statuses/") || slices.ContainsFunc(requested, func(p string) bool { return strings.Contains(p, "pending-job") }) {
+		t.Errorf("requests %v: want ready-job's completion time looked up and nothing asked about pending-job", requested)
 	}
 }

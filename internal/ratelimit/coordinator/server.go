@@ -25,10 +25,10 @@ type Server struct {
 	clients map[string]*clientState           // keyed by ClientID
 	leases  map[string]*leaseState            // keyed by LeaseID
 
-	startTime         time.Time
-	lastActivity      time.Time
-	idleTimeout       time.Duration
-	watchdogInterval  time.Duration // for testing; defaults to 30s
+	startTime        time.Time
+	lastActivity     time.Time
+	idleTimeout      time.Duration
+	watchdogInterval time.Duration // for testing; defaults to 30s
 
 	listener net.Listener
 	ctx      context.Context
@@ -38,16 +38,16 @@ type Server struct {
 
 // clientState tracks a connected coordinator client.
 type clientState struct {
-	clientID     string
-	lastSeen     time.Time
-	leaseIDs     []string // Leases held by this client
-	bucketKeys   []string // Buckets this client has acquired from
+	clientID   string
+	lastSeen   time.Time
+	leaseIDs   []string // Leases held by this client
+	bucketKeys []string // Buckets this client has acquired from
 }
 
 // leaseState tracks an active lease grant.
 type leaseState struct {
-	grant    *LeaseGrant
-	clientID string
+	grant     *LeaseGrant
+	clientID  string
 	bucketKey string
 }
 
@@ -69,16 +69,6 @@ func NewServer() *Server {
 		ctx:              ctx,
 		cancel:           cancel,
 	}
-}
-
-// SetIdleTimeout configures the idle timeout. Must be called before Start().
-func (s *Server) SetIdleTimeout(d time.Duration) {
-	s.idleTimeout = d
-}
-
-// setWatchdogInterval configures how often the idle watchdog checks. For testing only.
-func (s *Server) setWatchdogInterval(d time.Duration) {
-	s.watchdogInterval = d
 }
 
 // Start begins accepting connections on the given listener.

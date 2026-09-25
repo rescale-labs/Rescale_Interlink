@@ -17,7 +17,6 @@ import (
 	"os"
 	"runtime"
 	"slices"
-	"strings"
 
 	// CRITICAL: mesainit MUST be imported FIRST (before any OpenGL packages)
 	// Go runs init() functions in import order. By importing mesainit first,
@@ -118,8 +117,7 @@ func main() {
 //
 // CLI mode when:
 // - --cli flag is present (force CLI mode)
-// - CLI subcommands are present (jobs, files, folders, etc.)
-// - CLI flags are present (--help, --version, -h, -v)
+// - any other argument is present (subcommands, flags, typos alike)
 // - No display available (DISPLAY/WAYLAND_DISPLAY not set on Linux)
 //
 // GUI mode when:
@@ -132,23 +130,6 @@ func isCLIMode() bool {
 	}
 	if slices.Contains(os.Args, "--gui") {
 		return false
-	}
-
-	// CLI subcommands and flags that indicate CLI mode
-	cliPatterns := []string{
-		// Subcommands
-		"jobs", "files", "folders", "upload", "download",
-		"hardware", "software", "config", "pur", "completion",
-		// Flags
-		"--help", "-h", "--version", "-v",
-	}
-
-	for _, arg := range os.Args[1:] {
-		for _, pattern := range cliPatterns {
-			if arg == pattern || strings.HasPrefix(arg, pattern+" ") {
-				return true
-			}
-		}
 	}
 
 	// No explicit mode or commands - check for display

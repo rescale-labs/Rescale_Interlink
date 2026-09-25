@@ -90,11 +90,7 @@ func runBatchWith(t *testing.T, jobs []models.JobSpec, stateFile, apiURL string,
 func runBatchOpts(t *testing.T, jobs []models.JobSpec, apiURL string, opts PipelineOptions) (*Pipeline, []string, error) {
 	t.Helper()
 
-	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
-	p, err := NewPipeline(cfg, nil, jobs, opts)
-	if err != nil {
-		t.Fatalf("NewPipeline: %v", err)
-	}
+	p := newPipelineWith(t, jobs, opts)
 	p.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: apiURL, APIKey: "test"})
 	p.analysisResolver = &mockAnalysisResolver{}
 
@@ -590,11 +586,7 @@ func (r *heldResolver) GetAnalyses(ctx context.Context) ([]models.Analysis, erro
 func runInterruptedAtFeederCheckpoint(t *testing.T, jobs []models.JobSpec, apiURL string, opts PipelineOptions) bool {
 	t.Helper()
 
-	cfg := &config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}
-	p, err := NewPipeline(cfg, nil, jobs, opts)
-	if err != nil {
-		t.Fatalf("NewPipeline: %v", err)
-	}
+	p := newPipelineWith(t, jobs, opts)
 	p.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: apiURL, APIKey: "test"})
 	held := &heldResolver{release: make(chan struct{})}
 	p.analysisResolver = held

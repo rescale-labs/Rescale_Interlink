@@ -30,31 +30,11 @@ const (
 	JobsUsageLimitPerHour = 90000 // 25 requests per second
 )
 
-// Target percentages
-//
-// We target 85% of the hard limit:
-// 1. 15% safety margin prevents hitting the hard limit (which blocks access for extended time)
-// 2. Maximizes throughput while accounting for concurrent operations and burst traffic
-// 3. The 429 feedback system (CheckRetry + coordinator drain/cooldown) provides a safety net
-//    if the server does reject requests
-const (
-	// UserScopeTargetPercent: Use 85% of the user scope limit
-	// Rationale: 15% safety margin balances throughput and safety
-	UserScopeTargetPercent = 85
-
-	// JobSubmissionTargetPercent: Use 85% of the job submission limit
-	// Rationale: With cross-process coordinator sharing the budget, 85% is safe
-	JobSubmissionTargetPercent = 85
-
-	// JobsUsageTargetPercent: Use 85% of the jobs-usage scope limit
-	// Rationale: 15% safety margin, consistent with other scopes
-	JobsUsageTargetPercent = 85
-)
-
-// Calculated target rates (requests per second)
-//
-// These are the actual rates our token bucket rate limiters use.
-// 85% provides 15% safety margin while maximizing throughput.
+// Target rates (requests per second): what our token bucket rate limiters use,
+// 85% of each hard limit. The 15% margin keeps us clear of the hard limit, which
+// blocks access for an extended time, while leaving room for concurrent
+// operations and bursts; the 429 feedback (CheckRetry and the coordinator's
+// drain and cooldown) is the safety net if the server rejects requests anyway.
 const (
 	// UserScopeRatePerSec is 85% of 2 req/sec = 1.7 req/sec
 	// Used for all v3 API endpoints (files, folders, jobs, credentials, etc.)
