@@ -27,6 +27,9 @@ type RemoteFileTask struct {
 	RelativePath string
 	Size         int64
 	CloudFile    *models.CloudFile
+	// Err, when set, is why this entry is not downloaded: its server name, or
+	// its folder's, cannot be written safely. The download fails it alone.
+	Err error
 }
 
 // ScanEvent represents a single discovery from the streaming scanner.
@@ -83,6 +86,10 @@ func scanRemoteFolderRecursiveImpl(
 
 	// Process subfolders
 	for _, folder := range contents.Folders {
+		if err := validation.ValidateFilename(folder.Name); err != nil {
+			files = append(files, refused(folder.ID, folder.Name, relativePath, true, err))
+			continue
+		}
 		folderRelPath := filepath.Join(relativePath, folder.Name)
 		folders = append(folders, RemoteFolderInfo{
 			FolderID:     folder.ID,
@@ -101,7 +108,8 @@ func scanRemoteFolderRecursiveImpl(
 	// Process files
 	for _, file := range contents.Files {
 		if err := validation.ValidateFilename(file.Name); err != nil {
-			return nil, nil, fmt.Errorf("invalid filename from API: %w", err)
+			files = append(files, refused(file.ID, file.Name, relativePath, false, err))
+			continue
 		}
 		fileRelPath := filepath.Join(relativePath, file.Name)
 		files = append(files, RemoteFileTask{
@@ -123,6 +131,25 @@ func scanRemoteFolderRecursiveImpl(
 	}
 
 	return folders, files, nil
+}
+
+// refused is the entry for a server name that cannot be written safely, so
+// that the download reports it as failed instead of dropping it. A folder is
+// one entry for its whole subtree, which is not scanned.
+func refused(id, name, parent string, folder bool, err error) RemoteFileTask {
+	what, where := "file", "at the top level"
+	if parent != "" {
+		where = "in " + validation.Quote(parent)
+	}
+	if folder {
+		what, where = "folder", where+" and its contents"
+	}
+	return RemoteFileTask{
+		FileID:       id,
+		Name:         name,
+		RelativePath: filepath.Join(parent, name),
+		Err:          fmt.Errorf("%s %s not downloaded: %w", what, where, err),
+	}
 }
 
 // ScanRemoteFolderStreaming scans a remote folder structure concurrently,
@@ -278,8 +305,13 @@ func ScanRemoteFolderStreaming(
 						func(folders []api.FolderInfo, files []api.FileInfo) error {
 							// Emit folders first (so parent dirs can be created before files)
 							for _, folder := range folders {
-								// Defense-in-depth — validate folder names from API
 								if err := validation.ValidateFilename(folder.Name); err != nil {
+									task := refused(folder.ID, folder.Name, work.relativePath, true, err)
+									select {
+									case eventCh <- ScanEvent{File: &task}:
+									case <-ctx.Done():
+										return ctx.Err()
+									}
 									continue
 								}
 								folderRelPath := filepath.Join(work.relativePath, folder.Name)
@@ -309,16 +341,15 @@ func ScanRemoteFolderStreaming(
 
 							// Emit files
 							for _, file := range files {
-								if err := validation.ValidateFilename(file.Name); err != nil {
-									continue // Skip invalid filenames
-								}
-								fileRelPath := filepath.Join(work.relativePath, file.Name)
 								task := RemoteFileTask{
 									FileID:       file.ID,
 									Name:         file.Name,
-									RelativePath: fileRelPath,
+									RelativePath: filepath.Join(work.relativePath, file.Name),
 									Size:         file.DecryptedSize,
 									CloudFile:    file.ToCloudFile(),
+								}
+								if err := validation.ValidateFilename(file.Name); err != nil {
+									task = refused(file.ID, file.Name, work.relativePath, false, err)
 								}
 
 								select {
@@ -329,7 +360,7 @@ func ScanRemoteFolderStreaming(
 
 								mu.Lock()
 								progress.FilesFound++
-								progress.BytesFound += file.DecryptedSize
+								progress.BytesFound += task.Size
 								mu.Unlock()
 							}
 

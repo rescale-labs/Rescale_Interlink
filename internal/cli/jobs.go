@@ -962,17 +962,17 @@ Examples:
 				return fmt.Errorf("failed to get file info: %w", err)
 			}
 
-			// Validate filename from API to prevent path traversal
-			if err := validation.ValidateFilename(fileInfo.Name); err != nil {
-				return fmt.Errorf("invalid filename from API for file %s: %w", fileID, err)
-			}
-
-			// Determine output path
+			// Without --output the server's name is the local path.
 			if outputPath == "" {
+				if err := validation.ValidateFilename(fileInfo.Name); err != nil {
+					return fmt.Errorf("invalid filename from API for file %s: %w", fileID, err)
+				}
 				outputPath = filepath.Join(".", fileInfo.Name)
 			}
 
-			fmt.Printf("Downloading file: %s\n", fileInfo.Name)
+			// The name is shown, not used, when --output is given: quoted if unsafe.
+			name := validation.QuoteUnsafe(fileInfo.Name)
+			fmt.Printf("Downloading file: %s\n", name)
 			fmt.Printf("  Size: %.2f MB\n", float64(fileInfo.DecryptedSize)/(1024*1024))
 			fmt.Printf("  Output: %s\n\n", outputPath)
 
@@ -980,7 +980,7 @@ Examples:
 			// exactly as they do for a whole job.
 			return runDownloadBatch(ctx, []cliDownloadItem{{
 				fileID:    fileID,
-				name:      fileInfo.Name,
+				name:      name,
 				size:      fileInfo.DecryptedSize,
 				localPath: outputPath,
 				cloudFile: fileInfo,

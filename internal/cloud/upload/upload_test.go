@@ -2564,7 +2564,7 @@ func TestStreamingAbandonmentRetiresAPreEncryptMultipart(t *testing.T) {
 	backend := newFakeStreamingBackend()
 
 	stranded, upload := backend.create("", "fake/path/streamed.dat-preencrypt")
-	encryptedPath := localPath + ".encrypted"
+	encryptedPath := filepath.Join(filepath.Dir(localPath), ".streamed.dat-1.encrypted") // CreateEncryptedTempFile's name beside the source
 	if err := os.WriteFile(encryptedPath, []byte("ciphertext"), 0600); err != nil {
 		t.Fatalf("failed to write the encrypted copy: %v", err)
 	}

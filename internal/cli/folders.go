@@ -808,7 +808,9 @@ Examples:
 			if result.FilesSkipped > 0 {
 				fmt.Printf("  Files skipped:      %d\n", result.FilesSkipped)
 			}
-			if result.FilesFailed > 0 {
+			if result.FilesFailed > 0 && dryRun {
+				fmt.Printf("  Files would fail:   %d (a dry run exits 0)\n", result.FilesFailed)
+			} else if result.FilesFailed > 0 {
 				fmt.Printf("  Files failed:       %d\n", result.FilesFailed)
 			}
 			if result.FilesNotStarted > 0 {
@@ -828,7 +830,7 @@ Examples:
 			if err := ctx.Err(); err != nil {
 				return fmt.Errorf("download cancelled: %w", err)
 			}
-			if result.FilesFailed > 0 {
+			if result.FilesFailed > 0 && !dryRun {
 				return fmt.Errorf("some files failed to download")
 			}
 

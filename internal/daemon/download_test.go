@@ -665,22 +665,28 @@ func TestDownloadJob_CutShortDispatchIsNotADownload(t *testing.T) {
 	}
 }
 
-// A file whose folder cannot be made, or whose name is refused, is neither
-// verified nor downloaded, so its job is not downloaded, however many of its
-// other files are on disk: the attempt fails, and no tag goes on. The failure
-// leads with why, and counts every file of the job, the file left out included.
+// A file whose folder cannot be made, whose name or path is refused, or where a
+// link stands is neither verified nor downloaded, so its job is not downloaded,
+// however many of its other files are on disk: the attempt fails, and no tag
+// goes on. The failure leads with why, and counts every file of the job, the
+// file left out included. A link of the right size used to count as the file.
 func TestDownloadJob_AFileItCannotPlaceIsNotADownload(t *testing.T) {
 	payload := []byte("abc")
 	present := models.JobFile{ID: "p", Name: "present.txt", DecryptedSize: 3, FileChecksums: sha512Of(t, payload)}
 	refused := models.JobFile{ID: "r", Name: "../escape.txt", DecryptedSize: 1}
+	victim := filepath.Join(t.TempDir(), "victim.txt")
+	writeFile(t, victim, string(payload))
 	for _, tc := range []struct {
 		jobID string
 		files []models.JobFile
 		want  string // how the failure begins; nothing is appended to it
 	}{
 		{"nofolder", []models.JobFile{present, {ID: "y", Name: "y.txt", RelativePath: "sub/y.txt", DecryptedSize: 1}}, "1 of 2 files could not be downloaded: mkdir "},
-		{"refused", []models.JobFile{present, refused}, "1 of 2 files could not be downloaded: filename cannot contain path separators: ../escape.txt"},
-		{"refused-alone", []models.JobFile{refused}, "1 of 1 file could not be downloaded: filename cannot contain path separators: ../escape.txt"},
+		{"refused", []models.JobFile{present, refused}, "1 of 2 files could not be downloaded: filename cannot contain path separators: \"../escape.txt\""},
+		{"refused-alone", []models.JobFile{refused}, "1 of 1 file could not be downloaded: filename cannot contain path separators: \"../escape.txt\""},
+		{"badpath", []models.JobFile{present, {ID: "y", Name: "y.txt", RelativePath: "run:1/y.txt", DecryptedSize: 1}},
+			"1 of 2 files could not be downloaded: invalid path from API for file y: in \"run:1/y.txt\": filename cannot contain ':': \"run:1\""},
+		{"link", []models.JobFile{present, {ID: "l", Name: "linked.txt", DecryptedSize: 3}}, "1 of 2 files could not be downloaded: refusing to download to "},
 	} {
 		tagCalls := 0
 		srv := fakeJobFilesServer(t, tc.jobID, tc.files, &tagCalls)
@@ -689,11 +695,20 @@ func TestDownloadJob_AFileItCannotPlaceIsNotADownload(t *testing.T) {
 		outDir := ComputeOutputDir(dir, tc.jobID, "job", false)
 		writeFile(t, filepath.Join(outDir, "present.txt"), string(payload))
 		writeFile(t, filepath.Join(outDir, "sub"), "") // a file where y.txt's folder belongs
+		if err := os.Symlink(victim, filepath.Join(outDir, "linked.txt")); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
 
 		outcome := runDownloadJob(t, d, &CompletedJob{ID: tc.jobID, Name: "job"}, 20*time.Second)
 		if entry := d.state.Downloaded[tc.jobID]; outcome == OutcomeDownloaded || tagCalls != 0 || d.state.AttemptCount(tc.jobID) != 1 ||
 			entry.PendingTagApply || !strings.HasPrefix(entry.Error, tc.want) || strings.Contains(entry.Error, ";") {
 			t.Errorf("%s: outcome %s, state %+v, tag calls %d: want one failed attempt recorded as %q", tc.jobID, outcome, entry, tagCalls, tc.want)
 		}
+		if info, err := os.Lstat(filepath.Join(outDir, "linked.txt")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s: the link was not left in place: %v", tc.jobID, err)
+		}
+	}
+	if got, _ := os.ReadFile(victim); string(got) != string(payload) {
+		t.Errorf("the link's target now holds %q", got)
 	}
 }

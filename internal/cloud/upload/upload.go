@@ -25,6 +25,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
 	internaltransfer "github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // UploadParams consolidates all parameters for upload operations.
@@ -102,6 +103,11 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	}
 	if fileInfo.IsDir() {
 		return nil, fmt.Errorf("cannot upload a directory: %s", params.LocalPath)
+	}
+	// Stat follows links, so a link to a file still uploads. A FIFO would block
+	// the open until something wrote to it, beyond the reach of a cancel.
+	if !validation.IsFile(fileInfo.Mode()) {
+		return nil, fmt.Errorf("cannot upload %s: not a regular file", params.LocalPath)
 	}
 
 	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", filepath.Base(params.LocalPath), cloud.FormatBytes(fileInfo.Size()))
@@ -1763,8 +1769,12 @@ func preEncryptResumeBlocker(saved *state.UploadResumeState, localPath string, s
 // abandonPreEncryptState retires a state that can no longer be resumed, along
 // with the ciphertext it named, and reports whether the record could be deleted.
 func abandonPreEncryptState(saved *state.UploadResumeState, localPath string) error {
-	if isEncryptedTempFile(saved.EncryptedPath, localPath) {
+	switch {
+	case madeForSource(saved.EncryptedPath, localPath):
 		os.Remove(saved.EncryptedPath)
+	case saved.EncryptedPath != "":
+		log.Printf("Not removing %s: the upload state for %s names it, but it is not that upload's encrypted copy",
+			validation.Quote(saved.EncryptedPath), validation.Quote(localPath))
 	}
 	return state.DeleteUploadState(localPath)
 }
@@ -1778,6 +1788,24 @@ func isEncryptedTempFile(encryptedPath, localPath string) bool {
 	return encryptedPath != "" &&
 		encryptedPath != localPath &&
 		strings.HasSuffix(encryptedPath, ".encrypted")
+}
+
+// madeForSource is the stricter test that deleting the ciphertext needs, since
+// the state file is data on disk: the name CreateEncryptedTempFile gives this
+// source's ciphertext, "<source name>-<digits>.encrypted" in the temp folder,
+// or with a leading dot beside the source. Resuming needs only
+// isEncryptedTempFile, so a relaunch under another temp folder still resumes.
+func madeForSource(encryptedPath, localPath string) bool {
+	dir, name := filepath.Split(encryptedPath)
+	prefix := filepath.Base(localPath) + "-"
+	if filepath.Clean(dir) == filepath.Dir(localPath) && strings.HasPrefix(name, "."+prefix) {
+		name = name[1:]
+	} else if filepath.Clean(dir) != filepath.Clean(os.TempDir()) {
+		return false
+	}
+	digits, named := strings.CutPrefix(name, prefix)
+	digits, encrypted := strings.CutSuffix(digits, ".encrypted")
+	return named && encrypted && digits != "" && strings.Trim(digits, "0123456789") == ""
 }
 
 // preEncryptStateNames reports whether a resume state describes this ciphertext,

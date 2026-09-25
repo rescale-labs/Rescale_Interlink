@@ -3,7 +3,10 @@ package validation
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -12,37 +15,116 @@ import (
 // (like API responses) before using them in filepath.Join operations.
 //
 // Returns an error if the filename:
-//   - Is empty
-//   - Contains path separators (/ or \)
-//   - Contains ".." components
-//   - Contains null bytes
+//   - Is empty, or only dots ("." and ".." among them)
+//   - Contains a path separator (/ or \), a control character, or any of : < > " | ? *
+//   - Ends in a dot or a space
+//   - Is a Windows device name, with or without an extension ("NUL.txt")
 //
-// This is strict validation to prevent path traversal attacks when filenames
-// come from untrusted sources.
+// The Windows rules apply on every platform: the name comes from the server,
+// and on Windows a colon names an alternate data stream, the other characters
+// cannot be stored, a trailing dot or space is dropped (so the file lands under
+// another name), and a device name opens the device instead of a file.
 func ValidateFilename(filename string) error {
 	if filename == "" {
 		return fmt.Errorf("filename cannot be empty")
 	}
-
-	// Check for null bytes
-	if strings.ContainsRune(filename, 0) {
-		return fmt.Errorf("filename contains null byte: %s", filename)
+	name := Quote(filename)
+	if strings.IndexFunc(filename, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return fmt.Errorf("filename cannot contain a control character: %s", name)
 	}
-
-	// Reject path separators (both Unix and Windows style)
-	if strings.ContainsRune(filename, '/') || strings.ContainsRune(filename, '\\') {
-		return fmt.Errorf("filename cannot contain path separators: %s", filename)
+	if strings.ContainsAny(filename, `/\`) {
+		return fmt.Errorf("filename cannot contain path separators: %s", name)
 	}
-
-	// Reject ".." filename to prevent traversal
-	// Note: Since path separators (/ and \) are already rejected above,
-	// we only need to check for the literal ".." filename, not patterns like "../"
-	// This allows legitimate filenames like "foo..bar.txt" or "data..v2.csv"
-	if filename == ".." {
-		return fmt.Errorf("filename cannot be '..': %s", filename)
+	// "." and ".." name directories; interior dots ("data..v2.csv") are fine.
+	if strings.Trim(filename, ".") == "" {
+		return fmt.Errorf("filename cannot be only dots: %s", name)
 	}
-
+	if i := strings.IndexAny(filename, `:<>"|?*`); i >= 0 {
+		return fmt.Errorf("filename cannot contain %q: %s", filename[i], name)
+	}
+	if strings.HasSuffix(filename, ".") || strings.HasSuffix(filename, " ") {
+		return fmt.Errorf("filename cannot end in a dot or a space: %s", name)
+	}
+	if base, _, _ := strings.Cut(filename, "."); windowsDeviceName.MatchString(base) {
+		return fmt.Errorf("filename is a reserved Windows device name: %s", name)
+	}
 	return nil
+}
+
+// Quote quotes an untrusted name for a message as %q does, so control
+// characters and trailing spaces show, but leaves each backslash single, so a
+// Windows path reads as it was typed.
+func Quote(s string) string {
+	return strings.ReplaceAll(strconv.Quote(s), `\\`, `\`)
+}
+
+// QuoteUnsafe returns a server name as it is when ValidateFilename accepts it,
+// and quoted otherwise, so a name that reaches a message though it names no
+// file here cannot put control characters on a terminal.
+func QuoteUnsafe(name string) string {
+	if ValidateFilename(name) == nil {
+		return name
+	}
+	return Quote(name)
+}
+
+// windowsDeviceName matches the part of a name before its first dot that
+// Windows maps to a device, ignoring trailing spaces.
+var windowsDeviceName = regexp.MustCompile(`(?i)^(CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(COM|LPT)[1-9\x{b9}\x{b2}\x{b3}]) *$`)
+
+// ValidateID checks a job or file ID before it becomes part of a local path
+// (a per-job folder, a collision suffix). Platform IDs are letters and digits;
+// '-' and '_' are allowed too, since neither can move a path anywhere.
+func ValidateID(id string) error {
+	if !idPattern.MatchString(id) {
+		return fmt.Errorf("%s is not a valid ID (letters, digits, '-' and '_' only)", Quote(id))
+	}
+	return nil
+}
+
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// DownloadPath returns where a server file lands under dir: at its relative
+// path when it has one, else under its name, which the caller has checked.
+// Every component of the relative path is held to ValidateFilename's rules
+// before the path is cleaned, so none can climb out of dir, name a stream or a
+// device, or be renamed by Windows.
+func DownloadPath(dir, name, relativePath string) (string, error) {
+	if relativePath == "" {
+		return ResolvePathInDirectory(name, dir)
+	}
+	for _, part := range strings.Split(relativePath, "/") {
+		if err := ValidateFilename(part); err != nil {
+			return "", fmt.Errorf("in %s: %w", Quote(relativePath), err)
+		}
+	}
+	return ResolvePathInDirectory(relativePath, dir)
+}
+
+// ValidateDownloadTarget refuses a download path that exists as anything but a
+// file. A symbolic link or a FIFO there is left as it is, never removed,
+// followed or taken for a finished download. An Lstat just before the use,
+// because Windows has no O_NOFOLLOW.
+func ValidateDownloadTarget(paths ...string) error {
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		switch {
+		case os.IsNotExist(err):
+		case err != nil:
+			return fmt.Errorf("cannot check download path %s: %w", Quote(path), err)
+		case info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("refusing to download to %s: it is a symbolic link", Quote(path))
+		case !IsFile(info.Mode()):
+			return fmt.Errorf("refusing to download to %s: it is not a regular file", Quote(path))
+		}
+	}
+	return nil
+}
+
+// IsFile reports whether mode is a file's. ModeIrregular counts: Windows
+// reports cloud-sync placeholders (OneDrive) that way, and those are files.
+func IsFile(mode os.FileMode) bool {
+	return mode.Type()&^os.ModeIrregular == 0
 }
 
 // ValidatePathInDirectory validates that a path, when resolved, stays within baseDir.

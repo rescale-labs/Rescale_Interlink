@@ -132,6 +132,11 @@ func executeFileDownload(
 			metaSemaphore <- struct{}{}
 			defer func() { <-metaSemaphore }()
 
+			if err := validation.ValidateID(fid); err != nil {
+				metadataErrors[idx] = fmt.Errorf("invalid file ID: %w", err)
+				return
+			}
+
 			// Get file metadata
 			fileInfo, err := apiClient.GetFileInfo(ctx, fid)
 			if err != nil {
@@ -155,11 +160,13 @@ func executeFileDownload(
 	}
 	metaWg.Wait()
 
-	// Check for metadata fetch errors
+	// A file without usable metadata fails alone; the rest still download.
 	var validFiles []fileMetadata
+	var refused []error
 	for i, meta := range fileMetadataList {
 		if metadataErrors[i] != nil {
-			fmt.Printf("⚠️  %v\n", metadataErrors[i])
+			fmt.Printf("✗ %v\n", metadataErrors[i])
+			refused = append(refused, metadataErrors[i])
 			continue
 		}
 		if meta.ID != "" {
@@ -168,7 +175,7 @@ func executeFileDownload(
 	}
 
 	if len(validFiles) == 0 {
-		return fmt.Errorf("no valid files to download")
+		return fmt.Errorf("no valid files to download: %w", runDownloadBatch(ctx, nil, downloadBatchOptions{label: "FILE-DOWNLOAD", refused: refused, logger: logger}))
 	}
 
 	// PHASE 2: Build file list and resolve collisions using shared utility
@@ -219,6 +226,7 @@ func executeFileDownload(
 		conflictMode:     initialDownloadConflictMode(overwriteAll, skipAll, resumeAll),
 		promptOnConflict: true,
 		announcePrepare:  true,
+		refused:          refused,
 		apiClient:        apiClient,
 		logger:           logger,
 	})
@@ -243,6 +251,10 @@ func executeJobDownload(
 	apiClient *api.Client,
 	logger *logging.Logger,
 ) error {
+	// Callers name the output folder after the job (jobs watch: "job_<id>").
+	if err := validation.ValidateID(jobID); err != nil {
+		return fmt.Errorf("invalid job ID: %w", err)
+	}
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 	credentials.GetManager(apiClient).WarmAll(ctx)
 
@@ -281,18 +293,12 @@ func executeJobDownload(
 		}
 	}
 
-	// Drop files whose server-supplied name is not a plain filename. Name is the
-	// fallback used to build the local path whenever RelativePath is absent or
-	// escapes the output directory, so an unchecked name would let the API place
-	// a file anywhere on disk. Matches the file-ID download path and the
-	// auto-download daemon, which reject the same names.
+	// Refuse files whose server-supplied name is not a plain filename. Name is
+	// the local path whenever RelativePath is absent, so an unchecked name would
+	// let the API place a file anywhere on disk; each component of a
+	// RelativePath is held to the same rules below. Matches the file-ID download
+	// path and the auto-download daemon, which reject the same names.
 	files, nameErrs := filterValidJobFiles(files)
-	for _, nameErr := range nameErrs {
-		fmt.Printf("⚠️  %v\n", nameErr)
-	}
-	if len(files) == 0 {
-		return fmt.Errorf("no valid files to download")
-	}
 
 	if outputDir == "" {
 		outputDir = "."
@@ -302,26 +308,28 @@ func executeJobDownload(
 	// Using shared paths.ResolveCollisions() utility for consistency with GUI and CLI.
 	// When multiple files have the same name (e.g., from different job runs), we must
 	// give them unique output paths to prevent concurrent download corruption.
-	downloadFiles := make([]paths.FileForDownload, len(files))
-	for i, file := range files {
-		var basePath string
-		if file.RelativePath != "" {
-			// Validate relative path to prevent escaping output directory
-			if validation.ValidatePathInDirectory(file.RelativePath, outputDir) == nil {
-				basePath = filepath.Join(outputDir, file.RelativePath)
-			} else {
-				// Invalid path - use name only
-				basePath = filepath.Join(outputDir, file.Name)
-			}
-		} else {
-			basePath = filepath.Join(outputDir, file.Name)
+	downloadFiles := make([]paths.FileForDownload, 0, len(files))
+	placed := files[:0]
+	for _, file := range files {
+		localPath, err := validation.DownloadPath(outputDir, file.Name, file.RelativePath)
+		if err != nil {
+			nameErrs = append(nameErrs, fmt.Errorf("invalid path from API for file %s: %w", file.ID, err))
+			continue
 		}
-		downloadFiles[i] = paths.FileForDownload{
+		placed = append(placed, file)
+		downloadFiles = append(downloadFiles, paths.FileForDownload{
 			FileID:    file.ID,
 			Name:      file.Name,
-			LocalPath: basePath,
+			LocalPath: localPath,
 			Size:      file.DecryptedSize,
-		}
+		})
+	}
+	files = placed
+	for _, nameErr := range nameErrs {
+		fmt.Printf("✗ %v\n", nameErr)
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no valid files to download: %w", runDownloadBatch(ctx, nil, downloadBatchOptions{label: "JOB-DOWNLOAD", refused: nameErrs, logger: logger}))
 	}
 
 	// Resolve filename collisions using shared utility
@@ -352,17 +360,13 @@ func executeJobDownload(
 	// Build work items for the batch runner
 	items := make([]cliDownloadItem, len(files))
 	for i, file := range files {
-		outputPath := fileOutputPaths[file.ID]
-		if outputPath == "" {
-			outputPath = filepath.Join(outputDir, file.Name)
-		}
 		jf := file // capture loop variable
 		items[i] = cliDownloadItem{
 			idx:       i,
 			fileID:    file.ID,
 			name:      file.Name,
 			size:      file.DecryptedSize,
-			localPath: outputPath,
+			localPath: fileOutputPaths[file.ID],
 			jobFile:   &jf,
 		}
 	}
@@ -375,6 +379,7 @@ func executeJobDownload(
 		conflictMode:   initialDownloadConflictMode(overwriteAll, skipAll, resumeAll),
 		makeParentDirs: true,
 		announceSkip:   true,
+		refused:        nameErrs,
 		apiClient:      apiClient,
 		logger:         logger,
 	})
@@ -406,6 +411,10 @@ type downloadBatchOptions struct {
 
 	// announcePrepare prints a numbered line per file before its transfer starts.
 	announcePrepare bool
+
+	// refused holds one error per file that failed before the batch: the
+	// batch reports them with its own failures, and the command fails.
+	refused []error
 
 	apiClient *api.Client
 	logger    *logging.Logger
@@ -503,11 +512,8 @@ func resolveDownloadConflict(
 					os.Remove(outputPath)
 				}
 			} else {
-				if encErr == nil {
-					fmt.Fprintf(w, "Encrypted file has unexpected size (%d bytes, expected %d-%d bytes). Starting fresh download for %s...\n",
-						encryptedInfo.Size(), minEncryptedSize, maxEncryptedSize, item.name)
-					os.Remove(encryptedPath)
-				}
+				// A <file>.encrypted that no resume record vouches for may be
+				// the user's own file, so it stays.
 				os.Remove(outputPath)
 			}
 		}
@@ -563,11 +569,15 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 		}
 
 		// Check if path exists as a directory (name collision with folder)
-		if info, statErr := os.Stat(outputPath); statErr == nil && info.IsDir() {
+		if info, statErr := os.Lstat(outputPath); statErr == nil && info.IsDir() {
 			originalPath := outputPath
 			outputPath = outputPath + ".file"
 			fmt.Fprintf(downloadUI.Writer(), "⚠️  File '%s' conflicts with directory, downloading as '%s'\n",
 				filepath.Base(originalPath), filepath.Base(outputPath))
+		}
+		// Before any conflict handling, which would remove, follow or keep it.
+		if err := validation.ValidateDownloadTarget(outputPath); err != nil {
+			return err
 		}
 
 		// Check if file exists and handle conflict
@@ -666,6 +676,7 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 	if failed > len(errs) {
 		errs = append(errs, fmt.Errorf("%d file(s) not downloaded: %w", failed-len(errs), ctx.Err()))
 	}
+	errs, failed = append(opts.refused, errs...), failed+len(opts.refused)
 
 	// Print summary
 	if len(errs) > 0 {
@@ -706,15 +717,18 @@ func namesDirectory(path string) bool {
 	return path != "" && (last == "" || last == "." || last == ".." || err == nil && info.IsDir())
 }
 
-// filterValidJobFiles splits job files into those whose server-supplied name is
-// a plain filename and one error per rejected file. See executeJobDownload for
-// why the name is checked even when the file also carries a relative path.
+// filterValidJobFiles splits job files into those whose server-supplied name and
+// ID are safe in a local path and one error per rejected file.
 func filterValidJobFiles(files []models.JobFile) ([]models.JobFile, []error) {
 	valid := make([]models.JobFile, 0, len(files))
 	var errs []error
 	for _, f := range files {
 		if err := validation.ValidateFilename(f.Name); err != nil {
-			errs = append(errs, fmt.Errorf("invalid filename from API for file %s: %w", f.ID, err))
+			errs = append(errs, fmt.Errorf("invalid filename from API for file %s: %w", validation.QuoteUnsafe(f.ID), err))
+			continue
+		}
+		if err := validation.ValidateID(f.ID); err != nil {
+			errs = append(errs, fmt.Errorf("invalid file ID from API for %s: %w", f.Name, err))
 			continue
 		}
 		valid = append(valid, f)

@@ -317,7 +317,7 @@ func TestMarkFailed_WhileStoppingCountsAGenuineFailure(t *testing.T) {
 			t.Errorf("while the daemon stopped, %q was recorded as %d failed attempts, want %d", id, got, want)
 		}
 	}
-	if e, want := d.state.Downloaded["refused-then-b"], "1 of 2 files could not be downloaded: filename cannot contain path separators: ../escape.txt; cancelled"; e == nil || !strings.HasPrefix(e.Error, want) {
+	if e, want := d.state.Downloaded["refused-then-b"], "1 of 2 files could not be downloaded: filename cannot contain path separators: \"../escape.txt\"; cancelled"; e == nil || !strings.HasPrefix(e.Error, want) {
 		t.Errorf("recorded %+v, want an error beginning %q", e, want)
 	}
 }

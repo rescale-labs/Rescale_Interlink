@@ -29,6 +29,7 @@ type compatDownloadItem struct {
 	name      string
 	size      int64
 	localPath string
+	pathErr   error // why the server's path gives no local path
 }
 
 func (d compatDownloadItem) FileSize() int64 { return d.size }
@@ -126,13 +127,11 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 		return fmt.Errorf("failed to get file info: %w", err)
 	}
 
-	if err := validation.ValidateFilename(fileInfo.Name); err != nil {
-		return fmt.Errorf("invalid filename from API for file %s: %w", fileID, err)
-	}
-
-	if outputPath == "" {
-		outputPath = filepath.Join(".", fileInfo.Name)
-	} else if info, err := os.Stat(outputPath); (err == nil && info.IsDir()) || outputPath[len(outputPath)-1] == filepath.Separator {
+	// The server's name is part of the local path unless -o names a file.
+	if info, err := os.Stat(outputPath); outputPath == "" || (err == nil && info.IsDir()) || outputPath[len(outputPath)-1] == filepath.Separator {
+		if err := validation.ValidateFilename(fileInfo.Name); err != nil {
+			return fmt.Errorf("invalid filename from API for file %s: %w", fileID, err)
+		}
 		outputPath = filepath.Join(outputPath, fileInfo.Name)
 	}
 
@@ -140,7 +139,8 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	cc.Printf("Downloading %s (%.2f MB)\n", fileInfo.Name, float64(fileInfo.DecryptedSize)/(1024*1024))
+	name := validation.QuoteUnsafe(fileInfo.Name) // shown, not used, when -o names a file
+	cc.Printf("Downloading %s (%.2f MB)\n", name, float64(fileInfo.DecryptedSize)/(1024*1024))
 
 	resourceMgr := resources.NewManager(resources.Config{AutoScale: true})
 	transferMgr := transfer.NewManager(resourceMgr)
@@ -159,7 +159,7 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 	if downloadUI != nil {
 		progressCB = func(fraction float64) {
 			barOnce.Do(func() {
-				fileBar = downloadUI.AddFileBar(1, fileID, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
+				fileBar = downloadUI.AddFileBar(1, fileID, name, outputPath, fileInfo.DecryptedSize)
 			})
 			if fileBar != nil {
 				fileBar.UpdateProgress(fraction)
@@ -177,7 +177,7 @@ func compatDownloadByFileID(ctx context.Context, fileID, outputPath string, apiC
 
 	if downloadUI != nil {
 		if fileBar == nil {
-			fileBar = downloadUI.AddFileBar(1, fileID, fileInfo.Name, outputPath, fileInfo.DecryptedSize)
+			fileBar = downloadUI.AddFileBar(1, fileID, name, outputPath, fileInfo.DecryptedSize)
 		}
 		if err != nil {
 			fileBar.Complete(err)
@@ -205,6 +205,10 @@ type compatDownloadOpts struct {
 
 // compatDownloadByJobID downloads output files for a job, optionally filtered by filename or glob patterns.
 func compatDownloadByJobID(ctx context.Context, jobID string, opts compatDownloadOpts, apiClient *api.Client, cc *CompatContext) error {
+	// sync names each job's output folder "rescale_job_<id>".
+	if err := validation.ValidateID(jobID); err != nil {
+		return fmt.Errorf("invalid job ID: %w", err)
+	}
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())
 	credentials.GetManager(apiClient).WarmAll(ctx)
 
@@ -255,12 +259,14 @@ func compatDownloadByJobID(ctx context.Context, jobID string, opts compatDownloa
 
 	items := make([]compatDownloadItem, len(files))
 	for i, f := range files {
+		localPath, pathErr := validation.DownloadPath(outputDir, f.Name, f.RelativePath)
 		items[i] = compatDownloadItem{
 			idx:       i,
 			fileID:    f.ID,
 			name:      f.Name,
 			size:      f.DecryptedSize,
-			localPath: compatLocalPath(outputDir, f.Name, f.RelativePath),
+			localPath: localPath,
+			pathErr:   pathErr,
 		}
 	}
 
@@ -327,30 +333,20 @@ func compatDownloadByRunFiles(ctx context.Context, jobID, runID string, opts com
 
 	items := make([]compatDownloadItem, len(resolved))
 	for i, r := range resolved {
+		localPath, pathErr := validation.DownloadPath(outputDir, r.runFile.Name, r.runFile.RelativePath)
 		items[i] = compatDownloadItem{
 			idx:       i,
 			fileID:    r.runFile.ID,
 			name:      r.runFile.Name,
 			size:      r.cloudFile.DecryptedSize,
-			localPath: compatLocalPath(outputDir, r.runFile.Name, r.runFile.RelativePath),
+			localPath: localPath,
+			pathErr:   pathErr,
 		}
 	}
 
 	return runCompatDownloadBatch(ctx, items, "COMPAT-RUN-DOWNLOAD", func(idx int) *models.CloudFile {
 		return resolved[idx].cloudFile
 	}, apiClient, cc)
-}
-
-// compatLocalPath places a downloaded file under outputDir, preferring the
-// server-reported relative path when it stays inside outputDir.
-func compatLocalPath(outputDir, name, relativePath string) string {
-	if relativePath != "" {
-		candidate := filepath.Join(outputDir, relativePath)
-		if validation.ValidatePathInDirectory(candidate, outputDir) == nil {
-			return candidate
-		}
-	}
-	return filepath.Join(outputDir, name)
 }
 
 // existingFileIsComplete reports whether a file already on disk can stand in for
@@ -395,13 +391,15 @@ func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, lab
 	}
 
 	batchResult := transfer.RunBatch(ctx, items, cfg, func(ctx context.Context, item compatDownloadItem) error {
-		// compatLocalPath falls back to the server-supplied name whenever the
-		// relative path is absent or escapes the output directory, so the name
-		// must be a plain filename or the API could place a file anywhere on
-		// disk. Checked here rather than at the two call sites so both the job
-		// and run download paths are covered once.
+		// A file without a relative path is placed by its server-supplied
+		// name, so the name must be a plain filename or the API could place a
+		// file anywhere on disk. Checked here rather than at the two call sites
+		// so both the job and run download paths are covered once.
 		if err := validation.ValidateFilename(item.name); err != nil {
-			return fmt.Errorf("invalid filename from API for file %s: %w", item.fileID, err)
+			return fmt.Errorf("invalid filename from API for file %s: %w", validation.QuoteUnsafe(item.fileID), err)
+		}
+		if item.pathErr != nil {
+			return fmt.Errorf("invalid path from API for file %s: %w", validation.QuoteUnsafe(item.fileID), item.pathErr)
 		}
 
 		outputPath := item.localPath
@@ -411,6 +409,10 @@ func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, lab
 			return fmt.Errorf("failed to create directory for %s: %w", item.name, err)
 		}
 
+		// Before any conflict handling, which would remove or keep it.
+		if err := validation.ValidateDownloadTarget(outputPath); err != nil {
+			return err
+		}
 		if info, err := os.Stat(outputPath); err == nil && !info.IsDir() {
 			if existingFileIsComplete(info, item.size) {
 				cc.Printf("Skipping existing: %s\n", item.name)
@@ -472,6 +474,10 @@ func runCompatDownloadBatch(ctx context.Context, items []compatDownloadItem, lab
 
 	if len(batchResult.Errors) > 0 {
 		cc.Printf("Downloaded %d file(s), %d failed\n", batchResult.Completed, batchResult.Failed)
+		// The first is the command's error; the rest would go unsaid.
+		for _, err := range batchResult.Errors[1:] {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		return batchResult.Errors[0]
 	}
 

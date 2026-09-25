@@ -27,6 +27,7 @@ import (
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/tags"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // TransferService handles upload and download orchestration.
@@ -444,6 +445,14 @@ func (ts *TransferService) RegisterSkipPlaceholderTask(batchID, displayName stri
 	ts.registerPlaceholderTask(batchID, displayName, fmt.Sprintf("(skipped: %s)", displayName), transfer.TaskTypeUpload)
 }
 
+// RecordRefusedDownload adds a failed row to a download batch for an entry
+// refused before any transfer: a name or path it cannot write safely, or a
+// link where the file belongs. Nothing is fetched for it.
+func (ts *TransferService) RecordRefusedDownload(batchID, batchLabel, name, fileID, dest string, err error) {
+	task := ts.queue.TrackTransferWithBatch(name, 0, transfer.TaskTypeDownload, fileID, dest, SourceLabelFileBrowser, batchID, batchLabel)
+	ts.queue.Fail(task.ID, err)
+}
+
 // RegisterEmptyBatchPlaceholder anchors a streaming batch that completed with zero
 // real tasks and no error — e.g. downloading a remote folder that contains no files,
 // or uploading an empty local folder. Without an anchor, CleanupBatch deletes the
@@ -859,14 +868,30 @@ func (ts *TransferService) runDownload(x taskExecution) {
 	transferHandle := ts.transferMgr.AllocateTransfer(x.req.Size, x.workerCount)
 	defer transferHandle.Complete()
 
-	// Ensure dest is a file path, not a directory
+	// The file browser builds Dest from the chosen folder and the server's file
+	// name. Hold that name to the rule every other download surface applies,
+	// and Dest to ending in it, so the file cannot land outside the folder.
+	if err := validation.ValidateFilename(x.fileName); err != nil {
+		x.attempt.Fail(fmt.Errorf("invalid filename from API for file %s: %w", x.req.Source, err))
+		return
+	}
+
+	// Ensure dest is a file path, not a directory. Lstat: a link to a
+	// directory is not the folder the user chose.
 	localPath := x.req.Dest
-	if info, err := os.Stat(localPath); err == nil && info.IsDir() {
+	if info, err := os.Lstat(localPath); err == nil && info.IsDir() {
 		localPath = filepath.Join(localPath, x.fileName)
 		ts.logger.Debug().
 			Str("original_dest", x.req.Dest).
 			Str("corrected_path", localPath).
 			Msg("Dest was a directory, appending filename")
+	} else if filepath.Base(localPath) != x.fileName {
+		x.attempt.Fail(fmt.Errorf("download destination %s does not end in the file's name %s", validation.Quote(localPath), validation.Quote(x.fileName)))
+		return
+	}
+	if err := validation.ValidateDownloadTarget(localPath); err != nil {
+		x.attempt.Fail(err)
+		return
 	}
 
 	// Execute download with progress callback.
@@ -937,6 +962,14 @@ func (ts *TransferService) ExecuteRetry(task *transfer.TransferTask, token trans
 		}
 		ts.executeUploadRetry(ctx, req, task.ID, token, apiClient)
 	} else {
+		// A row for a name refused before any transfer: the name is refused
+		// still, and a retry must not fetch under the file ID instead.
+		if err := validation.ValidateFilename(task.Name); err != nil {
+			if attempt, owned := ts.queue.BeginAttempt(task.ID, token); owned {
+				attempt.Fail(fmt.Errorf("invalid filename from API for file %s: %w", validation.Quote(task.Source), err))
+			}
+			return
+		}
 		req := TransferRequest{
 			Type:   TransferTypeDownload,
 			Source: task.Source,

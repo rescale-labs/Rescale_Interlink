@@ -6,8 +6,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
+
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // ExpandPatterns expands file glob patterns, deduplicating results by absolute path.
@@ -77,13 +78,13 @@ func UnderRoot(root, pattern string) ([]string, error) {
 	// knows about the leading slash.
 	if filepath.IsAbs(pattern) {
 		return nil, fmt.Errorf("%s is an absolute path, but patterns are matched inside the scan root %s",
-			quoted(pattern), root)
+			validation.Quote(pattern), root)
 	}
 
 	cleaned := path.Clean(filepath.ToSlash(pattern))
 	if !fs.ValidPath(cleaned) {
 		return nil, fmt.Errorf("%s reaches outside the scan root %s; patterns must name files under the root",
-			quoted(pattern), root)
+			validation.Quote(pattern), root)
 	}
 
 	matches, err := fs.Glob(os.DirFS(root), cleaned)
@@ -96,10 +97,4 @@ func UnderRoot(root, pattern string) ([]string, error) {
 		joined = append(joined, filepath.Join(root, filepath.FromSlash(m)))
 	}
 	return joined, nil
-}
-
-// quoted quotes a pattern for a message as %q does, but leaves each backslash
-// single, so a Windows path reads as it was typed.
-func quoted(pattern string) string {
-	return strings.ReplaceAll(strconv.Quote(pattern), `\\`, `\`)
 }

@@ -6,12 +6,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
@@ -64,6 +66,23 @@ func readPromptLine(reader *bufio.Reader) (string, error) {
 		return "", fmt.Errorf("cannot read input: stdin closed (%w)", err)
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// readHiddenFn reads the API key without echo when in is a terminal, so the
+// key stays out of scrollback and screen shares; ok is false for any other
+// input, which the caller reads as a line. Replaceable in tests, which have no
+// terminal.
+var readHiddenFn = func(in io.Reader) (key string, ok bool, err error) {
+	f, isFile := in.(*os.File)
+	if !isFile || !term.IsTerminal(int(f.Fd())) {
+		return "", false, nil
+	}
+	b, err := term.ReadPassword(int(f.Fd()))
+	fmt.Println()
+	if err != nil {
+		return "", true, fmt.Errorf("cannot read input: %w", err)
+	}
+	return strings.TrimSpace(string(b)), true, nil
 }
 
 // shellQuote quotes s as one word for a POSIX shell, the shell the commands
@@ -150,7 +169,10 @@ Use --force to overwrite an existing configuration or token file.`,
 			var apiKeyInput string
 			for apiKeyInput == "" {
 				fmt.Print("API Key (required): ")
-				input, err := readPromptLine(reader)
+				input, hidden, err := readHiddenFn(cmd.InOrStdin())
+				if err == nil && !hidden {
+					input, err = readPromptLine(reader)
+				}
 				if err != nil {
 					return err
 				}

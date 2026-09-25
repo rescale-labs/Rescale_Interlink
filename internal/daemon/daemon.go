@@ -898,6 +898,14 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
+	// The job's folder is named after its ID, which comes from the server.
+	if err := validation.ValidateID(job.ID); err != nil {
+		err = fmt.Errorf("invalid job ID: %w", err)
+		d.logger.Error().Err(err).Msg("Refusing to download job")
+		d.markFailed(ctx, job, "", err)
+		return OutcomeOutputDirCreateFailed
+	}
+
 	// Check for custom download path from eligibility config
 	baseDir := d.cfg.DownloadDir
 	if d.cfg.Eligibility != nil {
@@ -1027,19 +1035,16 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 				continue
 			}
 
-			var localPath string
-			if f.RelativePath != "" {
-				if err := validation.ValidatePathInDirectory(f.RelativePath, outputDir); err == nil {
-					localPath = filepath.Join(outputDir, f.RelativePath)
-				} else {
-					localPath = filepath.Join(outputDir, f.Name)
-				}
-			} else {
-				localPath = filepath.Join(outputDir, f.Name)
+			localPath, err := validation.DownloadPath(outputDir, f.Name, f.RelativePath)
+			if err != nil {
+				err = fmt.Errorf("invalid path from API for file %s: %w", validation.QuoteUnsafe(f.ID), err)
+			} else if err = os.MkdirAll(filepath.Dir(localPath), 0755); err == nil {
+				// Before the presence check: a link of the right size is not
+				// the file, and is refused and left alone.
+				err = validation.ValidateDownloadTarget(localPath)
 			}
-
-			if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
-				d.logger.Error().Err(err).Str("path", localPath).Msg("Failed to create file directory")
+			if err != nil {
+				d.logger.Warn().Err(err).Str("file_id", f.ID).Msg("Skipping file")
 				skipped, skipErr = skipped+1, err
 				continue
 			}

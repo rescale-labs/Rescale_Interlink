@@ -276,10 +276,17 @@ func DownloadFolderRecursive(
 	}
 	cliTransferMgr := transfer.NewManager(resourceMgr)
 
-	// Build work items for BatchExecutor
-	items := make([]folderDownloadWorkItem, len(allFiles))
+	// Build work items for BatchExecutor. An entry the scan refused fails here:
+	// it is known before any transfer starts, so it stops nothing else, with or
+	// without --continue-on-error.
+	items := make([]folderDownloadWorkItem, 0, len(allFiles))
 	for i, fileTask := range allFiles {
-		items[i] = folderDownloadWorkItem{idx: i, task: fileTask}
+		if fileTask.Err != nil {
+			fmt.Fprintf(downloadUI.Writer(), "✗ %v\n", fileTask.Err)
+			errChan <- DownloadError{FilePath: filepath.Join(rootOutputDir, fileTask.RelativePath), FileID: fileTask.FileID, Error: fileTask.Err}
+			continue
+		}
+		items = append(items, folderDownloadWorkItem{idx: i, task: fileTask})
 	}
 
 	cfg := transfer.BatchConfig{
@@ -322,13 +329,18 @@ func DownloadFolderRecursive(
 		localPath := filepath.Join(rootOutputDir, task.RelativePath)
 
 		// Check if path exists as a directory (name collision with folder)
-		if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+		if info, statErr := os.Lstat(localPath); statErr == nil && info.IsDir() {
 			originalPath := localPath
 			localPath = localPath + ".file"
 			logger.Warn().
 				Str("original_path", originalPath).
 				Str("renamed_to", localPath).
 				Msg("File name conflicts with existing directory, renaming file")
+		}
+		// Before any conflict handling, which would remove, follow or keep it.
+		if err := validation.ValidateDownloadTarget(localPath); err != nil {
+			fmt.Fprintf(downloadUI.Writer(), "✗ %v\n", err)
+			return fail(localPath, task.FileID, err, false)
 		}
 
 		// Check if file exists and handle conflict
@@ -521,6 +533,11 @@ func performDryRunAnalysis(
 
 	// Check files
 	for _, file := range allFiles {
+		if file.Err != nil {
+			fmt.Printf("✗ Would fail: %v\n", file.Err)
+			result.Errors = append(result.Errors, DownloadError{FilePath: filepath.Join(rootOutputDir, file.RelativePath), FileID: file.FileID, Error: file.Err})
+			continue
+		}
 		localPath := filepath.Join(rootOutputDir, file.RelativePath)
 		if _, err := os.Stat(localPath); err == nil {
 			filesExisting++
@@ -563,6 +580,9 @@ func performDryRunAnalysis(
 	if filesToOverwrite > 0 {
 		fmt.Printf("  Would overwrite:  %d (already exist)\n", filesToOverwrite)
 	}
+	if len(result.Errors) > 0 {
+		fmt.Printf("  Would fail:       %d (the download would exit 1; a dry run exits 0)\n", len(result.Errors))
+	}
 
 	// Size
 	if totalBytes > 0 {
@@ -589,6 +609,7 @@ func performDryRunAnalysis(
 	result.FoldersCreated = foldersToCreate
 	result.FilesDownloaded = 0 // Dry-run doesn't download
 	result.FilesSkipped = filesSkipped
+	result.FilesFailed = len(result.Errors) // predicted, with their reasons in Errors
 	result.TotalBytes = 0
 
 	return result, nil

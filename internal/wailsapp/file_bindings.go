@@ -576,6 +576,10 @@ type FolderDownloadResultDTO struct {
 	Error           string `json:"error,omitempty"`
 }
 
+// folderDownloadAPI is the API a folder download scans with: the engine's. A
+// test swaps in a fake, as for folderUploadAPI.
+var folderDownloadAPI = func(a *App) *api.Client { return a.engine.API() }
+
 // StartFolderDownload downloads a remote folder recursively to the local filesystem.
 // Scans remote folder via streaming, creates local directory structure, and queues files
 // to TransferService. Returns immediately — downloads begin within seconds as files are discovered.
@@ -626,7 +630,7 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 		return FolderDownloadResultDTO{Error: ErrNoEngine.Error()}
 	}
 
-	apiClient := a.engine.API()
+	apiClient := folderDownloadAPI(a)
 	if apiClient == nil {
 		emitLog(events.ErrorLevel, "API client not configured")
 		emitEnumeration(events.EventEnumerationCompleted, 0, 0, 0, true, "API client not configured", "", events.EnumPhaseError)
@@ -771,13 +775,30 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 			if event.File != nil {
 				// Validate file path to prevent path traversal
 				localPath, pathErr := resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
+				// A name the scan refused, or a link or other non-file where
+				// the file belongs, which the merge skip below would take for
+				// the file: a failed row with the reason, and no transfer.
+				refusal := event.File.Err
+				if refusal != nil {
+					localPath, pathErr = rootOutputDir, nil
+				} else if pathErr == nil {
+					refusal = validation.ValidateDownloadTarget(localPath)
+				}
 				if pathErr != nil {
 					emitLog(events.WarnLevel, fmt.Sprintf("Skipping file with invalid path %q: %s", event.File.RelativePath, pathErr.Error()))
 					continue
 				}
-				// In merge mode, skip files that already exist locally
+				if refusal != nil {
+					emitLog(events.WarnLevel, refusal.Error())
+					ts.RecordRefusedDownload(enumID, displayName, event.File.Name, event.File.FileID, localPath, refusal)
+					filesQueued++
+					ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
+					continue
+				}
+				// In merge mode, skip files that already exist locally, unless
+				// shorter than the file is: an interrupted download left them.
 				if mergeMode {
-					if _, err := os.Stat(localPath); err == nil {
+					if info, err := os.Stat(localPath); err == nil && info.Size() >= event.File.Size {
 						continue
 					}
 				}

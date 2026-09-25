@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // ByteRange represents a completed byte range in the output file.
@@ -50,24 +53,7 @@ type DownloadResumeState struct {
 
 // SaveDownloadState saves the download resume state to a sidecar file.
 func SaveDownloadState(state *DownloadResumeState, localPath string) error {
-	stateFilePath := localPath + ".download.resume"
-	tmpFilePath := stateFilePath + ".tmp"
-
-	data, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal download state: %w", err)
-	}
-
-	if err := os.WriteFile(tmpFilePath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp state file: %w", err)
-	}
-
-	if err := os.Rename(tmpFilePath, stateFilePath); err != nil {
-		os.Remove(tmpFilePath)
-		return fmt.Errorf("failed to rename state file: %w", err)
-	}
-
-	return nil
+	return writeSidecar(localPath+".download.resume", state)
 }
 
 // LoadDownloadState loads the download resume state from a sidecar file.
@@ -107,6 +93,15 @@ func DownloadResumeStateExists(localPath string) bool {
 	return err == nil
 }
 
+// samePath reports whether two paths name the same file. Records written
+// before downloads used absolute paths hold relative ones, so both sides are
+// compared as cleaned absolute paths.
+func samePath(a, b string) bool {
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && absA == absB
+}
+
 // =============================================================================
 // Validation
 // =============================================================================
@@ -121,7 +116,7 @@ func ValidateDownloadState(state *DownloadResumeState, localPath string) error {
 		return fmt.Errorf("resume state expired")
 	}
 
-	if state.LocalPath != localPath {
+	if !samePath(state.LocalPath, localPath) {
 		return fmt.Errorf("local path mismatch")
 	}
 
@@ -227,18 +222,26 @@ func (s *DownloadResumeState) GetMissingChunks(totalChunks int64) []int64 {
 // =============================================================================
 
 // CleanupExpiredDownloadResume safely deletes expired encrypted temp file and resume state.
+//
+// The sidecar is data on disk, so the path it names is removed only when it is
+// the file the sidecar sits beside: the chunked download keys its sidecar by
+// the very file it writes. Any other path is left alone.
 func CleanupExpiredDownloadResume(state *DownloadResumeState, localPath string, verbose bool) {
 	if state == nil {
 		return
 	}
 
-	// Clean up encrypted temp file if it exists
-	if state.EncryptedPath != "" {
-		if _, err := os.Stat(state.EncryptedPath); err == nil {
+	switch {
+	case state.EncryptedPath == "":
+	case !samePath(state.EncryptedPath, localPath):
+		log.Printf("Not removing %s: the resume state for %s names it, but it is not that download's temp file",
+			validation.Quote(state.EncryptedPath), validation.Quote(localPath))
+	default:
+		if _, err := os.Stat(localPath); err == nil {
 			if verbose {
-				log.Printf("Cleaning up expired download temp file: %s", state.EncryptedPath)
+				log.Printf("Cleaning up expired download temp file: %s", localPath)
 			}
-			os.Remove(state.EncryptedPath)
+			os.Remove(localPath)
 		}
 	}
 

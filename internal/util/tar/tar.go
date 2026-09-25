@@ -72,12 +72,12 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 	var args []string
 	if useAbsolutePaths {
 		// For multi-part mode: use absolute paths
-		args = []string{tarFlags, outputPath, "-P", sourceDir}
+		args = []string{tarFlags, outputPath, "-P", tarOperand(sourceDir)}
 	} else {
 		// Normal mode: relative paths, archive contents without parent directory
 		parent := filepath.Dir(sourceDir)
 		dirname := filepath.Base(sourceDir)
-		args = []string{tarFlags, outputPath, "-C", parent, dirname}
+		args = []string{tarFlags, outputPath, "-C", parent, tarOperand(dirname)}
 	}
 
 	// GNU tar reads the drive-letter colon in a Windows absolute path (C:\...)
@@ -103,6 +103,17 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 	}
 
 	return nil
+}
+
+// tarOperand keeps a path from being read as anything but a path. A leading
+// "-" is an option to every tar, and bsdtar also reads "@name" as an archive
+// to copy entries from and "-Cdir" as a directory change, even after "--".
+// Only such names get the "./", so every other archive keeps its entry names.
+func tarOperand(path string) string {
+	if strings.HasPrefix(path, "-") || strings.HasPrefix(path, "@") {
+		return "./" + path
+	}
+	return path
 }
 
 // CreateTarGzWithOptions creates a tar archive with filtering and flattening options

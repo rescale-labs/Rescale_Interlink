@@ -20,6 +20,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // DownloadParams consolidates all parameters for download operations.
@@ -60,6 +61,10 @@ type DownloadParams struct {
 	SkipChecksum bool
 }
 
+// newProvider builds the S3 or Azure provider a download reads from. A test
+// replaces it.
+var newProvider = providers.NewFactory().NewTransferFromStorageInfo
+
 // DownloadFile is THE ONLY canonical entry point for downloading files from Rescale cloud storage.
 // It handles credential fetching, downloads the file with decryption, and verifies checksum.
 //
@@ -96,7 +101,7 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 		}
 	}
 
-	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", fileInfo.Name, cloud.FormatBytes(fileInfo.DecryptedSize))
+	cloud.TimingLog(params.OutputWriter, "File: %s (%s)", validation.QuoteUnsafe(fileInfo.Name), cloud.FormatBytes(fileInfo.DecryptedSize))
 
 	// Get the global credential manager (caches user profile and credentials)
 	credManager := credentials.GetManager(params.APIClient)
@@ -116,8 +121,7 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	}
 
 	// Create provider using factory (S3 or Azure based on storage type)
-	factory := providers.NewFactory()
-	provider, err := factory.NewTransferFromStorageInfo(ctx, storageInfo, params.APIClient)
+	provider, err := newProvider(ctx, storageInfo, params.APIClient)
 	if err != nil {
 		return fmt.Errorf("failed to create provider: %w", err)
 	}
@@ -187,12 +191,6 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	checksumTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
 	overallTimer.StopWithThroughput(fileInfo.DecryptedSize)
-
-	// Safety net: clean up any leftover .encrypted temp file from legacy path.
-	// Only on success -- failed downloads may need the .encrypted file for resume.
-	// This covers the case where the downloader's own defer ran but failed
-	// (e.g., Windows file locking released after a delay).
-	_ = os.Remove(params.LocalPath + ".encrypted")
 
 	// Clean up resume state file on successful download.
 	// This prevents stale resume state from accumulating and ensures

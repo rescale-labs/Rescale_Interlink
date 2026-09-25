@@ -25,6 +25,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // UploadResumeState tracks the state of an in-progress upload for resumption.
@@ -150,25 +152,19 @@ func (lockRefusal) Is(target error) bool { return target == ErrUploadLocked }
 // =============================================================================
 
 // SaveUploadState saves the upload resume state to a sidecar file.
-// The state file is saved atomically using a temporary file + rename.
 func SaveUploadState(state *UploadResumeState, localPath string) error {
-	stateFilePath := localPath + ".upload.resume"
-	tmpFilePath := stateFilePath + ".tmp"
+	return writeSidecar(localPath+".upload.resume", state)
+}
 
+// writeSidecar writes a resume sidecar, which holds the file's key, owner-only.
+func writeSidecar(path string, state any) error {
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal upload state: %w", err)
+		return fmt.Errorf("failed to marshal resume state: %w", err)
 	}
-
-	if err := os.WriteFile(tmpFilePath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp state file: %w", err)
+	if err := paths.WritePrivateFile(path, data); err != nil {
+		return fmt.Errorf("failed to write state file: %w", err)
 	}
-
-	if err := os.Rename(tmpFilePath, stateFilePath); err != nil {
-		os.Remove(tmpFilePath)
-		return fmt.Errorf("failed to rename state file: %w", err)
-	}
-
 	return nil
 }
 

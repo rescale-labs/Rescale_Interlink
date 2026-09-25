@@ -182,38 +182,34 @@ func TestExistingFileIsComplete(t *testing.T) {
 // TestFilterValidJobFiles covers the guard on the Name fallback used to build
 // local paths in executeJobDownload.
 func TestFilterValidJobFiles(t *testing.T) {
+	const name = "invalid filename from API for file file123"
 	tests := []struct {
-		name     string
-		fileName string
-		keep     bool
+		name, id, fileName string
+		refusal            string // how the refusal reads; "" keeps the file
 	}{
-		{"plain name", "results.dat", true},
-		{"dots inside the name", "data..v2.csv", true},
-		{"unix traversal", "../../etc/passwd", false},
-		{"windows separator", `..\..\Windows\System32\evil.dll`, false},
-		{"bare parent directory", "..", false},
-		{"empty name", "", false},
+		{"plain name", "file123", "results.dat", ""},
+		{"dots inside the name", "file123", "data..v2.csv", ""},
+		{"unix traversal", "file123", "../../etc/passwd", name},
+		{"windows separator", "file123", `..\..\Windows\System32\evil.dll`, name},
+		{"bare parent directory", "file123", "..", name},
+		{"empty name", "file123", "", name},
+		{"windows device name", "file123", "NUL.txt", name},
+		{"alternate data stream", "file123", "results.dat:hidden", name},
+		{"trailing dot", "file123", "results.", name},
+		{"an ID that is not one", "x/../../../../tmp/escaped", "results.dat", "invalid file ID from API for results.dat"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kept, errs := filterValidJobFiles([]models.JobFile{{ID: "file123", Name: tt.fileName}})
-
-			if tt.keep {
+			kept, errs := filterValidJobFiles([]models.JobFile{{ID: tt.id, Name: tt.fileName}})
+			if tt.refusal == "" {
 				if len(kept) != 1 || len(errs) != 0 {
 					t.Fatalf("kept %d files with %d errors, want 1 file and no errors", len(kept), len(errs))
 				}
 				return
 			}
-
-			if len(kept) != 0 {
-				t.Errorf("kept %d files, want 0", len(kept))
-			}
-			if len(errs) != 1 {
-				t.Fatalf("got %d errors, want 1", len(errs))
-			}
-			if !strings.Contains(errs[0].Error(), "invalid filename from API for file file123") {
-				t.Errorf("error = %q, want the shared invalid-filename wording", errs[0])
+			if len(kept) != 0 || len(errs) != 1 || !strings.Contains(errs[0].Error(), tt.refusal) {
+				t.Errorf("kept %d files with errors %v, want it refused: %s", len(kept), errs, tt.refusal)
 			}
 		})
 	}

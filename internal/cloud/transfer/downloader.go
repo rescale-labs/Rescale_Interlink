@@ -30,6 +30,7 @@ import (
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // Downloader orchestrates file downloads using a CloudTransfer provider.
@@ -309,9 +310,6 @@ func (d *Downloader) Download(ctx context.Context, params cloud.DownloadParams) 
 					if params.OutputWriter != nil {
 						fmt.Fprintf(params.OutputWriter, "CBC streaming failed, falling back to legacy download...\n")
 					}
-					if outFile, openErr := os.Create(params.LocalPath); openErr == nil {
-						_ = outFile.Close()
-					}
 					if legacyErr := d.downloadLegacy(ctx, prep); legacyErr != nil {
 						return "", legacyErr
 					}
@@ -428,6 +426,9 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		OutputWriter:     prep.Params.OutputWriter,
 	}
 
+	if err := validation.ValidateDownloadTarget(localPath, encryptedPath); err != nil {
+		return err
+	}
 	if err := legacyProvider.DownloadEncryptedFile(ctx, downloadParams); err != nil {
 		// The filesystem filled up mid-download, so no pre-flight check produced
 		// this: report the encrypted file's size as what still had to fit, and
@@ -447,6 +448,10 @@ func (d *Downloader) downloadLegacy(ctx context.Context, prep *DownloadPrep) err
 		fmt.Fprintf(prep.Params.OutputWriter, "Decrypting %s...\n", filepath.Base(localPath))
 	}
 
+	// Checked again: the first check was a whole download ago.
+	if err := validation.ValidateDownloadTarget(localPath); err != nil {
+		return err
+	}
 	// Use DecryptFileWithHash to compute hash during decryption, avoiding a race
 	// condition where post-download verification re-reads the file and may get
 	// stale cache data.
@@ -612,6 +617,9 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 	}
 
+	if err := validation.ValidateDownloadTarget(prep.Params.LocalPath); err != nil {
+		return err
+	}
 	// Create output file directly (no temp file!)
 	outFile, err := os.Create(prep.Params.LocalPath)
 	if err != nil {
@@ -1054,6 +1062,9 @@ func (d *Downloader) downloadStreamingSequential(
 	streamingProvider StreamingConcurrentDownloader,
 	fileId []byte,
 ) error {
+	if err := validation.ValidateDownloadTarget(prep.Params.LocalPath); err != nil {
+		return err
+	}
 	// Use the provider's streaming download method
 	return streamingProvider.DownloadStreaming(
 		ctx,
@@ -1116,6 +1127,9 @@ func (d *Downloader) downloadStreamingConcurrent(
 	// atomic.
 	partialPath := prep.Params.LocalPath + ".partial"
 
+	if err := validation.ValidateDownloadTarget(prep.Params.LocalPath, partialPath); err != nil {
+		return err
+	}
 	// Create output file and pre-allocate
 	outFile, err := os.OpenFile(partialPath, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
@@ -1429,7 +1443,11 @@ func (d *Downloader) downloadStreamingConcurrent(
 	fileClosed = true
 
 	// Every part is written, the size is final, the hash is computed and the
-	// bytes are on disk: only now does the scratch file become the download.
+	// bytes are on disk: only now does the scratch file become the download,
+	// if nothing but a file has appeared at the destination meanwhile.
+	if err := validation.ValidateDownloadTarget(prep.Params.LocalPath); err != nil {
+		return err
+	}
 	if err := os.Rename(partialPath, prep.Params.LocalPath); err != nil {
 		return fmt.Errorf("failed to move the completed download into place: %w", err)
 	}

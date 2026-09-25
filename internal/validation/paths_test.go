@@ -2,13 +2,17 @@ package validation
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // TestValidateFilename covers every input class ValidateFilename distinguishes:
-// ordinary names, a leading dot, spaces, non-ASCII, an interior ".." substring
-// (accepted; only the literal ".." is rejected), the empty string, the literal
-// "..", both path separators, and a null byte.
+// ordinary names, a leading dot, spaces, non-ASCII, long names, an interior ".."
+// substring (accepted), the empty string, names of only dots, both path
+// separators, control characters, and the names Windows would not store as
+// given: device names, alternate data streams, the characters < > " | ? *, and
+// a trailing dot or space. Those are refused on every platform, because the
+// name comes from the server.
 func TestValidateFilename(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -25,10 +29,34 @@ func TestValidateFilename(t *testing.T) {
 		{"parent_dir", "..", true},
 		{"unix_separator", "dir/file.txt", true},
 		{"windows_separator", "dir\\file.txt", true},
-		{"mixed_separators", "dir/sub\\file", true},
-		{"traversal", "../etc/passwd", true},
-		{"absolute", "/etc/passwd", true},
 		{"null_byte", "file\x00.txt", true},
+		{"current_dir", ".", true},
+		{"only_dots", "...", true},
+		{"device", "CON", true},
+		{"device_lower_case", "nul", true},
+		{"device_with_extension", "NUL.txt", true},
+		{"device_space_before_extension", "aux .log", true},
+		{"com_port", "COM1", true},
+		{"lpt_superscript", "LPT\u00b2", true},
+		{"console_input", "CONIN$", true},
+		{"alternate_stream", "a.txt:stream", true},
+		{"trailing_dot", "trail.", true},
+		{"trailing_space", "trail ", true},
+		{"device_prefix", "CONSOLE.txt", false},
+		{"com_ten", "COM10", false},
+		{"device_inside_name", "my-NUL.txt", false},
+		{"leading_space", " lead.txt", false},
+		{"long_ascii", strings.Repeat("a", 251) + ".txt", false},
+		{"long_multibyte", strings.Repeat("\u00e9", 125) + ".txt", false},
+		{"less_than", "a<b.txt", true},
+		{"greater_than", "a>b.txt", true},
+		{"double_quote", `say "hi".txt`, true},
+		{"pipe", "a|b.txt", true},
+		{"question_mark", "why?.txt", true},
+		{"asterisk", "all*.txt", true},
+		{"newline", "a\nb.txt", true},
+		{"escape", "a\x1b[31mb.txt", true},
+		{"delete", "a\x7fb.txt", true},
 	}
 
 	for _, tc := range tests {
@@ -41,6 +69,21 @@ func TestValidateFilename(t *testing.T) {
 				t.Errorf("ValidateFilename(%q) = %v, want nil", tc.filename, err)
 			}
 		})
+	}
+}
+
+// A refusal quotes the name, so a trailing space or a control character shows,
+// and leaves a backslash single, so a Windows-style name reads as the server
+// sent it.
+func TestValidateFilenameQuotesTheName(t *testing.T) {
+	for name, want := range map[string]string{
+		"trail ":       `"trail "`,
+		"a\x1b[31mb":   `"a\x1b[31mb"`,
+		`dir\file.txt`: `"dir\file.txt"`,
+	} {
+		if err := ValidateFilename(name); err == nil || !strings.HasSuffix(err.Error(), ": "+want) {
+			t.Errorf("ValidateFilename(%q) = %v, want the name quoted as %s", name, err, want)
+		}
 	}
 }
 
@@ -102,5 +145,51 @@ func TestResolvePathInDirectory(t *testing.T) {
 
 	if _, err := ResolvePathInDirectory("../escape.txt", baseDir); err == nil {
 		t.Fatal("expected traversal path to be rejected")
+	}
+}
+
+// Job and file IDs from the server end up in local paths (collision suffixes,
+// per-job folders), so anything beyond the ID charset is refused.
+func TestValidateID(t *testing.T) {
+	for _, id := range []string{"WgbDnb", "abc123", "A", "job-1_b"} {
+		if err := ValidateID(id); err != nil {
+			t.Errorf("ValidateID(%q) = %v, want nil", id, err)
+		}
+	}
+	for _, id := range []string{"", "x/../../../../tmp/escaped", `..\x`, "a.b", "C:x", "a b", "a\x00b"} {
+		if err := ValidateID(id); err == nil {
+			t.Errorf("ValidateID(%q) = nil, want error", id)
+		}
+	}
+}
+
+// DownloadPath places a server file at its relative path only when every
+// component passes the name rules, with outputDir joined once, whether it is
+// relative or absolute.
+func TestDownloadPath(t *testing.T) {
+	abs := func(parts ...string) string {
+		p, err := filepath.Abs(filepath.Join(parts...))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	tests := []struct {
+		dir, relativePath, want string
+	}{
+		{"results", "", abs("results", "victim.txt")},
+		{"results", "sub/victim.txt", abs("results", "sub", "victim.txt")},
+		{"results", "../victim.txt", ""},
+		{"results", "run:1/victim.txt", ""},
+		{"results", "dots./victim.txt", ""},
+		{"results", "/abs/victim.txt", ""},
+		{"results", "sub//victim.txt", ""},
+		{"results", `sub\victim.txt`, ""},
+	}
+	for _, tt := range tests {
+		got, err := DownloadPath(tt.dir, "victim.txt", tt.relativePath)
+		if got != tt.want || (err != nil) != (tt.want == "") {
+			t.Errorf("DownloadPath(%q, %q) = %q, %v; want %q", tt.dir, tt.relativePath, got, err, tt.want)
+		}
 	}
 }

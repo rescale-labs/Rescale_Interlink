@@ -21,6 +21,8 @@ import (
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/glob"
+	"github.com/rescale/rescale-int/internal/util/paths"
+	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // compatUploadItem implements transfer.WorkItem for compat upload.
@@ -298,7 +300,13 @@ func writeUploadReport(report string, cloudFiles []*models.CloudFile) error {
 		}
 		return nil
 	}
-	if err := os.WriteFile(report, data, 0644); err != nil {
+	// The report holds every file's encryption key: never into whatever a
+	// link points at or into a FIFO, and owner-only. An earlier report is
+	// replaced, so another name for it keeps what it held.
+	if info, err := os.Lstat(report); err == nil && !validation.IsFile(info.Mode()) {
+		return fmt.Errorf("refusing to write the report to %s: it is a link or not a regular file", validation.Quote(report))
+	}
+	if err := paths.WritePrivateFile(report, data); err != nil {
 		return fmt.Errorf("failed to write report file %s: %w", report, err)
 	}
 	return nil
