@@ -138,8 +138,9 @@ func (e *CBCStreamingEncryptor) EncryptPart(plaintext []byte, isFinal bool) ([]b
 		// Non-final parts: must be a multiple of block size
 		// The upload orchestrator ensures each part (except last) is partSize bytes
 		// partSize is a multiple of 16 (e.g., 16MB = 16777216 bytes)
-		if len(plaintext)%aes.BlockSize != 0 {
-			return nil, fmt.Errorf("non-final part must be multiple of %d bytes, got %d", aes.BlockSize, len(plaintext))
+		// An empty one leaves no last block to chain the next part from.
+		if len(plaintext) == 0 || len(plaintext)%aes.BlockSize != 0 {
+			return nil, fmt.Errorf("non-final part must be a non-empty multiple of %d bytes, got %d", aes.BlockSize, len(plaintext))
 		}
 		dataToEncrypt = plaintext
 	}

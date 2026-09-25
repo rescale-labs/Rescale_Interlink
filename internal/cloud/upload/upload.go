@@ -294,6 +294,7 @@ type progressInterpolator struct {
 	confirmedBytes int64         // Bytes from completed parts
 	inflightBytes  int64         // Bytes currently being uploaded (atomic)
 	done           chan struct{} // Signal to stop the interpolator
+	exited         chan struct{} // Closed when Start's goroutine has returned
 	stopped        bool          // Prevent double-close
 }
 
@@ -304,12 +305,14 @@ func newProgressInterpolator(callback cloud.ProgressCallback, totalBytes int64) 
 		callback:   callback,
 		totalBytes: totalBytes,
 		done:       make(chan struct{}),
+		exited:     make(chan struct{}),
 	}
 }
 
 // Start begins the interpolation goroutine. Call Stop() when done.
 func (pi *progressInterpolator) Start() {
 	go func() {
+		defer close(pi.exited)
 		ticker := time.NewTicker(constants.ProgressUpdateInterval)
 		defer ticker.Stop()
 
@@ -379,14 +382,17 @@ func (pi *progressInterpolator) ConfirmBytes(partSize int64) {
 	// (confirmedBytes + inflightBytes) while this method only sees confirmedBytes.
 }
 
-// Stop stops the interpolation goroutine.
+// Stop stops the interpolation goroutine and waits for it, so the caller's
+// callback cannot run once Stop has returned. It waits outside the lock, which
+// the goroutine takes to report.
 func (pi *progressInterpolator) Stop() {
 	pi.mu.Lock()
-	defer pi.mu.Unlock()
 	if !pi.stopped {
 		pi.stopped = true
 		close(pi.done)
 	}
+	pi.mu.Unlock()
+	<-pi.exited
 }
 
 // encryptedPart holds an encrypted part ready for upload (used for pipelining).
@@ -465,6 +471,10 @@ var openUploadSource = func(path string) (io.ReadCloser, error) {
 	}
 	return f, nil
 }
+
+// saveUploadState writes a streaming checkpoint; a variable so a test can count
+// the writes, which is what the checkpoint policy is about.
+var saveUploadState = state.SaveUploadState
 
 // uploadStreaming uses the StreamingConcurrentUploader interface for streaming uploads.
 // Encryption is sequential (CBC constraint), but uploads happen in parallel.
@@ -703,7 +713,7 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 
 			// Handle empty file: first read returns (0, io.EOF)
 			// Emit one encrypted empty part so the pipeline completes correctly
-			if n == 0 && readErr == io.EOF && partIndex == 0 {
+			if n == 0 && readErr == io.EOF && partIndex == 0 && uploadState.TotalParts == 1 {
 				ciphertext, encErr := streamingUploader.EncryptStreamingPart(uploadCtx, uploadState, 0, []byte{})
 				if encErr != nil {
 					errOnce.Do(func() { firstErr = encErr })
@@ -719,6 +729,22 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 				}:
 				case <-uploadCtx.Done():
 				}
+				return
+			}
+
+			// A source that shrank after it was planned ends before its last
+			// planned part. The part it ends in would otherwise go out short, or
+			// empty, as a non-final part, which CBC cannot chain.
+			parts := partIndex // the parts the source still has
+			if n > 0 {
+				parts++
+			}
+			if readErr == io.EOF && parts < uploadState.TotalParts {
+				errOnce.Do(func() {
+					firstErr = fmt.Errorf("%s changed during the upload: it now ends before part %d of %d",
+						filepath.Base(params.LocalPath), parts+1, uploadState.TotalParts)
+				})
+				cancelUpload()
 				return
 			}
 
@@ -872,6 +898,20 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 	// because the chain IV names one boundary and the source is re-read from it.
 	prefix := startPart
 
+	// Only this goroutine moves prefix and partsMap, and chainIV[prefix-1] reached
+	// it with the part it belongs to, so the throttle's flush below the loop sees
+	// them as the last Offer left them.
+	checkpoints := transfer.NewCheckpointThrottle(func() {
+		// A provider that does not expose its chain position leaves chainIV
+		// empty; its uploads run exactly as before, they just cannot be resumed,
+		// because nothing would know where to pick the chain back up. A prefix
+		// past the planned part count means the source grew under the upload,
+		// which the completeness check below is what answers.
+		if prefix <= uploadState.TotalParts && chainIV[prefix-1] != nil {
+			checkpoint.save(orderedParts(partsMap, prefix), chainIV[prefix-1])
+		}
+	})
+
 	for res := range resultChan {
 		if res.err != nil {
 			// Error already recorded in firstErr, just continue draining
@@ -891,15 +931,11 @@ func uploadStreaming(ctx context.Context, provider cloud.CloudTransfer, params U
 			prefix++
 			grown = true
 		}
-		// A provider that does not expose its chain position leaves chainIV
-		// empty; its uploads run exactly as before, they just cannot be resumed,
-		// because nothing would know where to pick the chain back up. A prefix
-		// past the planned part count means the source grew under the upload,
-		// which the completeness check below is what answers.
-		if grown && prefix <= uploadState.TotalParts && chainIV[prefix-1] != nil {
-			checkpoint.save(orderedParts(partsMap, prefix), chainIV[prefix-1])
+		if grown {
+			checkpoints.Offer()
 		}
 	}
+	checkpoints.Flush()
 
 	// An attempt that checkpointed nothing has left nothing behind that a retry
 	// could find, so the parts it did upload are already unreachable: discard
@@ -1408,7 +1444,7 @@ func (c *streamingCheckpointer) save(prefix []*transfer.PartResult, chainIV []by
 		uploaded = transfer.CiphertextSize(c.upload.TotalSize)
 	}
 
-	err := state.SaveUploadState(&state.UploadResumeState{
+	err := saveUploadState(&state.UploadResumeState{
 		LocalPath:      c.params.LocalPath,
 		ObjectKey:      c.upload.StoragePath,
 		UploadID:       c.upload.UploadID,

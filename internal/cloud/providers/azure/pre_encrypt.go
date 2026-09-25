@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/streaming"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
@@ -74,7 +75,7 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 	var uploadErr error
 	if encryptedSize < constants.MultipartThreshold {
 		// Small file: single blob upload
-		uploadErr = p.uploadEncryptedSingleBlob(ctx, azureClient, params.EncryptedPath, blobNameForSDK, params.IV, params.ProgressCallback)
+		uploadErr = p.uploadEncryptedSingleBlob(ctx, azureClient, params.EncryptedPath, blobNameForSDK, encryptedSize, params.IV, params.ProgressCallback)
 	} else {
 		// Large file: use concurrent block blob upload if transfer handle has multiple threads
 		if params.TransferHandle != nil && params.TransferHandle.GetThreads() > 1 {
@@ -281,7 +282,7 @@ func commitFailure(params transfer.EncryptedFileUploadParams, blobPath string, e
 
 // uploadEncryptedSingleBlob uploads an encrypted file as a single blob.
 // Uses AzureClient directly.
-func (p *Provider) uploadEncryptedSingleBlob(ctx context.Context, azureClient *AzureClient, filePath, blobPath string, iv []byte, progressCallback func(float64)) error {
+func (p *Provider) uploadEncryptedSingleBlob(ctx context.Context, azureClient *AzureClient, filePath, blobPath string, size int64, iv []byte, progressCallback func(float64)) error {
 	// Report 0% at start
 	if progressCallback != nil {
 		progressCallback(0.0)
@@ -293,11 +294,6 @@ func (p *Provider) uploadEncryptedSingleBlob(ctx context.Context, azureClient *A
 	}
 	defer file.Close()
 
-	data, err := io.ReadAll(file)
-	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-
 	metadata := map[string]*string{
 		"iv": to.Ptr(encryption.EncodeBase64(iv)),
 	}
@@ -306,7 +302,11 @@ func (p *Provider) uploadEncryptedSingleBlob(ctx context.Context, azureClient *A
 	err = azureClient.RetryWithBackoff(ctx, "Upload", func() error {
 		client := azureClient.Client()
 		blockBlobClient := client.ServiceClient().NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobPath)
-		_, err := blockBlobClient.Upload(ctx, &readSeekCloser{Reader: bytes.NewReader(data)}, &blockblob.UploadOptions{
+		// Streamed from the file rather than read into memory first. Each attempt
+		// gets a section with its own offset, because the transport may still be
+		// draining a failed attempt's body; and a no-op Close, because net/http
+		// closes the body after every attempt and the retry needs the file.
+		_, err := blockBlobClient.Upload(ctx, streaming.NopCloser(io.NewSectionReader(file, 0, size)), &blockblob.UploadOptions{
 			Metadata: metadata,
 		})
 		return err
@@ -397,6 +397,30 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 		params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 	}
 
+	checkpoints := transfer.NewCheckpointThrottle(func() {
+		state.SaveUploadState(&state.UploadResumeState{
+			LocalPath:     params.LocalPath,
+			EncryptedPath: params.EncryptedPath,
+			ObjectKey:     pathForRescale,
+			TotalSize:     encryptedSize,
+			OriginalSize:  params.OriginalSize,
+			SourceModTime: params.SourceModTime,
+			UploadedBytes: uploadedBytes,
+			BlockIDs:      blockIDs,
+			PartSize:      blockSize,
+			EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
+			IV:            encryption.EncodeBase64(params.IV),
+			RandomSuffix:  params.RandomSuffix,
+			CreatedAt:     createdAt,
+			LastUpdate:    time.Now(),
+			StorageType:   "AzureStorage",
+			StorageID:     p.storageID(),
+			Container:     p.storageContainer(),
+		}, params.LocalPath)
+	})
+	// A failed or cancelled attempt returns from inside the loop.
+	defer checkpoints.Flush()
+
 	// Sized to the block size the plan chose, so a short read means the end of the
 	// file rather than the end of the buffer.
 	buffer, releaseBuffer := buffers.GetPartBuffer(blockSize)
@@ -436,7 +460,7 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 		err = azureClient.RetryWithBackoff(ctx, fmt.Sprintf("StageBlock %d", blockNum), func() error {
 			client := azureClient.Client()
 			blockBlobClient := client.ServiceClient().NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobPath)
-			_, err := blockBlobClient.StageBlock(ctx, blockID, &readSeekCloser{Reader: bytes.NewReader(blockData)}, nil)
+			_, err := blockBlobClient.StageBlock(ctx, blockID, streaming.NopCloser(bytes.NewReader(blockData)), nil)
 			return err
 		})
 		if err != nil {
@@ -450,32 +474,11 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 			params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 		}
 
-		if params.Stateless {
-			continue
+		if !params.Stateless {
+			checkpoints.Offer()
 		}
-
-		// Save resume state
-		currentState := &state.UploadResumeState{
-			LocalPath:     params.LocalPath,
-			EncryptedPath: params.EncryptedPath,
-			ObjectKey:     pathForRescale,
-			TotalSize:     encryptedSize,
-			OriginalSize:  params.OriginalSize,
-			SourceModTime: params.SourceModTime,
-			UploadedBytes: uploadedBytes,
-			BlockIDs:      blockIDs,
-			PartSize:      blockSize,
-			EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
-			IV:            encryption.EncodeBase64(params.IV),
-			RandomSuffix:  params.RandomSuffix,
-			CreatedAt:     createdAt,
-			LastUpdate:    time.Now(),
-			StorageType:   "AzureStorage",
-			StorageID:     p.storageID(),
-			Container:     p.storageContainer(),
-		}
-		state.SaveUploadState(currentState, params.LocalPath)
 	}
+	checkpoints.Flush()
 
 	// Azure commits whatever block list it is handed and reports success, so a
 	// list that does not cover the whole file has to be caught here rather than
@@ -634,7 +637,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 			stageErr := azureClient.RetryWithBackoff(blockCtx, fmt.Sprintf("StageBlock %d/%d", part.Index+1, totalBlocks), func() error {
 				client := azureClient.Client()
 				blockBlobClient := client.ServiceClient().NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobPath)
-				_, err := blockBlobClient.StageBlock(blockCtx, blockID, &readSeekCloser{Reader: bytes.NewReader(part.Data)}, nil)
+				_, err := blockBlobClient.StageBlock(blockCtx, blockID, streaming.NopCloser(bytes.NewReader(part.Data)), nil)
 				return err
 			})
 			if stageErr != nil {

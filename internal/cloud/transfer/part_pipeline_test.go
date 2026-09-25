@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -127,4 +128,35 @@ func TestRunPartPipelineStagesEveryPart(t *testing.T) {
 	}
 
 	waitForGoroutines(t, baseline)
+}
+
+// TestCheckpointThrottle pins the policy in fake time: writes are bounded, an
+// upload that keeps moving is checkpointed again once the interval has passed,
+// and one that stalls holds its owed checkpoint until the next Offer or Flush.
+func TestCheckpointThrottle(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		saves := 0
+		throttle := NewCheckpointThrottle(func() { saves++ })
+		for range 5 {
+			throttle.Offer()
+		}
+		if saves != 1 {
+			t.Fatalf("five offers at once wrote %d checkpoints, want the first only", saves)
+		}
+		time.Sleep(CheckpointInterval)
+		throttle.Offer()
+		if saves != 2 {
+			t.Fatalf("an offer an interval later wrote %d checkpoints in all, want 2", saves)
+		}
+		throttle.Offer()
+		time.Sleep(time.Hour) // a stall: nothing writes what is owed
+		if saves != 2 {
+			t.Fatalf("a stall wrote %d checkpoints in all, want 2", saves)
+		}
+		throttle.Flush()
+		throttle.Flush()
+		if saves != 3 {
+			t.Fatalf("flushing one owed checkpoint twice wrote %d in all, want 3", saves)
+		}
+	})
 }

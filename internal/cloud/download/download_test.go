@@ -1,11 +1,15 @@
 package download
 
 import (
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 // TestQuarantineCorruptFile pins the disposition of a download that fails
@@ -126,5 +130,50 @@ func TestVerifyDownloadedSize(t *testing.T) {
 				t.Errorf("the file was moved aside unexpectedly: %v", statErr)
 			}
 		})
+	}
+}
+
+// TestCheckDownloadChecksum covers what the spelling decides: a mismatch under
+// another spelling is caught, and a file whose checksums include no SHA-512 at
+// all is reported as unverified instead of passing in silence.
+func TestCheckDownloadChecksum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "results.dat")
+	if err := os.WriteFile(path, []byte("downloaded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	other := sha512.Sum512([]byte("something else"))
+
+	var warnings strings.Builder
+	err := checkDownloadChecksum(path, "", []models.FileChecksum{{HashFunction: "sha-512", FileHash: hex.EncodeToString(other[:])}}, false, &warnings)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("a mismatch under the spelling sha-512: got %v, want it refused", err)
+	}
+
+	if err := os.WriteFile(path, []byte("downloaded"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDownloadChecksum(path, "", []models.FileChecksum{{HashFunction: "md5", FileHash: "abc"}}, false, &warnings); err != nil {
+		t.Errorf("a file with no SHA-512 was refused: %v", err)
+	}
+	if !strings.Contains(warnings.String(), "not verified") {
+		t.Errorf("a file with no SHA-512 passed without a warning; warnings: %q", warnings.String())
+	}
+
+	// An entry with no hash checks nothing: alone it is no checksum at all, and
+	// the warning does not name it among those the file has.
+	for _, tc := range []struct {
+		checksums []models.FileChecksum
+		want      string
+	}{
+		{[]models.FileChecksum{{HashFunction: "sha512"}}, ""},
+		{[]models.FileChecksum{{HashFunction: "sha512"}, {HashFunction: "md5", FileHash: "abc"}}, "its checksums (md5) include no SHA-512"},
+	} {
+		var warnings strings.Builder
+		if err := checkDownloadChecksum(path, "", tc.checksums, false, &warnings); err != nil {
+			t.Errorf("%v: %v", tc.checksums, err)
+		}
+		if got := warnings.String(); (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
+			t.Errorf("%v: warned %q, want %q", tc.checksums, got, tc.want)
+		}
 	}
 }

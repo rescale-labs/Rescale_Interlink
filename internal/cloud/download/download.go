@@ -4,8 +4,6 @@ package download
 
 import (
 	"context"
-	"crypto/sha512"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -18,7 +16,9 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/providers"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	cloudtransfer "github.com/rescale/rescale-int/internal/cloud/transfer"
+	"github.com/rescale/rescale-int/internal/crypto"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/progress"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -180,34 +180,10 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	}
 
 	checksumTimer := cloud.StartTimer(params.OutputWriter, "Checksum verification")
-
-	// Use computed hash from download if available (eliminates cache race condition).
-	// Only fall back to file re-read verification if no computed hash is available.
-	expectedHash := getExpectedSHA512(fileInfo.FileChecksums)
-
-	var checksumErr error
-	if computedHash != "" && expectedHash != "" {
-		// Compare using hash computed during download - no file re-read needed
-		if !strings.EqualFold(computedHash, expectedHash) {
-			checksumErr = fmt.Errorf("checksum mismatch: expected SHA-512=%s, got %s", expectedHash, computedHash)
-		}
-	} else if expectedHash != "" {
-		// Fallback: No computed hash available, use traditional file re-read verification
-		checksumErr = verifyChecksum(params.LocalPath, fileInfo.FileChecksums)
+	// Through the progress display when one is live: a raw stderr write lands inside its frame.
+	if err := checkDownloadChecksum(params.LocalPath, computedHash, fileInfo.FileChecksums, params.SkipChecksum, progress.SinkWriter(os.Stderr)); err != nil {
+		return err
 	}
-	// If expectedHash is empty, skip verification (no checksum to verify against)
-
-	if checksumErr != nil {
-		if params.SkipChecksum {
-			// Skip mode: warn but don't fail
-			fmt.Fprintf(os.Stderr, "Warning: Checksum verification failed for %s: %v\n", params.LocalPath, checksumErr)
-			fmt.Fprintf(os.Stderr, "    Continuing because --skip-checksum flag is set\n")
-		} else {
-			// Strict mode (default): fail on checksum mismatch
-			return quarantineCorruptFile(params.LocalPath, checksumErr)
-		}
-	}
-
 	checksumTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
 	overallTimer.StopWithThroughput(fileInfo.DecryptedSize)
@@ -223,6 +199,40 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	// future downloads of the same file don't erroneously attempt to resume.
 	state.DeleteDownloadState(params.LocalPath)
 
+	return nil
+}
+
+// checkDownloadChecksum holds a finished download to the SHA-512 the API
+// reported for it. computedHash, when set, was taken while the file was written
+// and saves reading it back. Integrity rests on this check alone (the CBC format
+// is unauthenticated), so a file whose checksums include no SHA-512 is reported
+// as unverified rather than passed in silence.
+func checkDownloadChecksum(localPath, computedHash string, checksums models.FileChecksums, skip bool, warnings io.Writer) error {
+	expectedHash := checksums.SHA512()
+	if expectedHash == "" {
+		if algorithms := checksums.Algorithms(); len(algorithms) > 0 {
+			fmt.Fprintf(warnings, "Warning: %s was not verified: its checksums (%s) include no SHA-512\n",
+				localPath, strings.Join(algorithms, ", "))
+		}
+		return nil
+	}
+
+	var checksumErr error
+	if computedHash != "" {
+		if !strings.EqualFold(computedHash, expectedHash) {
+			checksumErr = fmt.Errorf("checksum mismatch: expected SHA-512=%s, got %s", expectedHash, computedHash)
+		}
+	} else {
+		checksumErr = verifyChecksum(localPath, expectedHash)
+	}
+	if checksumErr == nil {
+		return nil
+	}
+	if !skip {
+		return quarantineCorruptFile(localPath, checksumErr)
+	}
+	fmt.Fprintf(warnings, "Warning: Checksum verification failed for %s: %v\n", localPath, checksumErr)
+	fmt.Fprintf(warnings, "    Continuing because --skip-checksum flag is set\n")
 	return nil
 }
 
@@ -290,18 +300,6 @@ func quarantineFile(localPath string) string {
 	return fmt.Sprintf("The corrupt file was moved to %s", quarantinePath)
 }
 
-// getExpectedSHA512 extracts the expected SHA-512 hash from checksums.
-// Returns empty string if no SHA-512 checksum is available.
-func getExpectedSHA512(checksums []models.FileChecksum) string {
-	for _, cs := range checksums {
-		switch cs.HashFunction {
-		case "sha512", "SHA-512", "SHA512":
-			return cs.FileHash
-		}
-	}
-	return ""
-}
-
 // getStorageInfo determines the correct storage configuration for a file
 // Uses fileInfo.Storage if available (for job outputs or files in different storage)
 // Falls back to profile.DefaultStorage if fileInfo.Storage is nil (backwards compatibility)
@@ -330,35 +328,7 @@ func getStorageInfo(fileInfo *models.CloudFile, profile *models.UserProfile) *mo
 // verifyChecksum verifies the SHA-512 checksum of a downloaded file
 // Returns an error if the checksum verification fails
 // Note: This is called AFTER decryption, so it verifies the decrypted file
-func verifyChecksum(localPath string, checksums []models.FileChecksum) error {
-	if len(checksums) == 0 {
-		return nil // No checksums to verify
-	}
-
-	// Find SHA-512 checksum (we prioritize SHA-512, but could fall back to other algorithms)
-	var expectedHash string
-	var hashAlgorithm string
-
-checksumLoop:
-	for _, cs := range checksums {
-		switch cs.HashFunction {
-		case "sha512", "SHA-512", "SHA512":
-			expectedHash = cs.FileHash
-			hashAlgorithm = "SHA-512"
-			break checksumLoop
-		}
-	}
-
-	if expectedHash == "" {
-		// No SHA-512 checksum found, check for other algorithms
-		for _, cs := range checksums {
-			if cs.HashFunction != "" && cs.FileHash != "" {
-				return fmt.Errorf("file has checksum with algorithm %s, but SHA-512 verification is not implemented for this algorithm", cs.HashFunction)
-			}
-		}
-		return nil // No recognized checksum algorithm
-	}
-
+func verifyChecksum(localPath, expectedHash string) error {
 	// Retry to handle transient filesystem cache issues.
 	// On some systems (especially macOS), even after Sync()+Close(), the filesystem
 	// cache may not be fully coherent for subsequent reads. Retrying with a small
@@ -367,7 +337,7 @@ checksumLoop:
 	var lastActualHash string
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		actualHash, err := computeFileChecksum(localPath)
+		actualHash, err := encryption.CalculateSHA512(localPath)
 		if err != nil {
 			if attempt < maxRetries {
 				time.Sleep(100 * time.Millisecond)
@@ -390,23 +360,5 @@ checksumLoop:
 	}
 
 	// All retries failed
-	return fmt.Errorf("checksum mismatch: expected %s=%s, got %s (after %d attempts)", hashAlgorithm, expectedHash, lastActualHash, maxRetries)
+	return fmt.Errorf("checksum mismatch: expected SHA-512=%s, got %s (after %d attempts)", expectedHash, lastActualHash, maxRetries)
 }
-
-// computeFileChecksum opens a file and computes its SHA-512 hash.
-func computeFileChecksum(localPath string) (string, error) {
-	file, err := os.Open(localPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	hash := sha512.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", fmt.Errorf("failed to read file: %w", err)
-	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-

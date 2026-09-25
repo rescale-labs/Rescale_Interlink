@@ -42,16 +42,6 @@ type RescaleCredentialProvider struct {
 //
 // If fileInfo is nil, requests credentials for user's default storage.
 // If fileInfo is provided, requests credentials for that file's specific storage.
-//
-// Usage:
-//
-//	provider := NewRescaleCredentialProvider(apiClient, fileInfo)
-//	cache := aws.NewCredentialsCache(provider, func(o *aws.CredentialsCacheOptions) {
-//	    o.ExpiryWindow = 5 * time.Minute  // Refresh 5 min before expiry
-//	})
-//	cfg, _ := config.LoadDefaultConfig(ctx,
-//	    config.WithCredentialsProvider(cache),
-//	)
 func NewRescaleCredentialProvider(apiClient *api.Client, fileInfo *models.CloudFile) *RescaleCredentialProvider {
 	return &RescaleCredentialProvider{
 		credManager: GetManager(apiClient),

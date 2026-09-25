@@ -568,8 +568,8 @@ func reclaimStaleLock(lockFilePath, localPath string, owner uploadLockState, dat
 		liveness, probeErr := probeProcessLiveness(existing.ProcessID)
 		switch liveness {
 		case livenessAlive:
-			return nil, lockRefusal{fmt.Errorf("upload locked by another process (PID %d) since %s",
-				existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339))}
+			return nil, lockRefusal{fmt.Errorf("upload of %s is locked by another process (PID %d) since %s; its lock is %s",
+				localPath, existing.ProcessID, existing.AcquiredAt.Format(time.RFC3339), lockFilePath)}
 		case livenessUnknown:
 			return nil, undecidedLockError(localPath, lockFilePath, existing, probeErr)
 		}

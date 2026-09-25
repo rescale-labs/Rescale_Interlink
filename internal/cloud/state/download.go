@@ -4,6 +4,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 )
@@ -235,7 +236,7 @@ func CleanupExpiredDownloadResume(state *DownloadResumeState, localPath string, 
 	if state.EncryptedPath != "" {
 		if _, err := os.Stat(state.EncryptedPath); err == nil {
 			if verbose {
-				fmt.Printf("Cleaning up expired download temp file: %s\n", state.EncryptedPath)
+				log.Printf("Cleaning up expired download temp file: %s", state.EncryptedPath)
 			}
 			os.Remove(state.EncryptedPath)
 		}

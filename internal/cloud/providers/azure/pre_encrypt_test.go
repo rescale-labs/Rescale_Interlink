@@ -7,10 +7,12 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	nethttp "net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -56,11 +58,16 @@ type fakeBlobBackend struct {
 	committed []string
 	commits   int
 	requests  int
+	putBytes  int64 // body size of the last single-shot upload
 
 	// rejectOncePerBlock fails the first attempt at each block with an
 	// authentication error, the shape a rejected SAS token arrives in.
 	rejectOncePerBlock bool
 	rejectedBlocks     map[string]bool
+
+	// refuseBlocksFrom fails every attempt at this block index and above with
+	// an error the retry classifier reads as fatal. Zero refuses nothing.
+	refuseBlocksFrom int64
 
 	// uncommittedBlocks is what a resume probe finds the service still holding.
 	// Empty is the answer after a commit consumed them, or after the seven-day
@@ -107,6 +114,12 @@ func (f *fakeBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 			_, _ = io.Copy(io.Discard, r.Body)
 			w.Header().Set("x-ms-error-code", "AuthenticationFailed")
 			w.WriteHeader(nethttp.StatusForbidden)
+			return
+		}
+		if index, _ := blockIndexFromID(blockID); f.refuseBlocksFrom > 0 && index >= f.refuseBlocksFrom {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("x-ms-error-code", "InvalidBlobOrBlock")
+			w.WriteHeader(nethttp.StatusBadRequest)
 			return
 		}
 
@@ -173,7 +186,10 @@ func (f *fakeBlobBackend) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request
 
 	case r.Method == nethttp.MethodPut:
 		// Single-shot blob upload (small files).
-		_, _ = io.Copy(io.Discard, r.Body)
+		n, _ := io.Copy(io.Discard, r.Body)
+		f.mu.Lock()
+		f.putBytes = n
+		f.mu.Unlock()
 		w.Header().Set("ETag", `"uploaded"`)
 		w.WriteHeader(nethttp.StatusCreated)
 
@@ -298,6 +314,98 @@ func testUploadParams(localPath, encryptedPath string, plan *resources.UploadPla
 		IV:            make([]byte, 16),
 		RandomSuffix:  "suffix",
 		Plan:          plan,
+	}
+}
+
+// TestPreEncryptBlockBlobCheckpointWritesAreBounded: the checkpoint, which
+// carries every staged block ID, was rewritten after each block. The progress
+// callback runs between a block and its checkpoint, so it sees each rewrite.
+func TestPreEncryptBlockBlobCheckpointWritesAreBounded(t *testing.T) {
+	_, server := newFakeBlobBackend(t)
+	azureClient := newTestAzureClient(t, server)
+	dir := t.TempDir()
+	localPath, encryptedPath := filepath.Join(dir, "source.dat"), filepath.Join(dir, "source.dat.enc")
+	testsupport.WriteTestFile(t, encryptedPath, 8*64)
+	testsupport.WriteTestFile(t, localPath, 8*64)
+
+	params := testUploadParams(localPath, encryptedPath, &resources.UploadPlan{PartSize: 64})
+	versions := map[int]bool{}
+	params.ProgressCallback = func(float64) {
+		recorded := -1
+		if saved, _ := state.LoadUploadState(localPath); saved != nil {
+			recorded = len(saved.BlockIDs)
+		}
+		versions[recorded] = true
+	}
+	pathForRescale := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
+	if err := (&Provider{}).uploadEncryptedBlockBlob(context.Background(), azureClient, params, "blob", pathForRescale, 8*64); err != nil {
+		t.Fatalf("sequential block blob upload failed: %v", err)
+	}
+
+	if len(versions) > 2 {
+		t.Errorf("an 8-block upload rewrote its checkpoint %d times", len(versions)-1)
+	}
+	if saved, _ := state.LoadUploadState(localPath); saved == nil || len(saved.BlockIDs) != 8 {
+		t.Errorf("the checkpoint written on the way out does not hold all 8 blocks: %+v", saved)
+	}
+}
+
+// TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit: the throttle holds
+// checkpoints back while the upload runs, and the flush after the loop writes
+// the one it owes. A refused block or a cancel returned from inside the loop,
+// past that flush, so the next attempt staged blocks Azure already held again.
+func TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit(t *testing.T) {
+	// Every checkpoint after the first is held back, however slowly the parts
+	// land, so the ones owed when the upload stops are left to its exit.
+	interval := transfer.CheckpointInterval
+	transfer.CheckpointInterval = math.MaxInt64
+	t.Cleanup(func() { transfer.CheckpointInterval = interval })
+	var blocks []string
+	for i := range 8 {
+		blocks = append(blocks, testBlockID(i))
+	}
+	for _, stop := range []string{"refused", "cancelled"} {
+		t.Run(stop, func(t *testing.T) {
+			backend, server := newFakeBlobBackend(t)
+			fixture := newAzureResumeFixture(t, 8*64, &resources.UploadPlan{PartSize: 64})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if stop == "refused" {
+				backend.refuseBlocksFrom = 4
+			} else {
+				fixture.params.ProgressCallback = func(done float64) {
+					if done >= 0.5 { // block 3 has landed; block 4 goes out cancelled
+						cancel()
+					}
+				}
+			}
+			if err := (&Provider{}).uploadEncryptedBlockBlob(ctx, newTestAzureClient(t, server), fixture.params, "blob", fixture.pathForRescale, 8*64); err == nil {
+				t.Fatal("the interrupted attempt reported success")
+			}
+			saved, _ := state.LoadUploadState(fixture.localPath)
+			if saved == nil {
+				t.Fatal("the interrupted attempt left no checkpoint")
+			}
+			if !slices.Equal(saved.BlockIDs, blocks[:4]) {
+				t.Fatalf("the checkpoint left behind holds %d block(s), want the 4 that landed", len(saved.BlockIDs))
+			}
+
+			// A second backend, so what it receives is the resumed attempt alone.
+			resumed, server := newFakeBlobBackend(t)
+			resumed.uncommittedBlocks = blocks[:4]
+			fixture.params.ProgressCallback = nil
+			if err := fixture.run(t, newTestAzureClient(t, server), false); err != nil {
+				t.Fatalf("the resumed attempt failed: %v", err)
+			}
+			if got := resumed.stagedBlockIDs(); !slices.Equal(got, blocks[4:]) {
+				t.Errorf("the resumed attempt staged %d block(s), want blocks 4 to 7", len(got))
+			}
+			resumed.mu.Lock()
+			defer resumed.mu.Unlock()
+			if !slices.Equal(resumed.committed, blocks) {
+				t.Errorf("committed %d block(s), want all 8 in order", len(resumed.committed))
+			}
+		})
 	}
 }
 
@@ -1303,5 +1411,36 @@ func TestPreEncryptIgnoresACheckpointTheCallerRejected(t *testing.T) {
 				t.Errorf("staged %d block(s), want the whole file from an attempt that must not resume", len(got))
 			}
 		})
+	}
+}
+
+// TestSingleBlobUploadStreamsTheFile: the single-shot path read the whole file
+// into memory before sending it, up to the 100 MiB threshold per concurrent
+// upload. The fake endpoint discards what it receives, so what this measures is
+// the client side.
+func TestSingleBlobUploadStreamsTheFile(t *testing.T) {
+	const size = 16 << 20
+	provider, backend := streamingTestProvider(t)
+	dir := t.TempDir()
+	params := transfer.EncryptedFileUploadParams{
+		LocalPath: filepath.Join(dir, "small.dat"), EncryptedPath: filepath.Join(dir, "small.dat.enc"),
+		IV: make([]byte, 16), RandomSuffix: "suffix", Stateless: true,
+	}
+	testsupport.WriteTestFile(t, params.EncryptedPath, size)
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := provider.UploadEncryptedFile(context.Background(), params)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("UploadEncryptedFile: %v", err)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > size/4 {
+		t.Errorf("uploading a %d MiB file allocated %d MiB", size>>20, allocated>>20)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if backend.putBytes != size {
+		t.Errorf("the blob received %d bytes, want all %d", backend.putBytes, size)
 	}
 }

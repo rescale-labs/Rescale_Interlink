@@ -43,7 +43,9 @@ func (p *Provider) DownloadEncryptedFile(ctx context.Context, params transfer.Le
 		if err != nil {
 			return fmt.Errorf("failed to get object metadata: %w", err)
 		}
-		fileSize = *headResp.ContentLength
+		if fileSize, err = required(headResp.ContentLength, "Content-Length"); err != nil {
+			return err
+		}
 	}
 
 	// Choose download method based on file size and transfer handle

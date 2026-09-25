@@ -3,11 +3,8 @@ package daemon
 
 import (
 	"context"
-	"crypto/sha512"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -21,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/events"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -159,8 +157,8 @@ type Daemon struct {
 	verified   map[string]verifiedFile
 
 	// hashLocalFile computes a file's SHA-512. Nil, as every caller leaves it,
-	// means sha512File. A seam for the daemon's own tests, which need to count
-	// how often a file is read.
+	// means encryption.CalculateSHA512. A seam for the daemon's own tests, which
+	// need to count how often a file is read.
 	hashLocalFile func(path string) (string, error)
 }
 
@@ -191,9 +189,16 @@ func (d *Daemon) alreadyDownloaded(localPath string, f models.JobFile) bool {
 		return false
 	}
 
-	expected := remoteSHA512(f.FileChecksums)
+	// Other algorithms are not a substitute: the download path verifies SHA-512
+	// only, so anything else leaves the length as the only check.
+	expected := f.FileChecksums.SHA512()
 	if expected == "" {
-		d.logger.Debug().Str("path", localPath).Msg("File already exists with correct size, skipping")
+		if algorithms := f.FileChecksums.Algorithms(); len(algorithms) > 0 {
+			d.logger.Warn().Str("path", localPath).Strs("checksums", algorithms).
+				Msg("File already exists with correct size, skipping it unverified: its checksums include no SHA-512")
+		} else {
+			d.logger.Debug().Str("path", localPath).Msg("File already exists with correct size, skipping")
+		}
 		return true
 	}
 
@@ -248,35 +253,7 @@ func (d *Daemon) hashFile(path string) (string, error) {
 	if d.hashLocalFile != nil {
 		return d.hashLocalFile(path)
 	}
-	return sha512File(path)
-}
-
-// remoteSHA512 returns the SHA-512 the API reported for a file, or empty when
-// it reported none. Other algorithms are not a substitute: the download path
-// verifies SHA-512 only, so anything else leaves the length as the only check.
-func remoteSHA512(checksums []models.FileChecksum) string {
-	for _, cs := range checksums {
-		switch cs.HashFunction {
-		case "sha512", "SHA-512", "SHA512":
-			return cs.FileHash
-		}
-	}
-	return ""
-}
-
-// sha512File computes a file's SHA-512 in hex.
-func sha512File(path string) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	hash := sha512.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return encryption.CalculateSHA512(path)
 }
 
 func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Daemon, error) {

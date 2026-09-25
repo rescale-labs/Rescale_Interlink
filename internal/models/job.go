@@ -298,7 +298,7 @@ type JobFile struct {
 	DecryptedSize        int64               `json:"decryptedSize"`
 	PathParts            *CloudFilePathParts `json:"pathParts,omitempty"`
 	Storage              *CloudFileStorage   `json:"storage,omitempty"`
-	FileChecksums        []FileChecksum      `json:"fileChecksums,omitempty"`
+	FileChecksums        FileChecksums       `json:"fileChecksums,omitempty"`
 }
 
 // ToCloudFile converts a JobFile to a CloudFile for download operations.

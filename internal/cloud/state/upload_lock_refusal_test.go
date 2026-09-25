@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,5 +104,25 @@ func TestUploadLockRefusalsMatchErrUploadLocked(t *testing.T) {
 				t.Errorf("errors.Is(err, ErrUploadLocked) = %v, want %v: %v", got, tc.locked, err)
 			}
 		})
+	}
+}
+
+// TestLiveOwnerRefusalNamesSourceAndLock: the refusal of a lock whose owner is
+// running names the source and the lock file, as the other refusals do, so the
+// user can tell which upload is held.
+func TestLiveOwnerRefusalNamesSourceAndLock(t *testing.T) {
+	withPIDDomain(t, "this-machine")
+	withProcessLiveness(t, livenessOf(func(int) bool { return true }))
+	localPath := filepath.Join(t.TempDir(), "testfile.bin")
+	writeLockFile(t, localPath, uploadLockState{ProcessID: 424305, OwnerToken: "a-running-upload", Host: lockHost,
+		Owner: lockOwner, PIDDomain: currentPIDDomain(), AcquiredAt: time.Now(), LocalPath: localPath})
+
+	lock, err := AcquireUploadLock(localPath)
+	if err == nil {
+		ReleaseUploadLock(lock)
+		t.Fatal("acquired a lock whose owner is running")
+	}
+	if !strings.Contains(err.Error(), localPath) || !strings.Contains(err.Error(), lockFilePathFor(localPath)) {
+		t.Errorf("refusal %q, want it to name %s and %s", err, localPath, lockFilePathFor(localPath))
 	}
 }

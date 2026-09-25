@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
@@ -384,6 +386,55 @@ func sha512Of(t *testing.T, data []byte) []models.FileChecksum {
 	return []models.FileChecksum{{HashFunction: "sha512", FileHash: hex.EncodeToString(sum[:])}}
 }
 
+// sameSizeLocalFile is what an interrupted download of "hello" leaves behind:
+// the right length, other bytes.
+func sameSizeLocalFile(t *testing.T) string {
+	t.Helper()
+	localPath := filepath.Join(t.TempDir(), "out1.txt")
+	if err := os.WriteFile(localPath, []byte("world"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	return localPath
+}
+
+// alreadyDownloaded matched three exact spellings of SHA-512, so a same-size
+// file whose checksum came spelled any other way was adopted by its length.
+func TestAlreadyDownloadedChecksAnySpellingOfSHA512(t *testing.T) {
+	localPath := sameSizeLocalFile(t)
+	remote := sha512Of(t, []byte("hello"))[0].FileHash
+	for _, spelling := range []string{"sha512", "SHA-512", "sha-512", "Sha512"} {
+		d := &Daemon{logger: logging.NewLoggerWithWriter(new(bytes.Buffer))}
+		f := models.JobFile{DecryptedSize: 5, FileChecksums: []models.FileChecksum{{HashFunction: spelling, FileHash: remote}}}
+		if d.alreadyDownloaded(localPath, f) {
+			t.Errorf("%s: a same-size file with other contents was adopted", spelling)
+		}
+	}
+}
+
+// A file whose checksums include no SHA-512 can only be adopted by its length.
+// Downloads warn that such a file was not verified; the daemon said so only at
+// debug level. A file with no checksums at all stays quiet, as downloads do.
+func TestAlreadyDownloadedWarnsWhenNothingCanVerifyTheFile(t *testing.T) {
+	localPath := sameSizeLocalFile(t)
+	for _, tc := range []struct {
+		checksums []models.FileChecksum
+		warn      bool
+	}{
+		{[]models.FileChecksum{{HashFunction: "md5", FileHash: "abc"}}, true},
+		{nil, false},
+		{[]models.FileChecksum{{HashFunction: "sha512"}}, false}, // no hash: no checksum
+	} {
+		var logs bytes.Buffer
+		d := &Daemon{logger: logging.NewLoggerWithWriter(&logs)}
+		if !d.alreadyDownloaded(localPath, models.JobFile{DecryptedSize: 5, FileChecksums: tc.checksums}) {
+			t.Errorf("checksums %v: a same-size file with nothing to check it against was not adopted", tc.checksums)
+		}
+		if warned := strings.Contains(logs.String(), `"level":"warn"`); warned != tc.warn {
+			t.Errorf("checksums %v: warned %v, want %v; logged %s", tc.checksums, warned, tc.warn, logs.String())
+		}
+	}
+}
+
 // The daemon adopted any file whose length matched the remote file's, which is
 // exactly what a failed download leaves behind: a pre-allocated or partly
 // written file is full-size and holed. Once that file is adopted, no later poll
@@ -450,7 +501,7 @@ func TestDownloadJob_DoesNotRehashAVerifiedFile(t *testing.T) {
 	var hashCalls int
 	d.hashLocalFile = func(path string) (string, error) {
 		hashCalls++
-		return sha512File(path)
+		return encryption.CalculateSHA512(path)
 	}
 
 	job := &CompletedJob{ID: jobID, Name: "job"}
@@ -580,7 +631,7 @@ func TestDownloadJob_CutShortDispatchIsNotADownload(t *testing.T) {
 			}
 			// The cancel comes while the dispatcher checks present.txt, or else
 			// once b.txt is handed over, and registration then never reads it.
-			d.hashLocalFile = func(path string) (string, error) { cancel(); return sha512File(path) }
+			d.hashLocalFile = func(path string) (string, error) { cancel(); return encryption.CalculateSHA512(path) }
 			start := startDownloadBatch
 			t.Cleanup(func() { startDownloadBatch = start })
 			startDownloadBatch = func(ts *services.TransferService, ctx context.Context, handed <-chan services.TransferRequest, batchID, label, source string, cancelFn context.CancelFunc) error {

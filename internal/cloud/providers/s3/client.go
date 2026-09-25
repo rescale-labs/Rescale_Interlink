@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
@@ -106,22 +105,11 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 		o.ExpiryWindow = 5 * time.Minute
 	})
 
-	// Load AWS config with custom HTTP client and auto-refreshing credentials
-	configOpts := []func(*config.LoadOptions) error{
-		config.WithRegion(storageInfo.ConnectionSettings.Region),
-		config.WithHTTPClient(httpClient),
-		config.WithCredentialsProvider(credCache),
-	}
-	if shouldUseFIPSEndpoint(purCfg.APIBaseURL) {
-		configOpts = append(configOpts, config.WithUseFIPSEndpoint(aws.FIPSEndpointStateEnabled))
+	fips := shouldUseFIPSEndpoint(purCfg.APIBaseURL)
+	if fips {
 		log.Printf("[S3] FIPS endpoint enabled for ITAR platform: %s", purCfg.APIBaseURL)
 	}
-	cfg, err := config.LoadDefaultConfig(ctx, configOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	client := s3.NewFromConfig(cfg)
+	client := newSDKClient(storageInfo.ConnectionSettings.Region, httpClient, credCache, fips)
 
 	// Get the global credential manager
 	credManager := credentials.GetManager(apiClient)
@@ -137,12 +125,19 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 	}, nil
 }
 
-// CloseIdleConnections closes idle connections in the S3 HTTP transport pool.
-// Called by the stale-connection cleanup hook after sleep/wake gaps.
-func (c *S3Client) CloseIdleConnections() {
-	if c.httpClient != nil {
-		c.httpClient.CloseIdleConnections()
+// newSDKClient builds the SDK client from what the platform supplied and nothing
+// else. config.LoadDefaultConfig also reads the user's AWS environment and shared
+// config files: AWS_CA_BUNDLE made every build fail, and AWS_ENDPOINT_URL sent
+// the transfer to an endpoint other than the platform's bucket. The CRC32 checks
+// it switched on by default are switched on here.
+func newSDKClient(region string, httpClient *nethttp.Client, creds aws.CredentialsProvider, fips bool) *s3.Client {
+	opts := s3.Options{Region: region, HTTPClient: httpClient, Credentials: creds,
+		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenSupported,
+		ResponseChecksumValidation: aws.ResponseChecksumValidationWhenSupported}
+	if fips {
+		opts.EndpointOptions.UseFIPSEndpoint = aws.FIPSEndpointStateEnabled
 	}
+	return s3.New(opts)
 }
 
 // Client returns the underlying S3 client.
@@ -199,24 +194,9 @@ func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 
 	// IMPORTANT: Reuse existing HTTP client instead of creating new one
 	// This preserves the connection pool and prevents TLS handshake overhead
-	configOpts := []func(*config.LoadOptions) error{
-		config.WithRegion(c.storageInfo.ConnectionSettings.Region),
-		config.WithHTTPClient(c.httpClient), // Reuse existing HTTP client!
-		config.WithCredentialsProvider(awscreds.NewStaticCredentialsProvider(
-			s3Creds.AccessKeyID,
-			s3Creds.SecretKey,
-			s3Creds.SessionToken,
-		)),
-	}
-	if c.apiClient != nil && shouldUseFIPSEndpoint(c.apiClient.GetConfig().APIBaseURL) {
-		configOpts = append(configOpts, config.WithUseFIPSEndpoint(aws.FIPSEndpointStateEnabled))
-	}
-	cfg, err := config.LoadDefaultConfig(ctx, configOpts...)
-	if err != nil {
-		return fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	c.client = s3.NewFromConfig(cfg)
+	c.client = newSDKClient(c.storageInfo.ConnectionSettings.Region, c.httpClient,
+		awscreds.NewStaticCredentialsProvider(s3Creds.AccessKeyID, s3Creds.SecretKey, s3Creds.SessionToken),
+		c.apiClient != nil && shouldUseFIPSEndpoint(c.apiClient.GetConfig().APIBaseURL))
 	c.appliedCreds = s3Creds
 
 	return nil
@@ -307,6 +287,17 @@ func (c *S3Client) HeadObject(ctx context.Context, objectKey string) (*s3.HeadOb
 		return err
 	})
 	return headResp, err
+}
+
+// required returns *field, or an error naming it when the response left it
+// unset. A proxy that strips response headers does that, and a nil dereference
+// inside a transfer worker would take the whole process down with it.
+func required[T any](field *T, name string) (T, error) {
+	if field == nil {
+		var zero T
+		return zero, fmt.Errorf("the S3 response has no %s (a proxy may have removed it)", name)
+	}
+	return *field, nil
 }
 
 // GetObject downloads an entire object from S3.

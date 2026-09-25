@@ -216,7 +216,9 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		if err != nil {
 			return fmt.Errorf("failed to create multipart upload: %w", err)
 		}
-		uploadID = *createResp.UploadId
+		if uploadID, err = required(createResp.UploadId, "UploadId"); err != nil {
+			return err
+		}
 		createdAt = time.Now()
 	}
 
@@ -229,6 +231,31 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	if params.ProgressCallback != nil {
 		params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 	}
+
+	checkpoints := transfer.NewCheckpointThrottle(func() {
+		state.SaveUploadState(&state.UploadResumeState{
+			LocalPath:      params.LocalPath,
+			EncryptedPath:  params.EncryptedPath,
+			ObjectKey:      objectKey,
+			UploadID:       uploadID,
+			TotalSize:      encryptedSize,
+			OriginalSize:   params.OriginalSize,
+			SourceModTime:  params.SourceModTime,
+			UploadedBytes:  uploadedBytes,
+			CompletedParts: convertFromCompletedParts(completedParts),
+			PartSize:       partSize,
+			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
+			IV:             encryption.EncodeBase64(params.IV),
+			RandomSuffix:   params.RandomSuffix,
+			CreatedAt:      createdAt,
+			LastUpdate:     time.Now(),
+			StorageType:    "S3Storage",
+			StorageID:      p.storageID(),
+			Container:      p.storageContainer(),
+		}, params.LocalPath)
+	})
+	// A failed or cancelled attempt returns from inside the loop.
+	defer checkpoints.Flush()
 
 	// Upload parts
 	buffer, releaseBuffer := buffers.GetPartBuffer(partSize)
@@ -273,9 +300,13 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 		if err != nil {
 			return fmt.Errorf("failed to upload part %d: %w", partNum, err)
 		}
+		etag, err := required(uploadResp.ETag, "ETag")
+		if err != nil {
+			return fmt.Errorf("failed to upload part %d: %w", partNum, err)
+		}
 
 		completedParts = append(completedParts, types.CompletedPart{
-			ETag:       uploadResp.ETag,
+			ETag:       aws.String(etag),
 			PartNumber: aws.Int32(partNum),
 		})
 		uploadedBytes += int64(n)
@@ -284,33 +315,11 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 			params.ProgressCallback(float64(uploadedBytes) / float64(encryptedSize))
 		}
 
-		if params.Stateless {
-			continue
+		if !params.Stateless {
+			checkpoints.Offer()
 		}
-
-		// Save resume state
-		currentState := &state.UploadResumeState{
-			LocalPath:      params.LocalPath,
-			EncryptedPath:  params.EncryptedPath,
-			ObjectKey:      objectKey,
-			UploadID:       uploadID,
-			TotalSize:      encryptedSize,
-			OriginalSize:   params.OriginalSize,
-			SourceModTime:  params.SourceModTime,
-			UploadedBytes:  uploadedBytes,
-			CompletedParts: convertFromCompletedParts(completedParts),
-			PartSize:       partSize,
-			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
-			IV:             encryption.EncodeBase64(params.IV),
-			RandomSuffix:   params.RandomSuffix,
-			CreatedAt:      createdAt,
-			LastUpdate:     time.Now(),
-			StorageType:    "S3Storage",
-			StorageID:      p.storageID(),
-			Container:      p.storageContainer(),
-		}
-		state.SaveUploadState(currentState, params.LocalPath)
 	}
+	checkpoints.Flush()
 
 	if err := verifyS3PartsComplete(uploadedBytes, encryptedSize, completedParts, totalParts); err != nil {
 		abortCtx, cancelAbort := abortContext(ctx)
@@ -468,7 +477,9 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		if err != nil {
 			return fmt.Errorf("failed to create multipart upload: %w", err)
 		}
-		uploadID = *createResp.UploadId
+		if uploadID, err = required(createResp.UploadId, "UploadId"); err != nil {
+			return err
+		}
 		createdAt = time.Now()
 
 		// Save initial state (keyed by original file path)
@@ -564,7 +575,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 				return "", fmt.Errorf("failed to upload part %d/%d: %w", partNumber, totalParts, uploadErr)
 			}
 
-			return *uploadResp.ETag, nil
+			return required(uploadResp.ETag, "ETag")
 		},
 		RecordPart: func(index int64, etag string) {
 			completedParts = append(completedParts, types.CompletedPart{
@@ -733,18 +744,20 @@ func resumeS3Parts(saved *state.UploadResumeState, totalSize int64) (s3Resume, b
 // staged part, repeats the completion, fails, and leaves the same checkpoint
 // behind — the same failure on every attempt after that.
 func multipartUploadExists(ctx context.Context, s3Client *S3Client, objectKey, uploadID string) (bool, error) {
-	_, err := s3Client.Client().ListParts(ctx, &s3.ListPartsInput{
-		Bucket:   aws.String(s3Client.Bucket()),
-		Key:      aws.String(objectKey),
-		UploadId: aws.String(uploadID),
-	})
-	if err != nil {
+	live := true
+	err := s3Client.RetryWithBackoff(ctx, "ListParts", func() error {
+		_, err := s3Client.Client().ListParts(ctx, &s3.ListPartsInput{
+			Bucket:   aws.String(s3Client.Bucket()),
+			Key:      aws.String(objectKey),
+			UploadId: aws.String(uploadID),
+		})
 		if isNoSuchUpload(err) {
-			return false, nil
+			live = false
+			return nil
 		}
-		return false, err
-	}
-	return true, nil
+		return err
+	})
+	return live && err == nil, err
 }
 
 // startFreshAfterVanishedUpload retires the checkpoint of an upload S3 no longer
@@ -852,14 +865,26 @@ func abortContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // lifecycle rules expire them, but there is nothing useful to do with a failure
 // here beyond logging it.
 func abortS3Upload(ctx context.Context, s3Client *S3Client, objectKey, uploadID string) {
-	_, err := s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String(s3Client.Bucket()),
-		Key:      aws.String(objectKey),
-		UploadId: aws.String(uploadID),
-	})
-	if err != nil {
+	if err := abortMultipartUpload(ctx, s3Client, objectKey, uploadID); err != nil {
 		log.Printf("Warning: Failed to abort multipart upload %s for %s: %v", uploadID, objectKey, err)
 	}
+}
+
+// abortMultipartUpload treats an upload that is already gone as aborted: that
+// is the state asked for, and it is also what a retry finds when the attempt
+// before it landed but its response was lost.
+func abortMultipartUpload(ctx context.Context, s3Client *S3Client, objectKey, uploadID string) error {
+	return s3Client.RetryWithBackoff(ctx, "AbortMultipartUpload", func() error {
+		_, err := s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(s3Client.Bucket()),
+			Key:      aws.String(objectKey),
+			UploadId: aws.String(uploadID),
+		})
+		if isNoSuchUpload(err) {
+			return nil
+		}
+		return err
+	})
 }
 
 // convertToCompletedParts converts state.CompletedPart slice to types.CompletedPart slice

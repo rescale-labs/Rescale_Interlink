@@ -3,9 +3,13 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/pem"
 	"fmt"
+	"io"
 	nethttp "net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +18,9 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 func TestShouldUseFIPSEndpoint(t *testing.T) {
@@ -42,6 +48,73 @@ func TestShouldUseFIPSEndpoint(t *testing.T) {
 				t.Errorf("shouldUseFIPSEndpoint(%q) = %v, want %v", tt.url, got, tt.expected)
 			}
 		})
+	}
+}
+
+// TestS3ClientIgnoresTheUsersAWSEnvironment: the platform supplies the
+// credentials, region and endpoint. Built with LoadDefaultConfig, the client
+// also read the user's AWS environment — AWS_CA_BUNDLE failed every build of it,
+// and it is rebuilt before every request; AWS_ENDPOINT_URL redirected the
+// transfer to another endpoint.
+func TestS3ClientIgnoresTheUsersAWSEnvironment(t *testing.T) {
+	server := httptest.NewTLSServer(nethttp.NotFoundHandler())
+	t.Cleanup(server.Close)
+	bundle := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, value := range map[string]string{"AWS_CA_BUNDLE": bundle, "AWS_ENDPOINT_URL": "https://example.invalid"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, value)
+			storage := &models.StorageInfo{ConnectionSettings: models.ConnectionSettings{Container: testBucket, Region: "us-east-1"}}
+			client, err := NewS3Client(context.Background(), storage, newFakeCredentialsAPI(t), nil, cloud.RetryObserver{})
+			if err != nil {
+				t.Fatalf("NewS3Client: %v", err)
+			}
+			if err := client.EnsureFreshCredentials(context.Background()); err != nil {
+				t.Fatalf("EnsureFreshCredentials: %v", err)
+			}
+			if endpoint := client.Client().Options().BaseEndpoint; endpoint != nil {
+				t.Errorf("the client addresses %s, want the bucket's own S3 endpoint", *endpoint)
+			}
+		})
+	}
+}
+
+// TestS3ClientChecksumsPartsAndVerifiesResponses: LoadDefaultConfig switched on
+// the SDK's CRC32 checks. Built from bare options they were off, so a part went
+// out with no checksum for S3 to hold it to, and a response body was not held
+// to the checksum S3 sent with it.
+func TestS3ClientChecksumsPartsAndVerifiesResponses(t *testing.T) {
+	var trailer atomic.Value
+	server := httptest.NewTLSServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if r.Method == nethttp.MethodPut {
+			trailer.Store(r.Header.Get("X-Amz-Trailer"))
+			w.Header().Set("ETag", `"part"`)
+			return
+		}
+		w.Header().Set("x-amz-checksum-crc32", "AAAAAA==") // not the CRC32 of the body
+		_, _ = io.WriteString(w, "object bytes")
+	}))
+	t.Cleanup(server.Close)
+	client := newTestS3Client(t, server) // rebuilt by newSDKClient before the upload
+
+	if err := uploadOnePart(context.Background(), client, 1); err != nil {
+		t.Fatalf("UploadPart: %v", err)
+	}
+	if got, _ := trailer.Load().(string); got != "x-amz-checksum-crc32" {
+		t.Errorf("the part went out with trailer %q, want its CRC32", got)
+	}
+
+	resp, err := client.Client().GetObject(context.Background(), &awss3.GetObjectInput{Bucket: aws.String(testBucket), Key: aws.String("object")})
+	if err != nil {
+		t.Fatalf("GetObject: %v", err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.ReadAll(resp.Body); err == nil {
+		t.Error("a body that does not match the CRC32 sent with it was accepted")
 	}
 }
 

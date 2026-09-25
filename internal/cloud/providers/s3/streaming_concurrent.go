@@ -104,8 +104,12 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	// that caused ghost progress bar copies when interleaved with mpb output.
 	_ = params.OutputWriter // Suppress unused warning - writer still used for other messages
 
+	uploadID, err := required(createResp.UploadId, "UploadId")
+	if err != nil {
+		return nil, err
+	}
 	return &transfer.StreamingUpload{
-		UploadID:     *createResp.UploadId,
+		UploadID:     uploadID,
 		StoragePath:  objectKey,
 		MasterKey:    encryptState.GetKey(),
 		InitialIV:    encryptState.GetInitialIV(),
@@ -199,11 +203,15 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 		attempt.Rollback()
 		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
 	}
+	etag, err := required(uploadResp.ETag, "ETag")
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload part %d: %w", partNumber, err)
+	}
 
 	return &transfer.PartResult{
 		PartIndex:  partIndex,
 		PartNumber: partNumber,
-		ETag:       *uploadResp.ETag,
+		ETag:       etag,
 		Size:       int64(len(ciphertext)), // Note: ciphertext size, not plaintext
 	}, nil
 }
@@ -260,16 +268,9 @@ func (p *Provider) AbortStreamingUpload(ctx context.Context, uploadState *transf
 		return fmt.Errorf("invalid provider data for S3 streaming upload")
 	}
 
-	_, err := providerData.s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String(providerData.bucket),
-		Key:      aws.String(uploadState.StoragePath),
-		UploadId: aws.String(uploadState.UploadID),
-	})
-
-	if err != nil {
+	if err := abortMultipartUpload(ctx, providerData.s3Client, uploadState.StoragePath, uploadState.UploadID); err != nil {
 		return fmt.Errorf("failed to abort multipart upload: %w", err)
 	}
-
 	return nil
 }
 
@@ -290,19 +291,9 @@ func (p *Provider) AbortUploadByID(ctx context.Context, uploadID, storagePath st
 		return fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	_, err = s3Client.Client().AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
-		Bucket:   aws.String(s3Client.Bucket()),
-		Key:      aws.String(storagePath),
-		UploadId: aws.String(uploadID),
-	})
-	if err != nil {
-		if isNoSuchUpload(err) {
-			// Already gone, which is the state we were asking for.
-			return nil
-		}
+	if err := abortMultipartUpload(ctx, s3Client, storagePath, uploadID); err != nil {
 		return fmt.Errorf("failed to abort multipart upload: %w", err)
 	}
-
 	return nil
 }
 
@@ -372,22 +363,11 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 		return false, fmt.Errorf("failed to get S3 client: %w", err)
 	}
 
-	// Try to list parts - if the upload doesn't exist, S3 returns NoSuchUpload error
-	_, err = s3Client.Client().ListParts(ctx, &s3.ListPartsInput{
-		Bucket:   aws.String(s3Client.Bucket()),
-		Key:      aws.String(storagePath),
-		UploadId: aws.String(uploadID),
-	})
-
+	live, err := multipartUploadExists(ctx, s3Client, storagePath, uploadID)
 	if err != nil {
-		if isNoSuchUpload(err) {
-			return false, nil // Upload doesn't exist, but this isn't an error condition
-		}
-		// Some other error occurred
 		return false, fmt.Errorf("failed to validate multipart upload: %w", err)
 	}
-
-	return true, nil
+	return live, nil
 }
 
 // apiErrorCode is the code-carrying part of the SDK's error types. It is
@@ -461,7 +441,8 @@ func (p *Provider) DownloadStreaming(ctx context.Context, remotePath, localPath 
 			if err != nil {
 				return 0, nil, fmt.Errorf("failed to get object metadata: %w", err)
 			}
-			return *headResp.ContentLength, transfer.NormalizeMetadata(headResp.Metadata), nil
+			size, err := required(headResp.ContentLength, "Content-Length")
+			return size, transfer.NormalizeMetadata(headResp.Metadata), err
 		},
 		// GetObjectRangeOnce is the non-retrying variant: the shared driver owns
 		// the retry loop and the per-attempt timeout.
@@ -507,7 +488,10 @@ func (p *Provider) GetEncryptedSize(ctx context.Context, remotePath string) (int
 		return 0, "", fmt.Errorf("failed to get object metadata: %w", err)
 	}
 
-	size := *headResp.ContentLength
+	size, err := required(headResp.ContentLength, "Content-Length")
+	if err != nil {
+		return 0, "", err
+	}
 	etag := ""
 	if headResp.ETag != nil {
 		etag = *headResp.ETag

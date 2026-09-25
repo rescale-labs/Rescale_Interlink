@@ -1,5 +1,7 @@
 package models
 
+import "strings"
+
 // CloudFile represents a file stored in Rescale cloud storage
 type CloudFile struct {
 	ID                   string              `json:"id"`
@@ -13,7 +15,7 @@ type CloudFile struct {
 	PathParts            *CloudFilePathParts `json:"pathParts,omitempty"`
 	Storage              *CloudFileStorage   `json:"storage,omitempty"`
 	DecryptedSize        int64               `json:"decryptedSize,omitempty"`
-	FileChecksums        []FileChecksum      `json:"fileChecksums,omitempty"`
+	FileChecksums        FileChecksums       `json:"fileChecksums,omitempty"`
 	Tags                 []string            `json:"userTags,omitempty"`
 }
 
@@ -35,6 +37,32 @@ type CloudFileStorage struct {
 type FileChecksum struct {
 	HashFunction string `json:"hashFunction"`
 	FileHash     string `json:"fileHash"`
+}
+
+// FileChecksums is the list of hashes the API reports for a file.
+type FileChecksums []FileChecksum
+
+// SHA512 returns the SHA-512 among them, however the algorithm is spelled
+// ("sha512", "SHA-512", "sha-512", ...), or "" if there is none. An entry with
+// no hash is not a checksum.
+func (c FileChecksums) SHA512() string {
+	for _, cs := range c {
+		if cs.FileHash != "" && strings.EqualFold(strings.ReplaceAll(cs.HashFunction, "-", ""), "sha512") {
+			return cs.FileHash
+		}
+	}
+	return ""
+}
+
+// Algorithms names the checksums that carry a hash.
+func (c FileChecksums) Algorithms() []string {
+	var names []string
+	for _, cs := range c {
+		if cs.FileHash != "" {
+			names = append(names, cs.HashFunction)
+		}
+	}
+	return names
 }
 
 // CredentialsPathPartsRequest represents path information for credentials request

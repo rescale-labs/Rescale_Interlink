@@ -6,12 +6,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	nethttp "net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +95,27 @@ func streamingTestData(parts int, partSize int64) []byte {
 		data[i] = byte(i*11 + 3)
 	}
 	return data
+}
+
+// TestStagingBlocksLogsNothingPerBlock: every staged block used to log a line
+// (tens of thousands for a large file), each stating the timeout it had just set.
+func TestStagingBlocksLogsNothingPerBlock(t *testing.T) {
+	provider, _ := streamingTestProvider(t)
+	upload, err := provider.InitStreamingUpload(context.Background(), transfer.StreamingUploadInitParams{
+		LocalPath: filepath.Join(t.TempDir(), "streamed.dat"), FileSize: 8 * 64, Plan: &streamingTestPlan,
+	})
+	if err != nil {
+		t.Fatalf("InitStreamingUpload: %v", err)
+	}
+	var logged strings.Builder
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	stageStreamingParts(t, provider, upload, streamingTestData(8, 64), 0, 8)
+	if lines := strings.Count(logged.String(), "\n"); lines >= 8 {
+		t.Errorf("staging 8 blocks logged %d lines:\n%s", lines, logged.String())
+	}
 }
 
 // TestStreamingResumeCommitsTheSameBlockListAsAnUninterruptedUpload is the Azure

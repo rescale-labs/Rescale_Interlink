@@ -851,3 +851,16 @@ func TestGetCurrentIVResumesTheChain(t *testing.T) {
 		t.Error("an encryptor resumed from the chain position produced different bytes")
 	}
 }
+
+// TestCBCEncryptPartRefusesAnEmptyNonFinalPart: with nothing to encrypt there
+// is no last ciphertext block to chain the next part from, and reading one
+// panicked.
+func TestCBCEncryptPartRefusesAnEmptyNonFinalPart(t *testing.T) {
+	enc, err := NewCBCStreamingEncryptor()
+	if err != nil {
+		t.Fatalf("NewCBCStreamingEncryptor: %v", err)
+	}
+	if _, err := enc.EncryptPart(nil, false); err == nil {
+		t.Error("an empty non-final part was encrypted")
+	}
+}

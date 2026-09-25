@@ -13,8 +13,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
+	"testing/synctest"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -201,6 +203,40 @@ func (f *fakeStreamingUploader) AbortStreamingUpload(_ context.Context, _ *trans
 	defer f.mu.Unlock()
 	f.abortCalled = true
 	return nil
+}
+
+// TestUploadStreamingSourceShrankAfterStat covers a source that reads shorter
+// than planned. Emptied before its first read, it used to take the empty-file
+// branch, which encrypted part 0 as a non-final part: CBC had no last block to
+// chain from, and the encrypt goroutine panicked and took the whole process
+// with it. Cut inside a part, it reached the encryptor as a short non-final
+// part, and failed with the encryptor's wording instead. A file that was empty
+// when it was planned is still uploaded as an empty object.
+func TestUploadStreamingSourceShrankAfterStat(t *testing.T) {
+	const partSize = 64
+	for _, tc := range []struct{ size, planned int }{
+		{0, 0},              // empty all along
+		{0, 3 * partSize},   // emptied before the first read
+		{1, 3 * partSize},   // cut inside part 1 of 3
+		{100, 3 * partSize}, // cut inside part 2 of 3
+		{128, 3 * partSize}, // cut at the boundary before part 3
+	} {
+		localPath, _ := writeStreamingSource(t, tc.size)
+		uploader := newResumableStreamingUploader(newFakeStreamingBackend(), partSize)
+		_, err := uploadStreaming(context.Background(), uploader, UploadParams{LocalPath: localPath}, int64(tc.planned))
+		if tc.planned == 0 {
+			if err != nil {
+				t.Errorf("an empty file: %v", err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), "changed during the upload") {
+			t.Errorf("%d of %d planned bytes: got %v, want the upload refused because the source changed", tc.size, tc.planned, err)
+		}
+		if tc.size < partSize && len(uploader.uploaded) != 0 {
+			t.Errorf("%d of %d planned bytes: uploaded parts %v", tc.size, tc.planned, uploader.uploaded)
+		}
+	}
 }
 
 // TestUploadStreamingEmptyFile exercises the full uploadStreaming pipeline
@@ -819,35 +855,33 @@ func TestProgressInterpolatorNormalFile(t *testing.T) {
 	}
 }
 
-// TestProgressInterpolatorStartStop verifies the interpolator goroutine
-// starts and stops cleanly for empty files.
+// TestProgressInterpolatorStartStop: the ticker reports, and Stop joins it. A
+// tick already pending when Stop closed the done channel used to reach the
+// callback after Stop had returned, because the goroutine's select picks at
+// random between the two — hence the repetitions, all in synctest's fake time.
 func TestProgressInterpolatorStartStop(t *testing.T) {
-	callCount := 0
-	var mu sync.Mutex
-
-	callback := func(progress float64) {
-		mu.Lock()
-		defer mu.Unlock()
-		callCount++
-		if math.IsNaN(progress) {
-			t.Error("received NaN progress")
+	synctest.Test(t, func(t *testing.T) {
+		for trial := 0; trial < 64; trial++ {
+			var calls atomic.Int32
+			pi := newProgressInterpolator(func(progress float64) {
+				calls.Add(1)
+				if math.IsNaN(progress) {
+					t.Error("received NaN progress")
+				}
+			}, 0)
+			pi.Start()
+			time.Sleep(2 * constants.ProgressUpdateInterval) // wakes together with the second tick
+			pi.Stop()
+			reported := calls.Load()
+			if reported == 0 {
+				t.Fatal("expected at least one progress callback from ticker")
+			}
+			time.Sleep(2 * constants.ProgressUpdateInterval)
+			if got := calls.Load(); got != reported {
+				t.Fatalf("trial %d: the callback ran %d time(s) after Stop returned", trial, got-reported)
+			}
 		}
-	}
-
-	pi := newProgressInterpolator(callback, 0)
-	pi.Start()
-
-	// Let it tick at least once
-	time.Sleep(600 * time.Millisecond)
-
-	pi.Stop()
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	if callCount == 0 {
-		t.Error("expected at least one progress callback from ticker")
-	}
+	})
 }
 
 // fakePreEncryptUploader implements transfer.PreEncryptUploader so the
@@ -1910,6 +1944,34 @@ func TestUploadStreamingResumesInterruptedUpload(t *testing.T) {
 	}
 }
 
+// TestUploadStreamingCheckpointWritesAreBounded: the checkpoint was rewritten,
+// whole, every time the prefix grew, so an n-part upload wrote O(n²) part records
+// beside the source (4.7 GB for 10,000 S3 parts). It is now written when the
+// first part lands, at most once per interval after that, and on the way out.
+func TestUploadStreamingCheckpointWritesAreBounded(t *testing.T) {
+	const partSize, parts = 64, 32
+	localPath, data := writeStreamingSource(t, parts*partSize)
+	writes := 0
+	saveUploadState = func(saved *state.UploadResumeState, path string) error {
+		writes++
+		return state.SaveUploadState(saved, path)
+	}
+	t.Cleanup(func() { saveUploadState = state.SaveUploadState })
+
+	uploader := newResumableStreamingUploader(newFakeStreamingBackend(), partSize)
+	uploader.failFrom = parts - 1 // interrupted before the last part, so the checkpoint is kept
+	if _, err := uploadStreaming(context.Background(), uploader, UploadParams{LocalPath: localPath}, int64(len(data))); err == nil {
+		t.Fatal("expected the interrupted attempt to fail")
+	}
+
+	if writes > 2 {
+		t.Errorf("an attempt that landed %d parts wrote its checkpoint %d times", parts-1, writes)
+	}
+	if saved := loadStreamingState(t, localPath); saved == nil || len(saved.StreamingParts) != parts-1 {
+		t.Errorf("the checkpoint left behind does not cover the %d parts that landed: %+v", parts-1, saved)
+	}
+}
+
 // TestUploadStreamingCheckpointsOnlyTheContiguousPrefix covers what makes a
 // checkpoint a resume point. Parts finish out of order under concurrency, so the
 // set of completed parts is not somewhere an upload can restart from: the chain
@@ -2103,7 +2165,11 @@ func TestUploadStreamingKeepsACancelledUploadResumable(t *testing.T) {
 		_, err := uploadStreaming(ctx, first, params, int64(len(data)))
 		done <- err
 	}()
-	waitForCheckpoint(t, localPath, 3)
+	// Landed, not checkpointed: checkpoints are throttled while the upload runs,
+	// and it is the one written on the way out that has to cover all three.
+	if err := first.waitForUploaded(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
 	cancel()
 	if err := <-done; err == nil {
 		t.Fatal("expected the cancelled upload to fail")
@@ -2308,7 +2374,7 @@ func TestUploadStreamingRefusesASecondUploadOfTheSameSource(t *testing.T) {
 		result, err := uploadStreaming(context.Background(), first, params, int64(len(data)))
 		done <- outcome{result: result, err: err}
 	}()
-	waitForCheckpoint(t, localPath, 3)
+	waitForCheckpoint(t, localPath, 1)
 
 	// A second invocation of the same source, on a context its caller has
 	// already given up on: the shape that used to abort the first's upload.

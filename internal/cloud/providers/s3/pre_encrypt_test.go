@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math"
 	nethttp "net/http"
 	"net/http/httptest"
 	"os"
@@ -539,6 +540,94 @@ func TestPreEncryptSequentialUploadsEveryPart(t *testing.T) {
 	defer backend.mu.Unlock()
 	if backend.commits != 1 {
 		t.Errorf("CompleteMultipartUpload called %d times, want 1", backend.commits)
+	}
+}
+
+// TestPreEncryptSequentialCheckpointWritesAreBounded: the checkpoint, which
+// carries every completed part, was rewritten after each part. The progress
+// callback runs between a part and its checkpoint, so it sees each rewrite.
+func TestPreEncryptSequentialCheckpointWritesAreBounded(t *testing.T) {
+	_, server := newFakeS3Backend(t)
+	s3Client := newTestS3Client(t, server)
+	dir := t.TempDir()
+	localPath, encryptedPath := filepath.Join(dir, "source.dat"), filepath.Join(dir, "source.dat.enc")
+	testsupport.WriteTestFile(t, encryptedPath, 8*64)
+	testsupport.WriteTestFile(t, localPath, 8*64)
+
+	params := testUploadParams(t, localPath, encryptedPath, &resources.UploadPlan{PartSize: 64})
+	versions := map[int]bool{}
+	params.ProgressCallback = func(float64) {
+		recorded := -1
+		if saved, _ := state.LoadUploadState(localPath); saved != nil {
+			recorded = len(saved.CompletedParts)
+		}
+		versions[recorded] = true
+	}
+	objectKey := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
+	if err := (&Provider{}).uploadEncryptedMultipart(context.Background(), s3Client, params, objectKey, 8*64); err != nil {
+		t.Fatalf("sequential upload failed: %v", err)
+	}
+
+	if len(versions) > 2 {
+		t.Errorf("an 8-part upload rewrote its checkpoint %d times", len(versions)-1)
+	}
+	if saved, _ := state.LoadUploadState(localPath); saved == nil || len(saved.CompletedParts) != 8 {
+		t.Errorf("the checkpoint written on the way out does not hold all 8 parts: %+v", saved)
+	}
+}
+
+// TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit: the throttle holds
+// checkpoints back while the upload runs, and the flush after the loop writes
+// the one it owes. A refused part or a cancel returned from inside the loop,
+// past that flush, so the next attempt sent parts S3 already held again.
+func TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit(t *testing.T) {
+	// Every checkpoint after the first is held back, however slowly the parts
+	// land, so the ones owed when the upload stops are left to its exit.
+	interval := transfer.CheckpointInterval
+	transfer.CheckpointInterval = math.MaxInt64
+	t.Cleanup(func() { transfer.CheckpointInterval = interval })
+	for _, stop := range []string{"refused", "cancelled"} {
+		t.Run(stop, func(t *testing.T) {
+			backend, server := newFakeS3Backend(t)
+			fixture := newS3ResumeFixture(t, 8*64, &resources.UploadPlan{PartSize: 64})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if stop == "refused" {
+				backend.refusePartsFrom = 5
+			} else {
+				fixture.params.ProgressCallback = func(done float64) {
+					if done >= 0.5 { // part 4 has landed; part 5 goes out cancelled
+						cancel()
+					}
+				}
+			}
+			if err := (&Provider{}).uploadEncryptedMultipart(ctx, newTestS3Client(t, server), fixture.params, fixture.objectKey, 8*64); err == nil {
+				t.Fatal("the interrupted attempt reported success")
+			}
+			saved, _ := state.LoadUploadState(fixture.localPath)
+			if saved == nil {
+				t.Fatal("the interrupted attempt left no checkpoint")
+			}
+			if len(saved.CompletedParts) != 4 {
+				t.Fatalf("the checkpoint left behind holds %d part(s), want the 4 that landed", len(saved.CompletedParts))
+			}
+
+			// A second backend, so what it receives is the resumed attempt alone.
+			resumed, server := newFakeS3Backend(t)
+			resumed.listPartsLive = true
+			fixture.params.ProgressCallback = nil
+			if err := fixture.run(t, newTestS3Client(t, server), false); err != nil {
+				t.Fatalf("the resumed attempt failed: %v", err)
+			}
+			if got := resumed.stagedPartNumbers(); !slices.Equal(got, []int32{5, 6, 7, 8}) {
+				t.Errorf("the resumed attempt sent parts %v, want 5 to 8", got)
+			}
+			resumed.mu.Lock()
+			defer resumed.mu.Unlock()
+			if !slices.Equal(resumed.committed, []int32{1, 2, 3, 4, 5, 6, 7, 8}) {
+				t.Errorf("completed with parts %v, want all 8 in order", resumed.committed)
+			}
+		})
 	}
 }
 

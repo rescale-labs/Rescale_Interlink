@@ -276,3 +276,51 @@ func VerifyBlockList(blockIDs []string) error {
 	}
 	return nil
 }
+
+// CheckpointInterval bounds how often a streaming or sequential pre-encrypt
+// upload rewrites its resume checkpoint. Each write carries every part recorded
+// so far, so one per part made the traffic grow with the square of the part
+// count: 4.7 GB beside the source for a 10,000-part S3 upload, about 100 GB for
+// a 49,450-block Azure one. A checkpoint that lags the backend is still a
+// correct one: a resumed attempt re-sends the parts after it, under the same
+// part numbers and block IDs. A variable so a test can hold back every
+// checkpoint after the first, however slowly its parts land.
+var CheckpointInterval = 10 * time.Second
+
+// CheckpointThrottle writes the first checkpoint it is offered at once and then
+// at most one per CheckpointInterval. One it holds back is owed until a later
+// Offer finds the interval passed, or until Flush, which the streaming and
+// sequential pre-encrypt uploads call on every orderly exit: success, failure
+// or cancel. There is no timer, so an upload that stalls leaves its owed
+// checkpoint unwritten, and a crash replays everything after the last one
+// written; the interval does not bound that.
+//
+// Concurrent pre-encrypt uploads do not use it: RunPartPipeline saves after
+// every 5 results (every quarter of them above 20) and returns on an error
+// without a final save, so the parts accepted since its last save are sent
+// again by the next attempt.
+type CheckpointThrottle struct {
+	save func()
+	last time.Time
+	owed bool
+}
+
+func NewCheckpointThrottle(save func()) *CheckpointThrottle {
+	return &CheckpointThrottle{save: save}
+}
+
+// Offer says the state has moved on since the last checkpoint.
+func (t *CheckpointThrottle) Offer() {
+	t.owed = true
+	if t.last.IsZero() || time.Since(t.last) >= CheckpointInterval {
+		t.Flush()
+	}
+}
+
+// Flush writes the checkpoint an Offer left owed, if there is one.
+func (t *CheckpointThrottle) Flush() {
+	if t.owed {
+		t.owed, t.last = false, time.Now()
+		t.save()
+	}
+}

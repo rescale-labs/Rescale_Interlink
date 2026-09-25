@@ -386,14 +386,14 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 			return fmt.Errorf("failed to stat file: %w", err)
 		}
 		if fileInfo.Size() == params.TotalSize {
-			fmt.Printf("Download already complete (verified), skipping\n")
+			log.Printf("Download already complete (verified), skipping")
 			if params.ProgressCallback != nil {
 				params.ProgressCallback(1.0)
 			}
 			return nil
 		}
 
-		fmt.Printf("Warning: Resume state claims complete but file size mismatch\n")
+		log.Printf("Warning: Resume state claims complete but file size mismatch")
 		state.DeleteDownloadState(params.LocalPath)
 		resumeState = newChunkedResumeState(params, chunkSize)
 		chunksToDownload = resumeState.GetMissingChunks(totalChunks)
@@ -457,8 +457,9 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 	var stateMu sync.Mutex
 
 	progressDone := make(chan struct{})
-	defer close(progressDone)
+	progressStopped := make(chan struct{})
 	go func() {
+		defer close(progressStopped)
 		ticker := time.NewTicker(chunkProgressInterval)
 		defer ticker.Stop()
 		for {
@@ -474,6 +475,11 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 				return
 			}
 		}
+	}()
+	// Joined, not just signalled, for the reason given in downloadStreamingConcurrent.
+	defer func() {
+		close(progressDone)
+		<-progressStopped
 	}()
 
 	var wg sync.WaitGroup
@@ -601,7 +607,7 @@ func resumeChunkedDownload(params ChunkedConcurrentParams, chunkSize, totalChunk
 	}
 
 	if chunkedResumeUsable(existing, params, chunkSize) {
-		fmt.Printf("Resuming concurrent download: %d/%d chunks already completed\n",
+		log.Printf("Resuming concurrent download: %d/%d chunks already completed",
 			len(existing.CompletedChunks), totalChunks)
 		return existing
 	}

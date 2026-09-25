@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud/state"
@@ -134,6 +135,83 @@ func TestDownloadChunkedConcurrentKeepsResumeStateHonest(t *testing.T) {
 			t.Errorf("chunk %d is recorded as completed but its bytes are not on disk", chunkIndex)
 		}
 	}
+}
+
+// TestDownloadChunkedConcurrentWritesNothingToStdout: the driver is library
+// code that runs under a live progress display, where a raw stdout write lands
+// inside the bars' frame. Its resume notices used to be fmt.Printf.
+func TestDownloadChunkedConcurrentWritesNothingToStdout(t *testing.T) {
+	object := objectOfSize(16)
+	params := ChunkedConcurrentParams{
+		RemotePath: "bucket/results.dat", LocalPath: filepath.Join(t.TempDir(), "results.dat"),
+		TotalSize: int64(len(object)), ChunkSize: 8, Concurrency: 1, StorageType: "S3Storage",
+		ObjectETag: `"etag-1"`, Retry: passThroughRetry,
+		Open: (&rangeServer{object: object, failAt: map[int64]bool{8: true}}).open,
+	}
+	if err := DownloadChunkedConcurrent(context.Background(), params); err == nil {
+		t.Fatal("the first attempt succeeded, want it stopped at chunk 1 so the second resumes")
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = w
+	params.Open = (&rangeServer{object: object}).open
+	err = DownloadChunkedConcurrent(context.Background(), params)
+	os.Stdout = stdout
+	w.Close()
+	if err != nil {
+		t.Fatalf("resumed download: %v", err)
+	}
+	if out, _ := io.ReadAll(r); len(out) != 0 {
+		t.Errorf("the download wrote to stdout: %q", out)
+	}
+}
+
+// TestDownloadChunkedConcurrentJoinsItsProgressReporter: the progress goroutine
+// was signalled on the way out but not waited for, so the driver could return
+// while the caller's callback was still running. synctest fixes the
+// interleaving: the callback is held until the test lets it go.
+func TestDownloadChunkedConcurrentJoinsItsProgressReporter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		server := &rangeServer{object: objectOfSize(16)}
+		entered, release, done := make(chan struct{}), make(chan struct{}), make(chan error)
+		var first, returned atomic.Bool
+		go func() {
+			err := DownloadChunkedConcurrent(context.Background(), ChunkedConcurrentParams{
+				RemotePath: "bucket/results.dat", LocalPath: filepath.Join(t.TempDir(), "results.dat"),
+				TotalSize: 16, ChunkSize: 8, Concurrency: 1, StorageType: "S3Storage",
+				ObjectETag: `"etag-1"`, Retry: passThroughRetry,
+				Open: func(ctx context.Context, offset, length int64) (io.ReadCloser, error) {
+					if offset == 8 {
+						<-entered // the last chunk waits for a progress report to be under way
+					}
+					return server.open(ctx, offset, length)
+				},
+				ProgressCallback: func(fraction float64) {
+					// The driver itself reports 0 and 1; only the reporter sees a part-way fraction.
+					if fraction > 0 && fraction < 1 && first.CompareAndSwap(false, true) {
+						close(entered)
+						<-release
+					}
+				},
+			})
+			returned.Store(true)
+			done <- err
+		}()
+
+		<-entered
+		synctest.Wait()
+		if returned.Load() {
+			t.Error("the download returned while its progress callback was still running")
+		}
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("DownloadChunkedConcurrent: %v", err)
+		}
+	})
 }
 
 // TestDownloadChunkedConcurrentBoundsChunksInFlight covers the other half of the

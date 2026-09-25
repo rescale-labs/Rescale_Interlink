@@ -8,13 +8,10 @@
 package azure
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"path/filepath"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
@@ -170,10 +167,6 @@ func (p *Provider) UploadCiphertext(ctx context.Context, uploadState *transfer.S
 
 	partCtx, cancel := context.WithTimeout(ctx, constants.PartOperationTimeout)
 	defer cancel()
-
-	if deadline, ok := partCtx.Deadline(); ok {
-		log.Printf("[AZURE] Block %d: remaining deadline %v", partIndex, time.Until(deadline).Round(time.Second))
-	}
 
 	// Stage the block using AzureClient
 	attempt := transfer.NewUploadAttemptProgress(uploadState.ByteProgressCallback)
@@ -382,15 +375,6 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 		return false, fmt.Errorf("failed to check the staged blocks of %s: %w", blobName, err)
 	}
 	return exists, nil
-}
-
-// readSeekCloser wraps bytes.Reader to implement io.ReadSeekCloser
-type readSeekCloser struct {
-	*bytes.Reader
-}
-
-func (rsc *readSeekCloser) Close() error {
-	return nil
 }
 
 // =============================================================================

@@ -54,7 +54,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		// Fall back to no-proxy if host is missing (incomplete saved config).
 		// This allows GUI to start so user can reconfigure proxy settings.
 		if cfg.ProxyHost == "" {
-			fmt.Printf("[WARN] Proxy mode is NTLM but host is missing - falling back to no-proxy mode\n")
+			log.Printf("[WARN] Proxy mode is NTLM but host is missing - falling back to no-proxy mode")
 			transport.Proxy = nil
 			return &nethttp.Client{
 				Transport: transport,
@@ -90,7 +90,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		// Fall back to no-proxy if host is missing (incomplete saved config).
 		// This allows GUI to start so user can reconfigure proxy settings.
 		if cfg.ProxyHost == "" {
-			fmt.Printf("[WARN] Proxy mode is basic but host is missing - falling back to no-proxy mode\n")
+			log.Printf("[WARN] Proxy mode is basic but host is missing - falling back to no-proxy mode")
 			transport.Proxy = nil
 			return &nethttp.Client{
 				Transport: transport,
@@ -104,7 +104,7 @@ func ConfigureHTTPClient(cfg *config.Config) (*nethttp.Client, error) {
 		// Log warning when credentials incomplete (user set but password missing).
 		// This typically happens on startup when password wasn't saved for security.
 		if cfg.ProxyUser != "" && cfg.ProxyPassword == "" {
-			fmt.Printf("[WARN] Proxy user configured but password missing - proxy auth disabled until password is set\n")
+			log.Printf("[WARN] Proxy user configured but password missing - proxy auth disabled until password is set")
 		}
 
 		client := &nethttp.Client{
@@ -211,6 +211,9 @@ func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
 			MinVersion: tls.VersionTLS12,
 		},
 		Proxy: proxyFuncWithBypass(proxyURL, cfg.NoProxy),
+		// This transport is dropped on return, so a kept-alive connection would
+		// only sit open to the proxy with nothing left to close it.
+		DisableKeepAlives: true,
 	}
 
 	// Derive timeout from context, cap at 15 seconds
