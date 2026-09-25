@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +74,11 @@ const stateRetentionBufferDays = 30
 // forever. Older batches are dropped once this many newer ones exist, which
 // keeps recent auto-downloads visible in the Transfers tab.
 const daemonBatchHistoryLimit = 20
+
+// startDownloadBatch starts the shared queue's registration and transfer of the
+// requests downloadJob hands over. A variable so a test can cancel a batch
+// between handing a request over and its registration.
+var startDownloadBatch = (*services.TransferService).StartStreamingDownloadBatch
 
 // DefaultConfig returns a daemon configuration with sensible defaults.
 func DefaultConfig() *Config {
@@ -276,8 +282,11 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 
 	// Create state manager
 	state := NewState(daemonCfg.StateFile)
-	if err := state.Load(); err != nil {
+	if err := state.open(); err != nil {
 		return nil, fmt.Errorf("failed to load state: %w", err)
+	}
+	if state.upgraded > 0 {
+		logger.Info().Msgf("%d failed download(s) recorded by an earlier version will each get one more attempt", state.upgraded)
 	}
 
 	// Bound the state file. The daemon reads it once, here, and then holds it in
@@ -417,6 +426,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	d.running = true
 	d.lifecycleCtx, d.cancelFunc = context.WithCancel(ctx)
+	d.wg.Add(1) // before Stop can see running: it waits for the poll loop below
 	d.mu.Unlock()
 
 	d.logger.Info().
@@ -428,7 +438,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.poll(d.lifecycleCtx)
 
 	// Start polling loop
-	d.wg.Add(1)
 	go d.pollLoop(d.lifecycleCtx)
 
 	return nil
@@ -546,6 +555,12 @@ func (d *Daemon) poll(ctx context.Context) {
 		}
 	}
 
+	// Take in any 'daemon retry' run since the last poll: it edits the state
+	// file, and this daemon holds its state in memory.
+	if err := d.state.Save(); err != nil {
+		d.logger.Error().Err(err).Msg("Failed to persist state")
+	}
+
 	// Find completed jobs that need downloading
 	result, err := d.monitor.FindCompletedJobs(scanCtx, pendingSet)
 	if err != nil {
@@ -661,6 +676,10 @@ func (d *Daemon) poll(ctx context.Context) {
 		outcome := d.downloadJob(ctx, job)
 		totalDownloadTime += time.Since(downloadStart)
 		summary.AddOutcome(string(outcome))
+		if d.state.AttemptCount(job.ID) >= MaxDownloadAttempts {
+			d.logger.Warn().Msgf("GAVE UP: %s [%s] - %d download attempts failed; run 'rescale-int daemon retry --job-id %s' to try again",
+				job.Name, job.ID, MaxDownloadAttempts, job.ID)
+		}
 	}
 
 	d.emitScanSummary(summary, time.Since(scanStart), false, nil)
@@ -933,10 +952,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		d.logger.Error().Err(err).Str("dir", outputDir).Msg("Failed to create output directory")
-		d.state.MarkFailed(job.ID, job.Name, err)
-		if saveErr := d.state.Save(); saveErr != nil {
-			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
-		}
+		d.markFailed(ctx, job, "", err)
 		reporting.HandleCLIError(err, "daemon", "job_download", "")
 		return OutcomeOutputDirCreateFailed
 	}
@@ -944,10 +960,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	files, err := d.apiClient.ListJobFiles(ctx, job.ID)
 	if err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to list job files")
-		d.state.MarkFailed(job.ID, job.Name, err)
-		if saveErr := d.state.Save(); saveErr != nil {
-			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
-		}
+		d.markFailed(ctx, job, "", err)
 		reporting.HandleCLIError(err, "daemon", "job_download", "")
 		return OutcomeListFilesFailed
 	}
@@ -988,12 +1001,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	batchCtx, batchCancel := context.WithCancel(ctx)
 	defer batchCancel()
 
-	if err := d.ts.StartStreamingDownloadBatch(batchCtx, reqCh, batchID, batchLabel, services.SourceLabelDaemon, batchCancel); err != nil {
+	if err := startDownloadBatch(d.ts, batchCtx, reqCh, batchID, batchLabel, services.SourceLabelDaemon, batchCancel); err != nil {
 		d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Failed to start download batch")
-		d.state.MarkFailed(job.ID, job.Name, err)
-		if saveErr := d.state.Save(); saveErr != nil {
-			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
-		}
+		d.markFailed(ctx, job, "", err)
 		return OutcomePartialFailure
 	}
 
@@ -1010,6 +1020,9 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	var totalSize int64
 	var alreadyPresent int
 	var dispatched int
+	var skipped int    // files the dispatch left out: a refused name or a folder not made
+	var skipErr error  // why it left the last one out
+	var cutShort error // the batch's cancellation, when it ended the dispatch early
 	dispatchDone := make(chan struct{})
 	go func() {
 		defer close(dispatchDone)
@@ -1023,6 +1036,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 					Str("file_name", f.Name).
 					Err(err).
 					Msg("Skipping file with invalid name")
+				skipped, skipErr = skipped+1, err
 				continue
 			}
 
@@ -1039,6 +1053,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 
 			if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 				d.logger.Error().Err(err).Str("path", localPath).Msg("Failed to create file directory")
+				skipped, skipErr = skipped+1, err
 				continue
 			}
 
@@ -1058,10 +1073,17 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 				BatchID:     batchID,
 				BatchLabel:  batchLabel,
 			}
+			// Check the cancel first: select picks at random among ready cases,
+			// and a request handed over after the cancel may never be registered.
+			if batchCtx.Err() != nil {
+				cutShort = batchCtx.Err()
+				return
+			}
 			select {
 			case reqCh <- req:
 				dispatched++
 			case <-batchCtx.Done():
+				cutShort = batchCtx.Err()
 				return
 			}
 		}
@@ -1073,53 +1095,79 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	// counters safe to read.
 	<-dispatchDone
 
+	// fail records the attempt as failed. Files the dispatch left out lead the
+	// record, counted against all the job's files, and err, if any, says what
+	// else went wrong. They failed for a reason of their own, which no stop
+	// explains, so they count the attempt however late a stop comes.
+	ofFiles := fmt.Sprintf("of %d files", len(files))
+	if len(files) == 1 {
+		ofFiles = "of 1 file"
+	}
+	fail := func(batchID string, err error) {
+		if skipErr != nil {
+			left := fmt.Errorf("%d %s could not be downloaded: %w", skipped, ofFiles, skipErr)
+			if err != nil {
+				left = fmt.Errorf("%w; %v", left, err)
+			}
+			batchID, err = "", left
+		}
+		d.markFailed(ctx, job, batchID, err)
+	}
+
 	var stats transfer.BatchStats
 	if dispatched > 0 {
 		var waitErr error
 		stats, waitErr = d.ts.WaitForRegisteredBatch(ctx, batchID)
-		if waitErr != nil {
+		// A vanished batch means someone cancelled it before its first task
+		// registered. That is a user action, not a fault to report, and the
+		// accounting below explains it: no task, so no file counted.
+		if waitErr != nil && !errors.Is(waitErr, services.ErrBatchVanished) {
 			d.logger.Error().Err(waitErr).Str("job_id", job.ID).Msg("Job download interrupted")
-			d.state.MarkFailed(job.ID, job.Name, waitErr)
-			if saveErr := d.state.Save(); saveErr != nil {
-				d.logger.Error().Err(saveErr).Msg("Failed to persist state")
-			}
-			// A vanished batch means someone cancelled it before its first task
-			// registered. That is a user action, not a fault to report.
-			if !errors.Is(waitErr, services.ErrBatchVanished) {
-				reporting.HandleCLIError(waitErr, "daemon", "job_download", "")
-			}
+			fail(batchID, waitErr)
+			reporting.HandleCLIError(waitErr, "daemon", "job_download", "")
 			return OutcomeInterrupted
 		}
-	} else if alreadyPresent == 0 {
-		// Nothing dispatched and nothing on disk: every file was rejected by
-		// name validation or its directory could not be created. Record a
-		// failure instead of claiming success.
-		noneErr := fmt.Errorf("no downloadable files of %d (all skipped)", len(files))
+	} else if alreadyPresent == 0 || cutShort != nil {
+		// Nothing dispatched, and either nothing on disk (every file was
+		// rejected by name validation or its directory could not be created)
+		// or the batch was cancelled first. Record a failure instead of
+		// claiming success. No file reached the queue, so the error alone says
+		// whether a stop caused this. Without one every file was left out, and
+		// fail says why.
+		var noneErr error
+		if cutShort != nil {
+			noneErr = fmt.Errorf("cancelled before all files were queued: %w", cutShort)
+		}
 		d.logger.Warn().Str("job_id", job.ID).Int("total_files", len(files)).
 			Msg("Job had no downloadable files, marking as failed for retry")
-		d.state.MarkFailed(job.ID, job.Name, noneErr)
-		if saveErr := d.state.Save(); saveErr != nil {
-			d.logger.Error().Err(saveErr).Msg("Failed to persist state")
-		}
+		fail("", noneErr)
 		return OutcomePartialFailure
 	}
 	// dispatched == 0 with files already on disk falls through with zero-valued
 	// stats. There is nothing to wait for: the batch registered no tasks, so
 	// waiting could only report a batch the queue has already forgotten.
 
-	// Partial-failure path: any failed or cancelled tasks mean the job is
-	// incomplete and will retry on the next poll cycle.
+	// The job is downloaded only when every file it lists is counted as there:
+	// verified on disk, or completed through the queue. A request handed over
+	// as the batch was cancelled may never have been registered, and a file
+	// whose name is refused or whose folder could not be made never reached the
+	// queue, so no failure shows for either. A job short of that is retried on
+	// a later poll.
 	var outcome DownloadOutcome
-	if stats.Failed > 0 || stats.Cancelled > 0 {
-		failErr := fmt.Errorf("%d failed + %d cancelled of %d files",
-			stats.Failed, stats.Cancelled, stats.Total+alreadyPresent)
+	if alreadyPresent+stats.Completed < len(files) {
+		var failErr error // none when the files left out are all the job lacks
+		if cutShort != nil || stats.Total < dispatched {
+			failErr = fmt.Errorf("cancelled before all files were queued: %w", batchCtx.Err())
+		} else if alreadyPresent+stats.Completed+skipped < len(files) {
+			failErr = fmt.Errorf("%d failed + %d cancelled %s", stats.Failed, stats.Cancelled, ofFiles)
+		}
 		d.logger.Warn().
 			Str("job_id", job.ID).
 			Int("failed_files", stats.Failed).
 			Int("cancelled_files", stats.Cancelled).
 			Int("total_files", stats.Total+alreadyPresent).
 			Msg("Job incomplete, marking as failed for retry")
-		d.state.MarkFailed(job.ID, job.Name, failErr)
+		fail(batchID, failErr)
 		outcome = OutcomePartialFailure
 	} else {
 		// Add queue-completed bytes to totalSize (already-present files were
@@ -1150,6 +1198,44 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	}
 
 	return outcome
+}
+
+// markFailed records a failed download attempt, which schedules the job's next
+// one, and saves it together with any 'daemon retry' made during the attempt,
+// which it takes in first, so the count restarts.
+//
+// What the daemon's own stopping causes is not a failure: counting it would
+// hold the job in backoff after the restart, and a few restarts during one long
+// download would use up all its attempts. So while the daemon stops, an error
+// that is the cancellation is left out, and so is a batch the stop cut short,
+// unless one of its files had failed for a reason of its own.
+func (d *Daemon) markFailed(ctx context.Context, job *CompletedJob, batchID string, err error) {
+	if ctx.Err() != nil {
+		if batchID != "" {
+			err = d.fileFailure(batchID)
+		} else if errors.Is(err, context.Canceled) {
+			err = nil
+		}
+		if err == nil {
+			return
+		}
+	}
+	if saveErr := d.state.update(func() { d.state.MarkFailed(job.ID, job.Name, err) }); saveErr != nil {
+		d.logger.Error().Err(saveErr).Msg("Failed to persist state")
+	}
+}
+
+// fileFailure returns the error of a file in the batch that failed other than
+// by being cancelled, or nil. A wait the stop cuts short reports no statistics,
+// so the batch's tasks are read instead.
+func (d *Daemon) fileFailure(batchID string) error {
+	tasks := d.ts.GetQueue().GetBatchTasks(batchID, 0, math.MaxInt, string(transfer.TaskFailed))
+	for i := range tasks {
+		if err := tasks[i].Error; err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	return nil
 }
 
 // retireOldBatches records a finished download batch and drops the terminal

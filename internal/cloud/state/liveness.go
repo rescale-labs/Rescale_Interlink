@@ -29,6 +29,16 @@ var probeProcessLiveness = func(pid int) (processLiveness, error) {
 	return systemProcessLiveness(pid)
 }
 
+// ProcessExited reports whether the process with this PID has exited, which only
+// the system saying so establishes. A live process has not, and neither has one
+// the system will not answer about; the error then says why. This is the probe
+// the upload lock judges its owner with, for any other caller that must never
+// take over what a live process holds.
+func ProcessExited(pid int) (bool, error) {
+	liveness, err := probeProcessLiveness(pid)
+	return liveness == livenessDead, err
+}
+
 // The two answers OpenProcess gives that decide the question, mirrored as plain
 // numbers because golang.org/x/sys/windows builds on Windows alone and this
 // mapping is compiled and tested everywhere.

@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"syscall"
 )
 
@@ -21,99 +20,27 @@ func PIDFilePath() string {
 	return filepath.Join(home, ".config", "rescale", "daemon.pid")
 }
 
-// WritePIDFile claims the daemon PID file for this process.
-//
-// The claim is an exclusive create, so two daemons starting at the same time
-// cannot both pass the earlier IsDaemonRunning() check and then both write the
-// file — the loser gets an error instead of silently becoming a second daemon
-// polling the same jobs into the same folder. A PID file left behind by a dead
-// process is cleared by IsDaemonRunning(), which callers run first; this
-// function also clears it directly so a stale file cannot lock the daemon out.
-func WritePIDFile() error {
-	pidPath := PIDFilePath()
+// oldPIDFilePath returns where an earlier version kept the PID file: nowhere
+// else, on Unix.
+func oldPIDFilePath() string { return "" }
 
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(pidPath), 0700); err != nil {
-		return fmt.Errorf("failed to create PID file directory: %w", err)
-	}
-
-	pid := os.Getpid()
-	f, err := os.OpenFile(pidPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+// lockExclusive takes an exclusive lock on the file at path, creating it, and
+// holds it until unlock is called; see lockFile.
+func lockExclusive(path string) (unlock func(), err error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
-		if !os.IsExist(err) {
-			return fmt.Errorf("failed to write PID file: %w", err)
-		}
-		// Someone holds the file. If the process behind it is gone,
-		// IsDaemonRunning removes the file and we retry once.
-		if running := IsDaemonRunning(); running != 0 {
-			return fmt.Errorf("daemon is already running (PID %d)", running)
-		}
-		// Also covers an empty or unparseable file, which IsDaemonRunning
-		// reports as "not running" without removing.
-		os.Remove(pidPath)
-		f, err = os.OpenFile(pidPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if err != nil {
-			return fmt.Errorf("failed to write PID file: %w", err)
+		return nil, err
+	}
+	for {
+		if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != syscall.EINTR {
+			break
 		}
 	}
-
-	if _, err := f.WriteString(strconv.Itoa(pid)); err != nil {
+	if err != nil {
 		f.Close()
-		os.Remove(pidPath)
-		return fmt.Errorf("failed to write PID file: %w", err)
+		return nil, err
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(pidPath)
-		return fmt.Errorf("failed to write PID file: %w", err)
-	}
-
-	return nil
-}
-
-// RemovePIDFile removes the PID file.
-func RemovePIDFile() {
-	os.Remove(PIDFilePath())
-}
-
-// ReadPIDFile reads the PID from the PID file.
-// Returns 0 if the file doesn't exist or is invalid.
-func ReadPIDFile() int {
-	data, err := os.ReadFile(PIDFilePath())
-	if err != nil {
-		return 0
-	}
-
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		return 0
-	}
-
-	return pid
-}
-
-// IsDaemonRunning checks if a daemon process is already running.
-// Returns the PID if running, 0 if not.
-func IsDaemonRunning() int {
-	pid := ReadPIDFile()
-	if pid == 0 {
-		return 0
-	}
-
-	// Check if process exists
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return 0
-	}
-
-	// On Unix, FindProcess always succeeds. Use kill(0) to check if it exists.
-	err = process.Signal(syscall.Signal(0))
-	if err != nil {
-		// Process doesn't exist - clean up stale PID file
-		RemovePIDFile()
-		return 0
-	}
-
-	return pid
+	return func() { f.Close() }, nil
 }
 
 // Daemonize re-executes the current process as a daemon.

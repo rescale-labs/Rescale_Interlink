@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/daemon"
@@ -30,6 +31,29 @@ import (
 // finish cleaning up before exiting anyway. Stop() cancels in-flight transfers
 // and saves state; a hung transfer must not keep the process alive forever.
 const daemonStopGrace = 5 * time.Second
+
+// daemonStopWait bounds how long 'daemon stop' waits for the daemon process to
+// exit. The daemon gives its own cleanup daemonStopGrace and then exits anyway,
+// so twice that leaves room for its IPC server to close, its PID file to go and
+// the process to end on a busy machine, while a daemon that is stuck is still
+// reported within seconds. A variable only so tests need not wait it out.
+var daemonStopWait = 2 * daemonStopGrace
+
+// daemonExited reports whether the daemon process with this PID has exited,
+// which only the system saying so establishes: the probe the upload lock judges
+// its owners with. A variable so a test can decide it.
+var daemonExited = func(pid int) bool {
+	exited, _ := state.ProcessExited(pid)
+	return exited
+}
+
+// daemonize starts the daemon as a detached process and exits this one. A
+// variable so a test can see whether 'daemon run --background' would start one.
+var daemonize = daemon.Daemonize
+
+// startupLog is the Windows daemon's early log; elsewhere it writes nothing. A
+// variable so a test can see when 'daemon run' would write it.
+var startupLog = daemon.WriteStartupLog
 
 // daemonNotifyFunc adapts the rate limit notice hook to the daemon's logger,
 // which reaches the log file and the IPC log buffer. Levels come from the
@@ -124,7 +148,9 @@ Settings are read from daemon.conf at startup. CLI flags override
 config file values. If no config file exists, defaults are used.
 
 By default, the daemon runs in foreground mode. Use --background to
-detach from the terminal and run as a background process.
+detach from the terminal and run as a background process. Only one
+daemon runs at a time, in any mode: while one is running, 'daemon run'
+refuses to start and names its PID.
 
 When --ipc is enabled, the daemon listens for control commands via
 Unix socket (Mac/Linux) or named pipe (Windows), allowing other
@@ -149,23 +175,21 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Plan 2 path migrations (idempotent). Must run before any file
-			// I/O that reads credentials / state / logs.
-			config.RunStartupMigrations(nil, config.ScopeCurrentUser, nil)
-
 			// Early startup logging for debugging Windows subprocess launch issues.
 			// This writes to a file BEFORE the logger is fully initialized.
-			if runtime.GOOS == "windows" {
-				daemon.WriteStartupLog("=== DAEMON CLI STARTING ===")
-				daemon.WriteStartupLog("PID: %d", os.Getpid())
-				daemon.WriteStartupLog("Args: %v", redactArgs(os.Args))
+			logStartup := func() {
+				startupLog("=== DAEMON CLI STARTING ===")
+				startupLog("PID: %d", os.Getpid())
+				startupLog("Args: %v", redactArgs(os.Args))
 				if wd, err := os.Getwd(); err == nil {
-					daemon.WriteStartupLog("Working directory: %s", wd)
+					startupLog("Working directory: %s", wd)
 				}
-
+			}
+			if runtime.GOOS == "windows" {
 				// Detect Windows service context and delegate to service handler.
 				// When SCM starts `daemon run`, we need to register with SCM properly.
 				if isService, err := service.IsWindowsService(); err == nil && isService {
+					logStartup()
 					daemon.WriteStartupLog("Detected Windows service context, starting multi-user service")
 					svcLogger := logging.NewLogger("service", nil)
 					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
@@ -173,11 +197,47 @@ Examples:
 
 				// Only blocks when service is RUNNING (not just installed)
 				if blocked, reason := service.ShouldBlockSubprocess(); blocked {
-					daemon.WriteStartupLog("Blocking subprocess: %s", reason)
 					fmt.Println(reason)
 					return fmt.Errorf("cannot start daemon: %s", reason)
 				}
 			}
+
+			// One daemon at a time, in every mode: two would poll the same jobs
+			// into the same folder. The process that will run the daemon claims
+			// the PID file before any other work, migrations, startup log and
+			// config reads included, so one that is refused has changed nothing.
+			// The parent of a background daemon claims nothing, so it checks first.
+			if err := daemon.CheckPIDFile(); err != nil {
+				return err
+			}
+			sigChan := make(chan os.Signal, 1)
+			if !background || daemon.IsDaemonChild() {
+				// Catch the signals that end a daemon before claiming the PID file:
+				// by default they exit without running deferred calls, leaving it.
+				signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+				defer signal.Stop(sigChan)
+				if !signal.Ignored(syscall.SIGHUP) { // a closed terminal; nohup keeps it ignored
+					signal.Notify(sigChan, syscall.SIGHUP)
+				}
+				// A closed terminal also takes the reader of 'daemon run | tee' with
+				// it, and the next log line would then kill the daemon without any
+				// cleanup; ignored, the write fails instead. Catching SIGPIPE would
+				// stop the daemon whenever an IPC client hung up.
+				signal.Ignore(syscall.SIGPIPE)
+
+				// The claim is how 'daemon status', 'daemon stop' and the GUI find
+				// the daemon, and a foreground run without one was invisible to
+				// them. It is exclusive, so a live daemon's file is never taken over.
+				if err := daemon.WritePIDFile(); err != nil {
+					return fmt.Errorf("failed to write PID file: %w", err)
+				}
+				defer daemon.RemovePIDFile()
+			}
+
+			// Plan 2 path migrations (idempotent). Must run before any file
+			// I/O that reads credentials / state / logs.
+			config.RunStartupMigrations(nil, config.ScopeCurrentUser, nil)
+			logStartup()
 
 			// Create daemon-specific logger with log buffer for IPC streaming.
 			// The logWriter captures logs for both console output and IPC retrieval.
@@ -234,13 +294,6 @@ Examples:
 				excludeNames = daemonConf.GetExcludePatterns()
 			}
 
-			// Check if daemon is already running (when background mode requested)
-			if background || enableIPC {
-				if pid := daemon.IsDaemonRunning(); pid != 0 {
-					return fmt.Errorf("daemon is already running (PID %d)", pid)
-				}
-			}
-
 			// Handle background mode (Unix only)
 			if background {
 				if runtime.GOOS == "windows" {
@@ -275,7 +328,7 @@ Examples:
 					}
 
 					// Daemonize (this will exit the parent)
-					return daemon.Daemonize(childArgs)
+					return daemonize(childArgs)
 				}
 			}
 
@@ -348,19 +401,9 @@ Examples:
 				return fmt.Errorf("failed to create daemon: %w", err)
 			}
 
-			// Write PID file (for background mode or IPC mode)
-			if background || enableIPC {
-				if err := daemon.WritePIDFile(); err != nil {
-					return fmt.Errorf("failed to write PID file: %w", err)
-				}
-				defer daemon.RemovePIDFile()
-			}
-
 			// Set up signal handling
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			sigChan := make(chan os.Signal, 1)
-			signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 			// Shutdown function for IPC handler. Guarded: a second shutdown
 			// request (double-click in the GUI, GUI plus CLI) would otherwise
@@ -409,6 +452,8 @@ Examples:
 					logger.Info().Str("signal", sig.String()).Msg("Received shutdown signal")
 				case <-shutdownRequested:
 					logger.Info().Msg("Shutdown requested via IPC")
+				case <-ctx.Done(): // the command has returned
+					return
 				}
 				cancel()
 				d.Stop()
@@ -583,7 +628,7 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 			// Check PID file
 			if pid := daemon.IsDaemonRunning(); pid != 0 {
 				fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
-				fmt.Println("The daemon may be running without --ipc flag.")
+				fmt.Println("It may be starting, stopping, or running without --ipc.")
 				fmt.Println()
 			} else {
 				fmt.Println("No running daemon detected.")
@@ -656,8 +701,10 @@ func newDaemonStopCmd() *cobra.Command {
 		Short: "Stop a running daemon via IPC",
 		Long: `Stop a running daemon process.
 
-This sends a shutdown command via IPC to gracefully stop the daemon.
-The daemon must have been started with --ipc flag for this to work.
+This sends a shutdown command via IPC to gracefully stop the daemon,
+then waits up to 10 seconds for the daemon process to exit, and fails
+if it has not. The daemon must have been started with --ipc flag for
+this to work.
 
 On Windows, behavior depends on mode:
   - Subprocess mode: Shuts down the daemon via IPC (like macOS/Linux)
@@ -707,26 +754,29 @@ On Windows, behavior depends on mode:
 				return nil
 			}
 
+			name := "daemon"
 			if pid != 0 {
-				fmt.Printf("Stopping daemon (PID %d)...\n", pid)
-			} else {
-				fmt.Println("Stopping daemon...")
+				name = fmt.Sprintf("daemon (PID %d)", pid)
 			}
+			fmt.Printf("Stopping %s...\n", name)
 
 			if err := client.Shutdown(ctx); err != nil {
 				return fmt.Errorf("failed to send shutdown command: %w", err)
 			}
-
-			// Wait for daemon to exit
-			for i := 0; i < 10; i++ {
-				time.Sleep(500 * time.Millisecond)
-				if !client.IsServiceRunning(ctx) {
-					fmt.Println("Daemon stopped successfully.")
-					return nil
-				}
+			if pid == 0 {
+				fmt.Println("Shutdown requested. No PID file names the daemon's process, so its exit cannot be confirmed.")
+				return nil
 			}
 
-			fmt.Println("Shutdown command sent. Daemon may still be cleaning up.")
+			// Wait for the process to exit. IPC going quiet and the PID file
+			// going away both come before that, and a 'daemon run' started in
+			// between still finds the old daemon.
+			for deadline := time.Now().Add(daemonStopWait); !daemonExited(pid); time.Sleep(250 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					return fmt.Errorf("%s did not exit within %s of the shutdown request; check with 'rescale-int daemon status'", name, daemonStopWait)
+				}
+			}
+			fmt.Println("Daemon stopped successfully.")
 			return nil
 		},
 	}
@@ -747,7 +797,8 @@ func newDaemonListCmd() *cobra.Command {
 		Short: "List downloaded or failed jobs",
 		Long: `List jobs that have been downloaded by the daemon.
 
-Use --failed to show failed downloads instead.`,
+Use --failed to show failed downloads instead, with when the daemon
+will try each one again.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Load state
 			state := daemon.NewState(stateFile)
@@ -763,10 +814,12 @@ Use --failed to show failed downloads instead.`,
 				}
 
 				fmt.Printf("Failed Downloads (%d):\n\n", len(failed))
+				now := time.Now()
 				for i, job := range failed {
 					fmt.Printf("%d. %s (%s)\n", i+1, job.JobName, job.JobID)
 					fmt.Printf("   Error: %s\n", job.Error)
-					fmt.Printf("   Time: %s\n\n", job.DownloadedAt.Format(time.RFC3339))
+					fmt.Printf("   Time: %s\n", job.DownloadedAt.Format(time.RFC3339))
+					fmt.Printf("   Next attempt: %s\n\n", nextAttemptText(job, now))
 				}
 			} else {
 				downloads := state.GetRecentDownloads(limit)
@@ -796,6 +849,20 @@ Use --failed to show failed downloads instead.`,
 	return cmd
 }
 
+// nextAttemptText says when the daemon will try a failed job again, or that it
+// has stopped trying and how to release the job.
+func nextAttemptText(job *daemon.DownloadedJob, now time.Time) string {
+	at, gaveUp := job.NextAttempt()
+	switch {
+	case gaveUp:
+		return fmt.Sprintf("none, %d attempts failed; run 'rescale-int daemon retry --job-id %s' to try again", job.RetryCount, job.JobID)
+	case now.Before(at):
+		return fmt.Sprintf("after %s (%d of %d attempts failed)", at.Format(time.RFC3339), job.RetryCount, daemon.MaxDownloadAttempts)
+	default:
+		return fmt.Sprintf("at the next poll (%d of %d attempts failed)", job.RetryCount, daemon.MaxDownloadAttempts)
+	}
+}
+
 // newDaemonRetryCmd creates the 'daemon retry' command.
 func newDaemonRetryCmd() *cobra.Command {
 	var (
@@ -809,8 +876,13 @@ func newDaemonRetryCmd() *cobra.Command {
 		Short: "Retry failed job downloads",
 		Long: `Mark failed jobs for retry on the next poll cycle.
 
+The daemon retries a failed download by itself, waiting 5, 10, 20 and
+then 30 minutes after successive failed attempts. After five failed
+attempts it stops trying the job until the job is marked for retry here.
+
 This clears the failed status so the daemon will attempt to download
-the job again during its next poll.
+the job again during its next poll, whether it is running now or
+starts later.
 
 Examples:
   # Retry all failed jobs
@@ -823,37 +895,28 @@ Examples:
 				return fmt.Errorf("either --all or --job-id must be specified")
 			}
 
-			// Load state
-			state := daemon.NewState(stateFile)
-			if err := state.Load(); err != nil {
-				return fmt.Errorf("failed to load state: %w", err)
+			if retryAll {
+				jobIDs = nil // every failed job
+			}
+			failed, err := daemon.NewState(stateFile).Retry(jobIDs...)
+			if err != nil {
+				return fmt.Errorf("failed to save state: %w", err)
 			}
 
 			if retryAll {
-				failed := state.GetFailedJobs()
 				if len(failed) == 0 {
 					fmt.Println("No failed downloads to retry.")
 					return nil
 				}
 
 				for _, job := range failed {
-					state.ClearFailed(job.JobID)
 					fmt.Printf("Marked for retry: %s (%s)\n", job.JobName, job.JobID)
-				}
-
-				if err := state.Save(); err != nil {
-					return fmt.Errorf("failed to save state: %w", err)
 				}
 
 				fmt.Printf("\n%d job(s) marked for retry.\n", len(failed))
 			} else {
 				for _, jobID := range jobIDs {
-					state.ClearFailed(jobID)
 					fmt.Printf("Marked for retry: %s\n", jobID)
-				}
-
-				if err := state.Save(); err != nil {
-					return fmt.Errorf("failed to save state: %w", err)
 				}
 
 				fmt.Printf("\n%d job(s) marked for retry.\n", len(jobIDs))

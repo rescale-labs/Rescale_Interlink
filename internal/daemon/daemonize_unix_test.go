@@ -4,48 +4,34 @@ package daemon
 
 import (
 	"os"
-	"strconv"
 	"testing"
 )
 
-// The PID file is the only thing stopping two daemons from polling the same jobs
-// into the same folder, so claiming it has to be exclusive — a plain write let
-// both racers succeed. Stale or corrupt files must still be recoverable, or a
-// crash would lock the daemon out permanently.
-func TestWritePIDFileIsExclusive(t *testing.T) {
-	// PIDFilePath resolves under the home directory; redirect it so the test
-	// cannot touch a real daemon's PID file.
-	t.Setenv("HOME", t.TempDir())
-	pidPath := PIDFilePath()
-
-	if err := WritePIDFile(); err != nil {
-		t.Fatalf("first WritePIDFile failed: %v", err)
+// A claim takes nothing over without evidence that no daemon runs. A probe the
+// system refuses is no such evidence: kill answers EPERM for a live process of
+// another user, and taking that for "gone" deleted a running daemon's PID file,
+// so a second daemon started. Nor is a PID file this process cannot read.
+func TestWritePIDFile_KeepsAClaimItCannotDisprove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root may signal every process and read every file")
 	}
-	t.Cleanup(RemovePIDFile)
+	isolateHome(t)
+	writeFile(t, PIDFilePath(), "1") // init: running, and not ours
 
-	data, err := os.ReadFile(pidPath)
-	if err != nil {
-		t.Fatalf("reading PID file: %v", err)
+	if got := IsDaemonRunning(); got != 1 {
+		t.Errorf("a PID file naming PID 1 reads as daemon %d, want 1", got)
 	}
-	if got, _ := strconv.Atoi(string(data)); got != os.Getpid() {
-		t.Errorf("PID file contains %q, want %d", data, os.Getpid())
-	}
-
-	// The holder is this process, which is very much alive.
 	if err := WritePIDFile(); err == nil {
-		t.Error("second WritePIDFile succeeded; the claim is not exclusive")
+		t.Error("a daemon claimed the PID file of PID 1, which is running")
 	}
-
-	// A corrupt file reads as "no daemon" and must not lock the daemon out.
-	if err := os.WriteFile(pidPath, []byte(""), 0o600); err != nil {
-		t.Fatalf("truncating PID file: %v", err)
+	RemovePIDFile() // a daemon's exit removes its own claim only
+	if got := ReadPIDFile(); got != 1 {
+		t.Errorf("the PID file names %d now, want 1", got)
 	}
-	if err := WritePIDFile(); err != nil {
-		t.Errorf("WritePIDFile over a corrupt PID file failed: %v", err)
+	if err := os.Chmod(PIDFilePath(), 0); err != nil {
+		t.Fatal(err)
 	}
-
-	RemovePIDFile()
-	if err := WritePIDFile(); err != nil {
-		t.Errorf("WritePIDFile after RemovePIDFile failed: %v", err)
+	if err := WritePIDFile(); err == nil {
+		t.Error("a daemon claimed a PID file it could not read, which names PID 1")
 	}
 }

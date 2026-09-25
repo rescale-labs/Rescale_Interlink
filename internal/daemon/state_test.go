@@ -2,13 +2,18 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/logging"
 )
 
 // ageLastAttempt rewinds a job's last-attempt stamp, which is what pushes it
@@ -21,7 +26,7 @@ func ageLastAttempt(s *State, jobID string, d time.Duration) {
 
 // TestState_FailureLifecycle drives one job through a sequence of MarkFailed /
 // MarkDownloaded / ClearFailed calls and then reads the whole verdict: the
-// stored entry, the attempt count, and whether IsDownloaded suppresses the job.
+// stored entry, the attempt count, and whether InRetryBackoff holds the job.
 // Every row asserts all four, so the retry counter, the recorded error, the
 // backoff window and the give-up rule are pinned together.
 func TestState_FailureLifecycle(t *testing.T) {
@@ -34,16 +39,16 @@ func TestState_FailureLifecycle(t *testing.T) {
 		wantRetry    int    // entry.RetryCount
 		wantError    string // entry.Error
 		wantAttempts int    // AttemptCount
-		wantHeld     bool   // IsDownloaded: downloaded, or suppressed
+		wantHeld     bool   // InRetryBackoff: waiting out a backoff, or given up
 	}{
 		{
 			name:        "no entry",
 			wantMissing: true,
 		},
 		{
-			name:     "clean success",
-			steps:    func(s *State) { s.MarkDownloaded(jobID, "Test Job 1", "/output", 1, 100) },
-			wantHeld: true,
+			// A success is for the 'downloaded' tag to judge, not the backoff.
+			name:  "clean success",
+			steps: func(s *State) { s.MarkDownloaded(jobID, "Test Job 1", "/output", 1, 100) },
 		},
 		{
 			name:         "one failure",
@@ -84,7 +89,6 @@ func TestState_FailureLifecycle(t *testing.T) {
 				s.MarkFailed(jobID, "Test Job", fmt.Errorf("error 2"))
 				s.MarkDownloaded(jobID, "Test Job", "/output", 5, 1024)
 			},
-			wantHeld: true,
 		},
 		{
 			name: "backoff expired after a failure",
@@ -108,7 +112,7 @@ func TestState_FailureLifecycle(t *testing.T) {
 					RetryCount:  1,
 					LastAttempt: time.Now(),
 				}
-				if !s.IsDownloaded(jobID) {
+				if !s.InRetryBackoff(jobID, time.Now()) {
 					t.Error("job1 should be suppressed during backoff period")
 				}
 				ageLastAttempt(s, jobID, 6*time.Minute)
@@ -134,12 +138,14 @@ func TestState_FailureLifecycle(t *testing.T) {
 			wantHeld:     true,
 		},
 		{
-			name: "clearing a failure drops the entry",
+			// The entry stays, with no attempts: that is how a running daemon
+			// tells a release from a copy of the file that predates a failure.
+			name: "clearing a failure starts its attempts again",
 			steps: func(s *State) {
 				s.MarkFailed(jobID, "Test Job 1", fmt.Errorf("error"))
 				s.ClearFailed(jobID)
 			},
-			wantMissing: true,
+			wantError: "error",
 		},
 		{
 			// ClearFailed must not touch a successfully downloaded job.
@@ -148,7 +154,6 @@ func TestState_FailureLifecycle(t *testing.T) {
 				s.MarkDownloaded(jobID, "Test Job 2", "/output", 1, 100)
 				s.ClearFailed(jobID)
 			},
-			wantHeld: true,
 		},
 	}
 
@@ -178,14 +183,15 @@ func TestState_FailureLifecycle(t *testing.T) {
 			if got := state.AttemptCount(jobID); got != tc.wantAttempts {
 				t.Errorf("AttemptCount = %d, want %d", got, tc.wantAttempts)
 			}
-			if got := state.IsDownloaded(jobID); got != tc.wantHeld {
-				t.Errorf("IsDownloaded = %v, want %v", got, tc.wantHeld)
+			if got := state.InRetryBackoff(jobID, time.Now()); got != tc.wantHeld {
+				t.Errorf("InRetryBackoff = %v, want %v", got, tc.wantHeld)
 			}
 		})
 	}
 }
 
 func TestState_LoadAndSave(t *testing.T) {
+	isolateHome(t)
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	// Test 1: Fresh state with no file
@@ -313,6 +319,9 @@ func TestState_LastPoll(t *testing.T) {
 
 // TestState_FilePermissions verifies that state files are created with secure permissions (0600).
 func TestState_FilePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no Unix permission bits: every writable file reports 0666")
+	}
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	state := NewState(stateFile)
@@ -327,7 +336,6 @@ func TestState_FilePermissions(t *testing.T) {
 	}
 
 	// On Unix, permissions should be 0600 (owner read/write only).
-	// On Windows, this test is less meaningful but should still pass.
 	perm := info.Mode().Perm()
 	expectedPerm := os.FileMode(0600)
 
@@ -363,18 +371,15 @@ func TestState_SaveUsesUniqueTempFile(t *testing.T) {
 		}
 	}
 
-	// Concurrent writers must all produce a loadable file.
-	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			if err := state.Save(); err != nil {
-				t.Errorf("concurrent Save %d failed: %v", n, err)
-			}
-		}(i)
+	// A second save made as the first is about to replace the file waits for
+	// the lock, so the two never replace it at once, which Windows can refuse.
+	second := stall(t, &stateFileStep, state.Save)
+	if err := state.Save(); err != nil {
+		t.Fatalf("Save failed: %v", err)
 	}
-	wg.Wait()
+	if err := <-second; err != nil {
+		t.Fatalf("second Save failed: %v", err)
+	}
 
 	reloaded := NewState(stateFile)
 	if err := reloaded.Load(); err != nil {
@@ -423,10 +428,201 @@ func TestState_PruneOnSaveRespectsRetention(t *testing.T) {
 	}
 }
 
+// stall runs other when the code under test next reaches *step, and holds it
+// there until other has finished or is waiting for a file lock, so the order of
+// the two is decided by that lock alone. It returns other's result. Code that
+// takes no lock would hold it there for good, so after 10s it fails the test.
+func stall(t *testing.T, step *func(), other func() error) <-chan error {
+	t.Helper()
+	result := make(chan error, 1)
+	waiting := make(chan struct{}, 1)
+	var stalled atomic.Bool
+	lock, orig := lockFile, *step
+	t.Cleanup(func() { lockFile, *step = lock, orig })
+	lockFile = func(path string) (func(), error) {
+		if stalled.Load() {
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+		}
+		return lock(path)
+	}
+	*step = func() {
+		if !stalled.CompareAndSwap(false, true) {
+			return
+		}
+		go func() { result <- other() }()
+		select {
+		case err := <-result:
+			result <- err
+		case <-waiting:
+		case <-time.After(10 * time.Second):
+			t.Error("the stalled call holds no file lock: the other neither finished nor waited for one in 10s")
+		}
+	}
+	return result
+}
+
+// attemptsOnDisk reads the state file afresh and returns a job's failed attempts.
+func attemptsOnDisk(t *testing.T, stateFile, jobID string) int {
+	t.Helper()
+	s := NewState(stateFile)
+	if err := s.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	return s.AttemptCount(jobID)
+}
+
+// Windows' clock can read the same for two failures of one job. Each still gets
+// a stamp of its own, so a release of the first cannot clear the second when it
+// turns up again: not in the daemon, and not after a save and a reload.
+func TestMarkFailed_StampsEachFailureApartOnAStoppedClock(t *testing.T) {
+	isolateHome(t)
+	stopped, clock := time.Now(), timeNow
+	timeNow = func() time.Time { return stopped }
+	t.Cleanup(func() { timeNow = clock })
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+
+	running := NewState(stateFile)
+	running.MarkFailed("j1", "Job", fmt.Errorf("first"))
+	if err := running.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := NewState(stateFile).Retry("j1"); err != nil {
+		t.Fatalf("Retry: %v", err)
+	}
+	release, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := running.Save(); err != nil { // the daemon takes the release in
+		t.Fatalf("Save: %v", err)
+	}
+	running.MarkFailed("j1", "Job", fmt.Errorf("second"))
+	if err := running.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded := NewState(stateFile)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	for where, s := range map[string]*State{"in the daemon": running, "after a reload": reloaded} {
+		if err := os.WriteFile(stateFile, release, 0o600); err != nil { // the first release again
+			t.Fatal(err)
+		}
+		if err := s.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if got := s.AttemptCount("j1"); got != 1 {
+			t.Errorf("%s, the release of the first failure cleared the second: %d failed attempts, want 1", where, got)
+		}
+	}
+}
+
+// A 1.0.0 daemon tried a failed download at every poll, so the count it left is
+// a count of polls. Such a job gets one attempt rather than being held from the
+// start, the daemon says so, and it does this once: the next count is its own.
+func TestNew_GivesAFailureFromAnEarlierVersionOneAttempt(t *testing.T) {
+	isolateHome(t)
+	cfg := DefaultConfig()
+	cfg.StateFile = filepath.Join(t.TempDir(), "state.json")
+	writeFile(t, cfg.StateFile, `{"version": "1.0.0", "downloaded": {"j1": {"job_id": "j1", "error": "boom", "retry_count": 147}}}`)
+	start := func() (*State, string) {
+		var log bytes.Buffer
+		d, err := New(&config.Config{APIKey: "test-key", APIBaseURL: "https://platform.rescale.com"}, cfg, logging.NewLoggerWithWriter(&log))
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return d.state, log.String()
+	}
+
+	s, log := start()
+	upgraded := "1 failed download(s) recorded by an earlier version will each get one more attempt"
+	if held := s.InRetryBackoff("j1", time.Now()); held || !strings.Contains(log, upgraded) {
+		t.Fatalf("a job that failed 147 polls under 1.0.0: held = %v, log:\n%s", held, log)
+	}
+	s.MarkFailed("j1", "Job", fmt.Errorf("still failing")) // its one attempt
+	if got := s.AttemptCount("j1"); got != MaxDownloadAttempts {
+		t.Fatalf("after its one attempt the job has %d failed attempts, want %d", got, MaxDownloadAttempts)
+	}
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	s, log = start()
+	if held := s.InRetryBackoff("j1", time.Now()); !held || strings.Contains(log, "one more attempt") {
+		t.Errorf("after its one attempt failed: held = %v, log:\n%s", held, log)
+	}
+}
+
+// 'daemon status' and 'daemon list' only read the state file: they create no
+// lock file, and neither move a legacy state file in nor set a corrupt one aside.
+func TestLoad_ChangesNothing(t *testing.T) {
+	home := isolateHome(t)
+	writeFile(t, filepath.Join(home, ".config", "rescale-int", "daemon-state.json"), "{}")
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "state.json")
+	if err := NewState(stateFile).Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) > 0 {
+		t.Errorf("loading the state wrote into its folder: %v", entries)
+	}
+
+	writeFile(t, stateFile, "not JSON")
+	if err := NewState(stateFile).Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 || entries[0].Name() != "state.json" {
+		t.Errorf("loading a corrupt state file changed its folder: %v", entries)
+	}
+}
+
+// The daemon moves a state file from the legacy path into place holding the
+// lock that 'daemon retry' rewrites the file under, having made the folder the
+// lock lives in, so no retry can come in between. A lock it cannot take stops
+// it, with an error naming the lock file.
+func TestNew_MovesALegacyStateFileInUnderTheLock(t *testing.T) {
+	home := isolateHome(t)
+	legacy := filepath.Join(home, ".config", "rescale-int", "daemon-state.json")
+	cfg := DefaultConfig()
+	cfg.StateFile = filepath.Join(home, "state", "daemon-state.json") // no folder yet
+	start := func() error {
+		writeFile(t, legacy, `{"version": "1.1.0"}`)
+		_, err := New(&config.Config{APIKey: "test-key", APIBaseURL: "https://platform.rescale.com"}, cfg, logging.NewLoggerWithWriter(new(bytes.Buffer)))
+		return err
+	}
+
+	var movedUnderLock bool
+	lock := lockFile
+	t.Cleanup(func() { lockFile = lock })
+	lockFile = func(path string) (func(), error) {
+		unlock, err := lock(path)
+		if _, there := os.Stat(legacy); err != nil || there != nil {
+			return unlock, err
+		}
+		return func() { _, gone := os.Stat(legacy); movedUnderLock = gone != nil; unlock() }, nil
+	}
+	if err := start(); err != nil || !movedUnderLock {
+		t.Errorf("the daemon did not move the legacy state file in under the lock: %v", err)
+	}
+
+	os.RemoveAll(filepath.Dir(cfg.StateFile))
+	if err := os.MkdirAll(cfg.StateFile+".lock", 0o700); err != nil { // a lock file no one can open
+		t.Fatal(err)
+	}
+	if err := start(); err == nil || !strings.Contains(err.Error(), cfg.StateFile+".lock") {
+		t.Errorf("a daemon that cannot lock its state file started: %v", err)
+	}
+}
+
 // TestState_PendingTagApply verifies the pending-tag-apply flag lifecycle:
 // mark, clear, list. Also asserts the field round-trips through JSON via
 // omitempty (absent means false).
 func TestState_PendingTagApply(t *testing.T) {
+	isolateHome(t)
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 
 	s := NewState(stateFile)
@@ -477,12 +673,13 @@ func TestState_PendingTagApply(t *testing.T) {
 // with ReasonPendingTagApply, never reach CheckEligibility, and therefore
 // cannot be re-enqueued for download while their tag is still being retried.
 //
-// Note: this test drives the monitor with a local state and mock job list via
-// the state.IsDownloaded path since the monitor's API client isn't mockable
+// Note: this test drives the monitor with a local state and mock job list
+// since the monitor's API client isn't mockable
 // without broader refactoring. The test shape targets the pendingSet code path
 // directly. Full eligibility integration testing is covered by integration
 // suites.
 func TestFindCompletedJobs_RespectsPendingSet(t *testing.T) {
+	isolateHome(t)
 	s := NewState(filepath.Join(t.TempDir(), "state.json"))
 	if err := s.Load(); err != nil {
 		t.Fatalf("Load: %v", err)

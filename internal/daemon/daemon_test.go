@@ -93,6 +93,7 @@ func TestDaemonDefaultConfig(t *testing.T) {
 // TransferService and an EventBus. The test uses a temp state file so New()
 // doesn't mutate the real user's state.
 func TestDaemonConstruction(t *testing.T) {
+	isolateHome(t)
 	appCfg := &config.Config{APIKey: "dummy", APIBaseURL: "https://platform.rescale.com"}
 	daemonCfg := DefaultConfig()
 	daemonCfg.StateFile = t.TempDir() + "/state.json"

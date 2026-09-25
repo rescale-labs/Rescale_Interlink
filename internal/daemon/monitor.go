@@ -117,8 +117,9 @@ const (
 	// failed. Logged.
 	ReasonCompletionTimeAPIError SkipReasonCode = "completion_time_api_error"
 
-	// ReasonInRetryBackoff — job previously failed and is in exponential
-	// backoff; not retried yet. Silent.
+	// ReasonInRetryBackoff — job's download failed and it is waiting out its
+	// backoff, or has used up its attempts until 'daemon retry'. Silent:
+	// 'daemon list --failed' says which.
 	ReasonInRetryBackoff SkipReasonCode = "in_retry_backoff"
 
 	// ReasonPendingTagApply — job's files are on disk but the downloaded
@@ -215,9 +216,9 @@ func (m *Monitor) SetEligibility(cfg *EligibilityConfig) {
 // CheckEligibility checks if a job is eligible for auto-download.
 //
 // Plan 3 tag-first order:
-//   1. `downloaded` tag present  → skip silently (common case every poll)
-//   2. `Auto Download` custom field check (Disabled/empty → silent skip)
-//   3. Conditional tag check (when field is Conditional)
+//  1. `downloaded` tag present  → skip silently (common case every poll)
+//  2. `Auto Download` custom field check (Disabled/empty → silent skip)
+//  3. Conditional tag check (when field is Conditional)
 //
 // The tag check is step 1 so a user who revokes the `downloaded` tag in
 // the Rescale web UI triggers a re-download on the next poll — spec §7.6.
@@ -498,6 +499,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		DownloadOutcomes: make(map[string]int),
 	}
 
+	now := time.Now()
 	for _, job := range jobs {
 		// Check if job status is "Completed"
 		if job.JobStatus.Status != "Completed" {
@@ -539,6 +541,14 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 				Str("job_id", job.ID).
 				Str("job_name", job.Name).
 				Msg("Job filtered out by name filter")
+			continue
+		}
+
+		// A job whose download failed waits out its backoff, and once its
+		// attempts are used up, waits for 'daemon retry'. Checked before the
+		// completion time lookup, so a waiting job costs no API call.
+		if m.state != nil && m.state.InRetryBackoff(job.ID, now) {
+			summary.AddSkip(ReasonInRetryBackoff)
 			continue
 		}
 

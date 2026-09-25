@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/models"
@@ -164,8 +165,8 @@ func TestComputeOutputDir(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := ComputeOutputDir(tt.baseDir, tt.jobID, tt.jobName, tt.useJobName)
-			if result != tt.expected {
-				t.Errorf("ComputeOutputDir() = %q, want %q", result, tt.expected)
+			if want := filepath.FromSlash(tt.expected); result != want {
+				t.Errorf("ComputeOutputDir() = %q, want %q", result, want)
 			}
 		})
 	}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,6 +59,7 @@ func fakeJobFilesServer(t *testing.T, jobID string, files []models.JobFile, tagC
 // client, which rejects non-HTTPS base URLs.
 func newDownloadTestDaemon(t *testing.T, baseURL, downloadDir string, elig *EligibilityConfig) *Daemon {
 	t.Helper()
+	isolateHome(t)
 	appCfg := &config.Config{APIKey: "test-key", APIBaseURL: baseURL, ProxyMode: "no-proxy"}
 	apiClient := api.NewClientForTest(appCfg)
 
@@ -504,5 +506,143 @@ func TestDownloadJob_RehashesAFileThatChangedAfterVerification(t *testing.T) {
 	if outcome := runDownloadJob(t, d, job, 60*time.Second); outcome != OutcomePartialFailure {
 		t.Errorf("second outcome = %q, want %q: the cached verification outlived the file it described",
 			outcome, OutcomePartialFailure)
+	}
+}
+
+// A dispatch the batch's cancellation cuts short never queues the rest of the
+// job's files, so the job must not be recorded or tagged as downloaded: not when
+// every file it had reached was already on disk, not when the files it had
+// queued finished before the cancel, and not when the cancel came between
+// handing the last file over and its registration, which then never happens,
+// even when it was the only one. A user's cancel is a failed attempt that says
+// so; a stop is not counted.
+func TestDownloadJob_CutShortDispatchIsNotADownload(t *testing.T) {
+	const jobID = "cutshort"
+	payload := []byte("abc")
+	present := models.JobFile{ID: "p", Name: "present.txt", DecryptedSize: 3, FileChecksums: sha512Of(t, payload)}
+	queued := models.JobFile{ID: "a", Name: "a.txt", DecryptedSize: 1} // finishes before the cancel
+	missing := models.JobFile{ID: "b", Name: "b.txt", DecryptedSize: 1}
+
+	for _, tc := range []struct {
+		name  string
+		files []models.JobFile
+		stop  bool // the daemon stops, where otherwise the user cancels the batch
+	}{
+		{"nothing queued yet", []models.JobFile{present, missing}, false},
+		{"after the queued file finished", []models.JobFile{queued, present, missing}, false},
+		{"the daemon stops", []models.JobFile{present, missing}, true},
+		{"after the last file was handed over", []models.JobFile{queued, missing}, false},
+		{"after the only file was handed over", []models.JobFile{missing}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tagCalls := 0
+			fake := fakeJobFilesServer(t, jobID, tc.files, &tagCalls)
+			inFlight := make(chan struct{})
+			var once sync.Once
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.URL.Path, "/api/v3/files/") {
+					once.Do(func() { close(inFlight) }) // a.txt's download, running until the cancel
+					<-r.Context().Done()
+					return
+				}
+				fake.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(srv.Close)
+
+			dir := t.TempDir()
+			d := newDownloadTestDaemon(t, srv.URL, dir, &EligibilityConfig{LookbackDays: 7})
+			outDir := ComputeOutputDir(dir, jobID, "job", false)
+			if err := os.MkdirAll(outDir, 0o755); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(outDir, present.Name), payload, 0o644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+
+			ctx, stopDaemon := context.WithCancel(context.Background())
+			defer stopDaemon()
+			cancel := func() {
+				if tc.files[0].ID == queued.ID {
+					<-inFlight
+					d.Queue().Complete(d.Queue().GetTasks()[0].ID) // stands in for a.txt finishing
+				}
+				id := d.Queue().GetAllBatchStats()[0].BatchID
+				switch {
+				case tc.stop:
+					stopDaemon()
+				case tc.files[0].ID == missing.ID:
+					// No task registers. The queue's cancel alone is the moment a wait
+					// finds the batch gone, before CancelBatch adds its row for it.
+					_ = d.Queue().CancelBatch(id)
+				default:
+					_ = d.ts.CancelBatch(id)
+				}
+			}
+			// The cancel comes while the dispatcher checks present.txt, or else
+			// once b.txt is handed over, and registration then never reads it.
+			d.hashLocalFile = func(path string) (string, error) { cancel(); return sha512File(path) }
+			start := startDownloadBatch
+			t.Cleanup(func() { startDownloadBatch = start })
+			startDownloadBatch = func(ts *services.TransferService, ctx context.Context, handed <-chan services.TransferRequest, batchID, label, source string, cancelFn context.CancelFunc) error {
+				read := make(chan services.TransferRequest)
+				go func() {
+					defer close(read)
+					for req := range handed {
+						if req.Name == missing.Name {
+							cancel()
+							continue
+						}
+						read <- req
+					}
+				}()
+				return start(ts, ctx, read, batchID, label, source, cancelFn)
+			}
+
+			outcome := d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"})
+			entry := d.state.Downloaded[jobID]
+			if outcome == OutcomeDownloaded || tagCalls != 0 || entry != nil && (entry.Error == "" || entry.PendingTagApply) {
+				t.Fatalf("a cut-short dispatch was taken for a download: outcome %s, state %+v, tag calls %d",
+					outcome, entry, tagCalls)
+			}
+			if tc.stop && entry != nil {
+				t.Errorf("a stop that cut the dispatch short was counted as a failed attempt: %+v", entry)
+			}
+			if !tc.stop && (entry == nil || !strings.HasPrefix(entry.Error, "cancelled before all")) {
+				t.Errorf("recorded %+v, want an error saying the batch was cancelled before all files were queued", entry)
+			}
+		})
+	}
+}
+
+// A file whose folder cannot be made, or whose name is refused, is neither
+// verified nor downloaded, so its job is not downloaded, however many of its
+// other files are on disk: the attempt fails, and no tag goes on. The failure
+// leads with why, and counts every file of the job, the file left out included.
+func TestDownloadJob_AFileItCannotPlaceIsNotADownload(t *testing.T) {
+	payload := []byte("abc")
+	present := models.JobFile{ID: "p", Name: "present.txt", DecryptedSize: 3, FileChecksums: sha512Of(t, payload)}
+	refused := models.JobFile{ID: "r", Name: "../escape.txt", DecryptedSize: 1}
+	for _, tc := range []struct {
+		jobID string
+		files []models.JobFile
+		want  string // how the failure begins; nothing is appended to it
+	}{
+		{"nofolder", []models.JobFile{present, {ID: "y", Name: "y.txt", RelativePath: "sub/y.txt", DecryptedSize: 1}}, "1 of 2 files could not be downloaded: mkdir "},
+		{"refused", []models.JobFile{present, refused}, "1 of 2 files could not be downloaded: filename cannot contain path separators: ../escape.txt"},
+		{"refused-alone", []models.JobFile{refused}, "1 of 1 file could not be downloaded: filename cannot contain path separators: ../escape.txt"},
+	} {
+		tagCalls := 0
+		srv := fakeJobFilesServer(t, tc.jobID, tc.files, &tagCalls)
+		dir := t.TempDir()
+		d := newDownloadTestDaemon(t, srv.URL, dir, &EligibilityConfig{LookbackDays: 7})
+		outDir := ComputeOutputDir(dir, tc.jobID, "job", false)
+		writeFile(t, filepath.Join(outDir, "present.txt"), string(payload))
+		writeFile(t, filepath.Join(outDir, "sub"), "") // a file where y.txt's folder belongs
+
+		outcome := runDownloadJob(t, d, &CompletedJob{ID: tc.jobID, Name: "job"}, 20*time.Second)
+		if entry := d.state.Downloaded[tc.jobID]; outcome == OutcomeDownloaded || tagCalls != 0 || d.state.AttemptCount(tc.jobID) != 1 ||
+			entry.PendingTagApply || !strings.HasPrefix(entry.Error, tc.want) || strings.Contains(entry.Error, ";") {
+			t.Errorf("%s: outcome %s, state %+v, tag calls %d: want one failed attempt recorded as %q", tc.jobID, outcome, entry, tagCalls, tc.want)
+		}
 	}
 }
