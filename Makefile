@@ -70,7 +70,7 @@ DETECTED_EXE_SUFFIX := $(if $(filter windows,$(DETECTED_GOOS)),.exe,)
 build:
 	@echo "Building FIPS 140-3 compliant binary for $(DETECTED_GOOS)/$(DETECTED_GOARCH)..."
 	@mkdir -p $(DETECTED_BUILD_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) go build -trimpath $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) ./cmd/rescale-int
 	@echo "✅ Built: $(DETECTED_BUILD_DIR)/$(BINARY_NAME)$(DETECTED_EXE_SUFFIX) [FIPS 140-3]"
 
 # Build macOS Apple Silicon binary (FIPS 140-3 compliant)
@@ -78,7 +78,7 @@ build:
 build-darwin-arm64:
 	@echo "Building macOS Apple Silicon binary [FIPS 140-3]..."
 	@mkdir -p $(DARWIN_ARM64_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DARWIN_ARM64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build -trimpath $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DARWIN_ARM64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(DARWIN_ARM64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
 # Build macOS Intel binary (FIPS 140-3 compliant)
@@ -86,7 +86,7 @@ build-darwin-arm64:
 build-darwin-amd64:
 	@echo "Building macOS Intel binary [FIPS 140-3]..."
 	@mkdir -p $(DARWIN_AMD64_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=amd64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DARWIN_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=amd64 go build -trimpath $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(DARWIN_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(DARWIN_AMD64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
 # Build Linux binary (FIPS 140-3 compliant)
@@ -94,7 +94,7 @@ build-darwin-amd64:
 build-linux-amd64:
 	@echo "Building Linux AMD64 binary [FIPS 140-3]..."
 	@mkdir -p $(LINUX_AMD64_DIR)
-	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(LINUX_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build -trimpath $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(LINUX_AMD64_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(LINUX_AMD64_DIR)/$(BINARY_NAME) [FIPS 140-3]"
 
 # Build Windows binary - standard (smaller, requires GPU)
@@ -102,7 +102,7 @@ build-linux-amd64:
 build-windows-amd64:
 	@echo "Building Windows AMD64 binary [FIPS 140-3] (standard, no Mesa)..."
 	@mkdir -p $(WINDOWS_AMD64_DIR)
-	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -trimpath $(FIPS_BUILD_TAGS) $(LDFLAGS) -o $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
 	@echo "✅ Built: $(WINDOWS_AMD64_DIR)/$(BINARY_NAME).exe [FIPS 140-3] (requires GPU)"
 
 # Build Windows binary with Mesa (larger, software rendering for VMs/RDP)
@@ -111,7 +111,7 @@ build-windows-amd64:
 build-windows-amd64-mesa:
 	@echo "Building Windows AMD64 binary [FIPS 140-3] (with Mesa software rendering)..."
 	@mkdir -p $(WINDOWS_AMD64_MESA_DIR)
-	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(FIPS_MESA_BUILD_TAGS) $(LDFLAGS) -o $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -trimpath $(FIPS_MESA_BUILD_TAGS) $(LDFLAGS) -o $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
 	@echo "Copying manifest and .local file for DLL redirection..."
 	@cp cmd/rescale-int/rescale-int.manifest $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.manifest 2>/dev/null || true
 	@cp cmd/rescale-int/rescale-int.exe.local $(WINDOWS_AMD64_MESA_DIR)/$(BINARY_NAME).exe.local 2>/dev/null || true
@@ -130,21 +130,21 @@ build-windows-amd64-mesa:
 build-internal-darwin-arm64:
 	@echo "Building macOS Apple Silicon INTERNAL binary [FIPS 140-3] (tags=fips,internal)..."
 	@mkdir -p $(DARWIN_ARM64_INTERNAL_DIR)
-	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(CGO_LDFLAGS_MACOS) $(GOFIPS) GOOS=darwin GOARCH=arm64 go build -trimpath $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(DARWIN_ARM64_INTERNAL_DIR)/$(BINARY_NAME) [FIPS 140-3, INTERNAL]"
 
 .PHONY: build-internal-linux-amd64
 build-internal-linux-amd64:
 	@echo "Building Linux AMD64 INTERNAL binary [FIPS 140-3] (tags=fips,internal)..."
 	@mkdir -p $(LINUX_AMD64_INTERNAL_DIR)
-	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
+	@$(GOFIPS) GOOS=linux GOARCH=amd64 go build -trimpath $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) ./cmd/rescale-int
 	@echo "✅ Built: $(LINUX_AMD64_INTERNAL_DIR)/$(BINARY_NAME) [FIPS 140-3, INTERNAL]"
 
 .PHONY: build-internal-windows-amd64
 build-internal-windows-amd64:
 	@echo "Building Windows AMD64 INTERNAL binary [FIPS 140-3] (tags=fips,internal)..."
 	@mkdir -p $(WINDOWS_AMD64_INTERNAL_DIR)
-	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
+	@$(GOFIPS) GOOS=windows GOARCH=amd64 go build -trimpath $(FIPS_INTERNAL_BUILD_TAGS) $(LDFLAGS_INTERNAL) -o $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe ./cmd/rescale-int
 	@echo "✅ Built: $(WINDOWS_AMD64_INTERNAL_DIR)/$(BINARY_NAME).exe [FIPS 140-3, INTERNAL]"
 
 # Build all Windows variants

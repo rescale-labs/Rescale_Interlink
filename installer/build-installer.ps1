@@ -41,12 +41,12 @@ $env:CGO_ENABLED = "1"
 Push-Location $ProjectRoot
 try {
     # Build main CLI/GUI
-    go build -tags fips -ldflags "-s -w" -o "$BuildDir\rescale-int.exe" .\cmd\rescale-int
+    go build -trimpath -tags fips -ldflags "-s -w" -o "$BuildDir\rescale-int.exe" .\cmd\rescale-int
     if ($LASTEXITCODE -ne 0) { throw "Failed to build rescale-int.exe" }
 
     # Build tray companion
     Write-Host "  Building rescale-int-tray.exe..."
-    go build -tags fips -ldflags "-s -w -H=windowsgui" -o "$BuildDir\rescale-int-tray.exe" .\cmd\rescale-int-tray
+    go build -trimpath -tags fips -ldflags "-s -w -H=windowsgui" -o "$BuildDir\rescale-int-tray.exe" .\cmd\rescale-int-tray
     if ($LASTEXITCODE -ne 0) { throw "Failed to build rescale-int-tray.exe" }
 }
 finally {

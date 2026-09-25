@@ -6,45 +6,45 @@ import "testing"
 
 func TestMatchesWindowsUsername(t *testing.T) {
 	tests := []struct {
-		name         string
-		ipcUsername  string
-		guiUsername  string
-		wantMatch    bool
+		name        string
+		ipcUsername string
+		guiUsername string
+		wantMatch   bool
 	}{
 		{
 			name:        "exact match",
-			ipcUsername: "Peter Klein",
-			guiUsername: "Peter Klein",
+			ipcUsername: "Jane Doe",
+			guiUsername: "Jane Doe",
 			wantMatch:   true,
 		},
 		{
 			name:        "case insensitive match",
-			ipcUsername: "peter klein",
-			guiUsername: "Peter Klein",
+			ipcUsername: "jane doe",
+			guiUsername: "Jane Doe",
 			wantMatch:   true,
 		},
 		{
 			name:        "DOMAIN\\user vs user",
-			ipcUsername: "DESKTOP-PC\\Peter Klein",
-			guiUsername: "Peter Klein",
+			ipcUsername: "DESKTOP-PC\\Jane Doe",
+			guiUsername: "Jane Doe",
 			wantMatch:   true,
 		},
 		{
 			name:        "domain\\user case insensitive",
-			ipcUsername: "CORP\\pklein",
-			guiUsername: "PKlein",
+			ipcUsername: "CORP\\jdoe",
+			guiUsername: "JDoe",
 			wantMatch:   true,
 		},
 		{
 			name:        "user@domain UPN format",
-			ipcUsername: "pklein@corp.example.com",
-			guiUsername: "pklein",
+			ipcUsername: "jdoe@corp.example.com",
+			guiUsername: "jdoe",
 			wantMatch:   true,
 		},
 		{
 			name:        "UPN case insensitive",
-			ipcUsername: "PKlein@corp.example.com",
-			guiUsername: "pklein",
+			ipcUsername: "JDoe@corp.example.com",
+			guiUsername: "jdoe",
 			wantMatch:   true,
 		},
 		{
@@ -68,7 +68,7 @@ func TestMatchesWindowsUsername(t *testing.T) {
 		{
 			name:        "empty ipc username",
 			ipcUsername: "",
-			guiUsername: "Peter",
+			guiUsername: "Jane",
 			wantMatch:   false,
 		},
 	}

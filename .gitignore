@@ -1,6 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════
 # WHITELIST-BASED APPROACH
-# See .github/commit-whitelist.md for the definitive list of allowed files
 # ═══════════════════════════════════════════════════════════════════
 #
 # Philosophy: This is a PUBLIC repository
@@ -75,7 +74,6 @@ CLAUDE.md
 scripts/
 
 # Internal development documentation (not for public GitHub)
-FEATURE_SUMMARY.md
 TODO_AND_PROJECT_STATUS.md
 DOCUMENTATION_SUMMARY.md
 
@@ -108,7 +106,7 @@ CHECKPOINT_*.md
 /rescale-int
 CONTINUATION_PLAN*.md
 
-# Local Claude development files (never commit)
+# Local assistant files (never commit)
 scripts/CLAUDE_BUILD_INSTRUCTIONS.md
 **/CLAUDE_BUILD*.md
 
@@ -148,7 +146,7 @@ Terminal_*.txt
 !internal/pur/pattern/tokens.go
 !internal/pur/pattern/tokens_test.go
 
-# Claude Code artifacts that may contain sensitive data
+# Local assistant session files that may contain sensitive data
 *.compact
 conversation_*.json
 

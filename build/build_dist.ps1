@@ -269,7 +269,7 @@ if ($npmExitCode -ne 0) {
 # built after it is stamped vcs.modified=true.
 Write-Host "Building rescale-int.exe (standalone CLI)..."
 $GoExe = "C:\Go\bin\go.exe"
-$cliBuildCmd = "set `"GOFIPS140=certified`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags`" -o `"$BinDir\rescale-int.exe`" .\cmd\rescale-int"
+$cliBuildCmd = "set `"GOFIPS140=certified`"&& `"$GoExe`" build -trimpath -tags fips -ldflags `"$LdFlags`" -o `"$BinDir\rescale-int.exe`" .\cmd\rescale-int"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 cmd /c $cliBuildCmd 2>&1 | Out-Host
@@ -280,7 +280,7 @@ Write-Host "CLI binary built: rescale-int.exe"
 
 # Build tray companion (windowsgui subsystem) - this is a separate simple Go app
 Write-Host "Building rescale-int-tray.exe..."
-$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& `"$GoExe`" build -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
+$trayCmd = "set `"GOFIPS140=certified`"&& set `"GOOS=windows`"&& set `"GOARCH=amd64`"&& `"$GoExe`" build -trimpath -tags fips -ldflags `"$LdFlags -H=windowsgui`" -o `"$BinDir\rescale-int-tray.exe`" .\cmd\rescale-int-tray"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 cmd /c $trayCmd 2>&1 | Out-Host
@@ -294,7 +294,7 @@ Write-Host "Building rescale-int-gui.exe with Wails..."
 $WailsExe = "$env:GOPATH\bin\wails.exe"
 # Wails shells out to `go`; force our FIPS-certified toolchain by putting it
 # first on PATH and pinning GOROOT, so the runner's preinstalled Go can't win.
-$wailsBuildCmd = "set `"GOFIPS140=certified`"&& set `"GOROOT=$GoInstallDir`"&& set `"PATH=$GoInstallDir\bin;%PATH%`"&& `"$WailsExe`" build -tags fips -platform windows/amd64 -ldflags `"$LdFlags`""
+$wailsBuildCmd = "set `"GOFIPS140=certified`"&& set `"GOROOT=$GoInstallDir`"&& set `"PATH=$GoInstallDir\bin;%PATH%`"&& `"$WailsExe`" build -trimpath -tags fips -platform windows/amd64 -ldflags `"$LdFlags`""
 Write-Host "Running: $wailsBuildCmd"
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

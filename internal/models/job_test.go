@@ -137,7 +137,7 @@ func TestJobAutomationRequest_NestedAutomationFormat(t *testing.T) {
 func TestJobRequest_SSHAccessFieldsSerialize(t *testing.T) {
 	req := JobRequest{
 		Name:      "ssh-job",
-		CIDRRule:  "10.0.0.0/8,76.238.240.39/32",
+		CIDRRule:  "10.0.0.0/8,203.0.113.7/32",
 		PublicKey: "ssh-rsa AAAAB3NzaC1yc2E",
 		SSHPort:   22,
 	}
@@ -147,7 +147,7 @@ func TestJobRequest_SSHAccessFieldsSerialize(t *testing.T) {
 	}
 	s := string(data)
 	for _, want := range []string{
-		`"cidrRule":"10.0.0.0/8,76.238.240.39/32"`,
+		`"cidrRule":"10.0.0.0/8,203.0.113.7/32"`,
 		`"publicKey":"ssh-rsa AAAAB3NzaC1yc2E"`,
 		`"sshPort":22`,
 	} {

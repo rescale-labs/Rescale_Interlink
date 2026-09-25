@@ -252,7 +252,7 @@ jobs:
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
           GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
-            go build -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
+            go build -trimpath -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
       - name: Build Wails GUI application
         run: |
@@ -266,7 +266,7 @@ jobs:
           echo "which clang: $(which clang)"
           echo "xcrun clang: $(xcrun --find clang)"
           GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
-            wails build -tags fips -platform darwin/arm64 -ldflags "$LDFLAGS"
+            wails build -trimpath -tags fips -platform darwin/arm64 -ldflags "$LDFLAGS"
 
       - name: Install Apple Certificate
         env:

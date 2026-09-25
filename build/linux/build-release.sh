@@ -175,11 +175,11 @@ LDFLAGS="-s -w -X github.com/rescale/rescale-int/internal/version.Version=${BIN_
 
 # The CLI goes first: 'wails build' rewrites the tracked frontend/wailsjs
 # bindings, and a CLI linked after that is stamped vcs.modified=true.
-GOFIPS140=certified go build -tags fips -ldflags "$LDFLAGS" -o "$BUILDDIR/rescale-int" ./cmd/rescale-int
+GOFIPS140=certified go build -trimpath -tags fips -ldflags "$LDFLAGS" -o "$BUILDDIR/rescale-int" ./cmd/rescale-int
 
 # wails.json's frontend:install is 'npm ci', so the frontend gets exactly what
 # package-lock.json pins.
-GOFIPS140=certified wails build -tags fips -platform linux/amd64 -ldflags "$LDFLAGS"
+GOFIPS140=certified wails build -trimpath -tags fips -platform linux/amd64 -ldflags "$LDFLAGS"
 
 cd "$BUILDDIR"
 
