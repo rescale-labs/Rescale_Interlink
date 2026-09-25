@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -178,4 +180,92 @@ func TestArchiveNamespace(t *testing.T) {
 			t.Errorf("own archive %s still present: %v", mine, err)
 		}
 	})
+}
+
+// A job with nothing to archive (a sweep over shared file IDs, a submit-existing
+// row) has no directory, and Abs("") is the working directory. Staging must not
+// follow it to that directory's parent, which is not the run's to write in: "/"
+// for a GUI launched from Finder. A batch with no archives stages nothing, even
+// a submit-existing one whose rows keep a directory, and a mixed one stages
+// beside the inputs it archives. One whose inputs share only a volume root
+// stages in a private directory of its own in the user's cache, never in the
+// working directory or at the root: the same one for each run of its state
+// file, so that a resume can remove an archive an earlier run left, and none
+// is left empty by a run that fails early. With no cache location it stages
+// in a private temporary directory of its own.
+func TestStagingStaysWithTheArchivedInputs(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission bits are not enforced")
+	}
+	root := namespaceTestRoot(t)
+	shut, work, data := filepath.Join(root, "shut"), filepath.Join(root, "shut", "work"), filepath.Join(root, "data")
+	for _, dir := range []string{work, filepath.Join(data, "run1")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Chmod(shut, 0o500)
+	t.Cleanup(func() { os.Chmod(shut, 0o755) })
+	t.Chdir(work)
+	cache := filepath.Join(root, "cache")
+	for _, env := range []string{"HOME", "XDG_CACHE_HOME", "LocalAppData"} {
+		t.Setenv(env, cache)
+	}
+	shared := models.JobSpec{JobName: "shared", ExtraInputFileIDs: "file1"}
+
+	newBatch(t, []models.JobSpec{shared}, filepath.Join(root, "sweep.csv"))
+	kept := []models.JobSpec{{JobName: "kept", Directory: filepath.Join(shut, "run1")}}
+	if _, err := NewPipeline(&config.Config{}, nil, kept, PipelineOptions{StateFile: filepath.Join(root, "existing.csv"), SkipTarUpload: true}); err != nil {
+		t.Errorf("submit-existing over a directory it cannot write beside: %v", err)
+	}
+	if entries, _ := os.ReadDir(shut); len(entries) != 1 {
+		t.Errorf("a batch with nothing to archive left %d entries in %s, want only the working directory", len(entries), shut)
+	}
+	p := newBatch(t, []models.JobSpec{shared, {JobName: "local", Directory: filepath.Join(data, "run1")}}, filepath.Join(root, "mixed.csv"))
+	if got := filepath.Dir(p.tempDir); got != data {
+		t.Errorf("a mixed batch stages in %s, want beside its archived inputs in %s", got, data)
+	}
+	vol := filepath.VolumeName(root) + string(filepath.Separator)
+	apart := []models.JobSpec{{JobName: "a", Directory: filepath.Join(vol, "data")}, {JobName: "b", Directory: filepath.Join(vol, "scratch", "run1")}}
+	p = newBatch(t, apart, filepath.Join(root, "apart.csv"))
+	left := filepath.Join(p.tempDir, "a_deadbeef.tar.gz")
+	info, err := os.Stat(p.tempDir)
+	if err != nil || !strings.HasPrefix(p.tempDir, cache) || !strings.HasPrefix(filepath.Base(p.tempDir), archiveNamespacePrefix) ||
+		runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Errorf("a batch sharing only a volume root stages in %s (%v), want a private directory of its own in %s", p.tempDir, err, cache)
+	}
+	if err := os.WriteFile(left, []byte("tar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := newBatch(t, apart, filepath.Join(root, "apart.csv")).safeRemoveTar(left, "a"); err != nil {
+		t.Errorf("a resumed batch cannot remove the archive its first run left: %v", err)
+	}
+	planted := filepath.Join(filepath.Dir(p.tempDir), archiveNamespace(filepath.Join(root, "planted.csv")))
+	if os.Symlink(data, planted) == nil {
+		if _, err := NewPipeline(&config.Config{}, nil, apart, PipelineOptions{StateFile: filepath.Join(root, "planted.csv")}); err == nil {
+			t.Error("a batch stages through a link planted where its directory belongs")
+		}
+	}
+
+	p = newBatch(t, apart, filepath.Join(root, "early.csv"))
+	p.commonInputFilesRaw = filepath.Join(root, "missing")
+	if err := p.Run(context.Background()); err == nil {
+		t.Fatal("a run with a missing shared file succeeded")
+	}
+	if _, err := os.Stat(p.tempDir); !os.IsNotExist(err) {
+		t.Errorf("a run that failed before its workers left %s behind", p.tempDir)
+	}
+
+	tmp := filepath.Join(root, "tmp")
+	if err := os.Mkdir(tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for env, value := range map[string]string{"HOME": "", "XDG_CACHE_HOME": "", "LocalAppData": "", "TMPDIR": tmp, "TMP": tmp} {
+		t.Setenv(env, value)
+	}
+	p = newBatch(t, apart, filepath.Join(root, "nocache.csv"))
+	if info, err := os.Stat(p.tempDir); err != nil || filepath.Dir(p.tempDir) != tmp || !strings.HasPrefix(filepath.Base(p.tempDir), archiveNamespacePrefix) ||
+		runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Errorf("with no cache location a batch stages in %s (%v), want a private directory of its own in %s", p.tempDir, err, tmp)
+	}
 }

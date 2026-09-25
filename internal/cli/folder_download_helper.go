@@ -2,12 +2,13 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
@@ -26,9 +27,29 @@ type DownloadResult struct {
 	FilesDownloaded int
 	FilesSkipped    int
 	FilesFailed     int
+	FilesNotStarted int // a cancel, an Abort, or a failure without --continue-on-error, stopped the download first
 	TotalBytes      int64
 	Errors          []DownloadError
 }
+
+// A folder download's questions at a terminal and its removal of a local file
+// it replaces, as variables so that a test can answer them and make the removal
+// fail on any system.
+var (
+	askFolderDownloadMode = func() (FolderDownloadMode, error) {
+		if !IsTerminal() {
+			return FolderDownloadModePrompt, fmt.Errorf("conflict handling mode required in non-interactive mode: use --skip, --overwrite, or --merge")
+		}
+		return promptFolderDownloadMode()
+	}
+	promptFolderDownloadConflictFn = promptFolderDownloadConflict
+	promptDownloadConflictFn       = promptDownloadConflict
+	removeFile                     = os.Remove
+)
+
+// replaceStep runs when a worker has decided to replace an existing file,
+// before it checks that the download is still going. Only a test sets it.
+var replaceStep = func(context.Context) {}
 
 // DownloadError tracks failed downloads
 type DownloadError struct {
@@ -89,12 +110,8 @@ func DownloadFolderRecursive(
 	}
 
 	if flagsSet == 0 {
-		// No flags specified - check if we can prompt
-		if !IsTerminal() {
-			return nil, fmt.Errorf("conflict handling mode required in non-interactive mode: use --skip, --overwrite, or --merge")
-		}
-		// Prompt user for mode selection
-		mode, err := promptFolderDownloadMode()
+		// No flags specified - prompt user for mode selection
+		mode, err := askFolderDownloadMode()
 		if err != nil {
 			return nil, err
 		}
@@ -154,13 +171,14 @@ func DownloadFolderRecursive(
 	// Check if root output directory already exists
 	if info, err := os.Stat(rootOutputDir); err == nil && info.IsDir() {
 		action, err := folderConflictResolver.Resolve(func() (FolderDownloadConflictAction, error) {
-			return promptFolderDownloadConflict(rootFolderName, rootOutputDir)
+			return promptFolderDownloadConflictFn(rootFolderName, rootOutputDir)
 		})
 		if err != nil {
 			return nil, err
 		}
-		// Cascade folder "All" decision to file conflict mode
-		if action == FolderDownloadSkipAll || action == FolderDownloadMergeAll {
+		// Cascade folder "All" decision to file conflict mode; --overwrite still
+		// replaces the files of a folder it merges into.
+		if !overwriteAll && (action == FolderDownloadSkipAll || action == FolderDownloadMergeAll) {
 			fileConflictResolver.SetMode(DownloadSkipAll)
 		}
 
@@ -197,7 +215,7 @@ func DownloadFolderRecursive(
 		// Check if folder already exists
 		if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
 			action, err := folderConflictResolver.Resolve(func() (FolderDownloadConflictAction, error) {
-				return promptFolderDownloadConflict(folder.Name, localPath)
+				return promptFolderDownloadConflictFn(folder.Name, localPath)
 			})
 			if err != nil {
 				return nil, err
@@ -244,10 +262,15 @@ func DownloadFolderRecursive(
 
 	errChan := make(chan DownloadError, len(allFiles))
 
-	// Create cancelable context for stopping on error when !continueOnError
-	downloadCtx, cancelDownload := context.WithCancel(ctx)
-	defer cancelDownload()
-	var cancelled atomic.Bool
+	// Create cancelable context for stopping on error when !continueOnError.
+	// It is cancelled under downloadMutex, which replace holds.
+	downloadCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cancelDownload := func() {
+		downloadMutex.Lock()
+		cancel()
+		downloadMutex.Unlock()
+	}
 
 	if resourceMgr == nil {
 		panic("DownloadFolderRecursive: resourceMgr is required (use CreateResourceManager())")
@@ -268,17 +291,33 @@ func DownloadFolderRecursive(
 	numWorkers := transfer.ComputedWorkers(items, cfg)
 	fmt.Printf("  Workers: %d (adaptive, based on file sizes)\n", numWorkers)
 
+	// fail counts a file that was not downloaded. Without --continue-on-error
+	// the first one stops the rest of the download, and an Abort always does.
+	fail := func(localPath, fileID string, err error, abort bool) error {
+		errChan <- DownloadError{FilePath: localPath, FileID: fileID, Error: err}
+		if abort || !continueOnError {
+			cancelDownload()
+		}
+		return nil
+	}
+	// replace removes an existing file to download it again, unless the
+	// download has stopped: it checks and removes under the lock the download
+	// is cancelled under, so once one worker stops it no other replaces a file.
+	replace := func(ctx context.Context, localPath string) (stopped bool, err error) {
+		replaceStep(ctx)
+		downloadMutex.Lock()
+		defer downloadMutex.Unlock()
+		if ctx.Err() != nil {
+			return true, nil
+		}
+		return false, removeFile(localPath)
+	}
+
 	batchResult := transfer.RunBatch(downloadCtx, items, cfg, func(ctx context.Context, item folderDownloadWorkItem) error {
 		task := item.task
 
-		// Check if download was cancelled
-		select {
-		case <-ctx.Done():
-			downloadMutex.Lock()
-			result.FilesSkipped++
-			downloadMutex.Unlock()
-			return nil
-		default:
+		if ctx.Err() != nil {
+			return nil // not started
 		}
 
 		localPath := filepath.Join(rootOutputDir, task.RelativePath)
@@ -295,12 +334,36 @@ func DownloadFolderRecursive(
 
 		// Check if file exists and handle conflict
 		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
-			action, err := fileConflictResolver.Resolve(func() (DownloadConflictAction, error) {
-				return promptDownloadConflict(task.Name, localPath)
-			})
-			if err != nil {
-				errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
+			// A conflict it cannot settle has no bar to say why it failed.
+			conflictFailed := func(err error, abort bool) error {
+				fail(localPath, task.FileID, err, abort) // stop before a write that can block
+				fmt.Fprintf(downloadUI.Writer(), "✗ %s: %v\n", task.Name, err)
 				return nil
+			}
+			// Asked under the resolver's lock, where other workers wait to ask:
+			// an answer that stops the download cancels it before they can, and
+			// a worker that finds it stopped asks nothing.
+			action, err := fileConflictResolver.Resolve(func() (DownloadConflictAction, error) {
+				if ctx.Err() != nil {
+					return DownloadSkipOnce, nil
+				}
+				action, err := promptDownloadConflictFn(task.Name, localPath)
+				if err == nil && action == DownloadAbort || err != nil && !continueOnError {
+					cancelDownload()
+				}
+				return action, err
+			})
+			if errors.Is(err, io.EOF) {
+				err = errors.New("no answer (end of input)")
+			}
+			if err != nil {
+				return conflictFailed(err, false)
+			}
+			if action == DownloadAbort {
+				return conflictFailed(errors.New("download aborted by user"), true)
+			}
+			if ctx.Err() != nil {
+				return nil // stopped while it waited: not started, and nothing removed
 			}
 
 			switch action {
@@ -314,26 +377,24 @@ func DownloadFolderRecursive(
 				// success. Same size gate as resolveDownloadConflict and the
 				// auto-download daemon.
 				if !existingFileIsComplete(info, task.Size) {
+					if stopped, rmErr := replace(ctx, localPath); stopped {
+						return nil
+					} else if rmErr != nil {
+						return conflictFailed(fmt.Errorf("failed to remove incomplete existing file: %w", rmErr), false)
+					}
 					fmt.Fprintf(downloadUI.Writer(), "⚠️  Existing file %s is %d bytes, expected %d — re-downloading\n",
 						task.Name, info.Size(), task.Size)
-					if rmErr := os.Remove(localPath); rmErr != nil {
-						errChan <- DownloadError{FilePath: localPath, FileID: task.FileID,
-							Error: fmt.Errorf("failed to remove incomplete existing file: %w", rmErr)}
-						return nil
-					}
 					break // leave the switch and download the file
 				}
 				downloadMutex.Lock()
 				result.FilesSkipped++
 				downloadMutex.Unlock()
 				return nil
-			case DownloadAbort:
-				errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: fmt.Errorf("download aborted by user")}
-				return nil
 			case DownloadOverwriteOnce, DownloadOverwriteAll:
-				if err := os.Remove(localPath); err != nil {
-					errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: fmt.Errorf("failed to remove existing file: %w", err)}
+				if stopped, err := replace(ctx, localPath); stopped {
 					return nil
+				} else if err != nil {
+					return conflictFailed(fmt.Errorf("failed to remove existing file: %w", err), false)
 				}
 			}
 		}
@@ -362,18 +423,7 @@ func DownloadFolderRecursive(
 			if state.DownloadResumeStateExists(localPath) {
 				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume, re-run the download command.\n", filepath.Base(localPath))
 			}
-
-			downloadMutex.Lock()
-			result.FilesFailed++
-			downloadMutex.Unlock()
-			errChan <- DownloadError{FilePath: localPath, FileID: task.FileID, Error: err}
-
-			if !continueOnError {
-				if !cancelled.Swap(true) {
-					cancelDownload()
-				}
-			}
-			return nil
+			return fail(localPath, task.FileID, err, false)
 		}
 
 		logger.Info().
@@ -395,6 +445,10 @@ func DownloadFolderRecursive(
 	for downloadErr := range errChan {
 		result.Errors = append(result.Errors, downloadErr)
 	}
+	// Each error is a file that failed, a conflict it could not settle included,
+	// and RunBatch starts no file once the download is cancelled.
+	result.FilesFailed = len(result.Errors)
+	result.FilesNotStarted = len(allFiles) - result.FilesDownloaded - result.FilesSkipped - result.FilesFailed
 
 	return result, nil
 }

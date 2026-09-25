@@ -112,15 +112,30 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 // StartDaemon starts the daemon process in background mode with IPC enabled.
 // This spawns a new process that survives the GUI closing.
 func (a *App) StartDaemon() error {
-	// Check if already running
-	if pid := daemon.IsDaemonRunning(); pid != 0 {
-		return fmt.Errorf("daemon is already running (PID %d)", pid)
+	// What 'daemon run' would refuse, refused here with its reason: a daemon
+	// that is running, or a PID file that cannot be read.
+	if err := daemon.CheckPIDFile(); err != nil {
+		return err
 	}
 
 	// Ensure config.csv and token file are on disk before the subprocess
 	// reads them.
 	if err := a.ensureAllConfigPersisted(); err != nil {
 		return fmt.Errorf("cannot start daemon: %w", err)
+	}
+
+	// Load daemon config — the daemon run command also reads this file, but we
+	// pass explicit flags so they're visible in the logs
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf, using defaults: %v", err))
+		daemonCfg = config.NewDaemonConfig()
+	}
+	// The detached daemon would refuse it where no one sees why.
+	if n := daemonCfg.Daemon.MaxConcurrent; n > 0 {
+		if err := daemon.CheckMaxConcurrent(n, "max_concurrent in daemon.conf"); err != nil {
+			return fmt.Errorf("cannot start daemon: %w", err)
+		}
 	}
 
 	// Pre-check API key availability before launching daemon
@@ -133,14 +148,6 @@ func (a *App) StartDaemon() error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	// Load daemon config — the daemon run command also reads this file, but we
-	// pass explicit flags so they're visible in the logs
-	daemonCfg, err := config.LoadDaemonConfig("")
-	if err != nil {
-		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf, using defaults: %v", err))
-		daemonCfg = config.NewDaemonConfig()
 	}
 
 	downloadDir := daemonCfg.Daemon.DownloadFolder

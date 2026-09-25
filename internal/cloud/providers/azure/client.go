@@ -338,7 +338,7 @@ func (t sasFreeTransport) Do(req *nethttp.Request) (*nethttp.Response, error) {
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) {
 		urlErr.URL, _, _ = strings.Cut(urlErr.URL, "?")
-		urlErr.Err = redactedError{urlErr.Err}
+		urlErr.Err = reporting.RedactedError(urlErr.Err)
 	}
 	if resp != nil { // a refused redirect returns its response with the error
 		resp.Status = reporting.RedactSecrets(resp.Status)
@@ -353,31 +353,11 @@ func (t sasFreeTransport) Do(req *nethttp.Request) (*nethttp.Response, error) {
 		}
 		page.Close()
 		if readErr != nil {
-			return nil, redactedError{readErr}
+			return nil, reporting.RedactedError(readErr)
 		}
 		resp.Body = io.NopCloser(strings.NewReader(reporting.RedactSecrets(string(body))))
 	}
 	return resp, err
-}
-
-// redactedError is a transport error's cause, or a failed read of a body to
-// redact, without the credentials its text can quote, such as a redirect's
-// Location that net/http could not parse. The retry classifier still sees the
-// cause: errors.Is and As reach it, and it answers Timeout and Temporary, which
-// url.Error asks of it.
-type redactedError struct{ error }
-
-func (e redactedError) Error() string { return reporting.RedactSecrets(e.error.Error()) }
-func (e redactedError) Unwrap() error { return e.error }
-
-func (e redactedError) Timeout() bool {
-	t, ok := e.error.(interface{ Timeout() bool })
-	return ok && t.Timeout()
-}
-
-func (e redactedError) Temporary() bool {
-	t, ok := e.error.(interface{ Temporary() bool })
-	return ok && t.Temporary()
 }
 
 // currentCredentials is the credential the client is built around right now.

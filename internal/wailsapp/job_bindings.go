@@ -1102,7 +1102,7 @@ func (a *App) GetHistoricalJobRows(runID string) ([]JobRowDTO, error) {
 			Status:         fields[6], // Use submit status as overall
 			JobID:          fields[7],
 			Progress:       0,
-			Error:          fields[8],
+			Error:          reporting.RedactSecrets(fields[8]),
 		})
 	}
 

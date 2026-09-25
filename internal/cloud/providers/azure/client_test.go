@@ -330,6 +330,11 @@ func TestTransportErrorsCarryNoSAS(t *testing.T) {
 				return &nethttp.Response{StatusCode: 206, Status: "206 Blocked " + r.URL.String(), Header: nethttp.Header{}, Body: io.NopCloser(blob), Request: r}, nil
 			case strings.HasSuffix(r.URL.Path, "/moved.bin"): // net/http quotes a Location it cannot parse
 				return &nethttp.Response{StatusCode: 307, Header: nethttp.Header{"Location": {"https://example.invalid/%zz?" + r.URL.RawQuery}}, Body: nethttp.NoBody, Request: r}, nil
+			case strings.HasSuffix(r.URL.Path, "/list.bin"): // GetBlockList's answer passes untouched, and the SDK quotes a 206 it does not expect
+				return &nethttp.Response{StatusCode: 206, Header: nethttp.Header{}, Body: io.NopCloser(strings.NewReader("Blocked: " + r.URL.String())), Request: r}, nil
+			case strings.HasSuffix(r.URL.Path, "/size.bin"): // and a Size it cannot parse
+				page := "<BlockList><UncommittedBlocks><Block><Name>YQ==</Name><Size>" + strings.ReplaceAll(r.URL.String(), "&", "&amp;") + "</Size></Block></UncommittedBlocks></BlockList>"
+				return &nethttp.Response{StatusCode: 200, Header: nethttp.Header{}, Body: io.NopCloser(strings.NewReader(page)), Request: r}, nil
 			case strings.HasSuffix(r.URL.Path, "/slow.bin"):
 				return nil, context.DeadlineExceeded
 			case strings.HasSuffix(r.URL.Path, "/cut.bin"): // a refusal whose page times out
@@ -356,6 +361,11 @@ func TestTransportErrorsCarryNoSAS(t *testing.T) {
 	for _, text := range append(notices, streamErr.Error(), sizeErr.Error()) {
 		if strings.Contains(text, "SECRETSIGNATURE") || !strings.Contains(text, "data.bin\": ") {
 			t.Errorf("reported %q, want the blob named without its SAS", text)
+		}
+	}
+	for _, name := range []string{"list.bin", "size.bin"} {
+		if _, err := stagedBlocksExist(ctx, azureClient, "user/job/"+name); err == nil || strings.Contains(err.Error(), "SECRETSIGNATURE") {
+			t.Errorf("%s: checking the staged blocks returned %v, want an error without the SAS", name, err)
 		}
 	}
 	// Only a download's 200 or 206 carries the blob; StageBlock expects 201.

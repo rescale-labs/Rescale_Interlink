@@ -21,6 +21,7 @@ import (
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // isolateDaemonHome gives the test a home directory of its own, so the PID
@@ -102,6 +103,12 @@ func TestDaemonRunRefusesBeforeItChangesAnything(t *testing.T) {
 		{"while a daemon runs", "", nil, "daemon is already running (PID " + running + ")"},
 		{"a PID file it cannot read", "daemon.pid", []string{"--background"}, "failed to read PID file"},
 		{"a PID lock it cannot take", "daemon.pid.lock", nil, "failed to lock PID file"},
+		{"a --max-concurrent below 1", "", []string{"--max-concurrent", "0"}, "--max-concurrent must be between 1 and 20, got 0"},
+		{"a --max-concurrent above 20", "", []string{"--max-concurrent", "21"}, "--max-concurrent must be between 1 and 20, got 21"},
+		// what Windows detection refuses a start for
+		{"a running Windows Service", "", nil, "cannot start daemon: Windows Service is running. Manage via Services.msc"},
+		{"a daemon Windows detection finds", "", nil, "cannot start daemon: Daemon already running (PID 1234)"},
+		{"an occupied daemon pipe", "", nil, "cannot start daemon: Daemon appears to be running but not responding (pipe exists)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateDaemonHome(t)
@@ -118,10 +125,14 @@ func TestDaemonRunRefusesBeforeItChangesAnything(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			origDaemonize, origLog := daemonize, startupLog
+			origDaemonize, origLog, origBlock := daemonize, startupLog, shouldBlockSubprocess
 			daemonize = func([]string) error { t.Error("daemon run --background started a daemon"); return nil }
 			startupLog = func(string, ...interface{}) { t.Error("daemon run wrote its startup log before it refused") }
-			t.Cleanup(func() { daemonize, startupLog = origDaemonize, origLog })
+			shouldBlockSubprocess = func() (bool, string) {
+				reason, found := strings.CutPrefix(tc.want, "cannot start daemon: ")
+				return found, reason
+			}
+			t.Cleanup(func() { daemonize, startupLog, shouldBlockSubprocess = origDaemonize, origLog, origBlock })
 
 			_, err := runDaemonCommand(t, newDaemonRunCmd(), append(tc.args, "--poll-interval", "1s", "--download-dir", t.TempDir())...)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -132,6 +143,44 @@ func TestDaemonRunRefusesBeforeItChangesAnything(t *testing.T) {
 			}
 			if got := daemon.IsDaemonRunning(); tc.folder == "" && strconv.Itoa(got) != running {
 				t.Errorf("after the refused start the PID file names %d, want the running daemon %s", got, running)
+			}
+			if saved := reporting.HandleCLIError(err, "cli", "rescale-int daemon run", ""); tc.folder == "" && saved != "" {
+				t.Errorf("the refused start saved an error report to %s", saved)
+			}
+		})
+	}
+}
+
+// A max_concurrent in daemon.conf that --max-concurrent would refuse is refused
+// by name before a background daemon starts, as in the foreground, and files no
+// report: every writer of daemon.conf keeps it in range, so a hand edit put it
+// there.
+func TestDaemonRunRefusesMaxConcurrentFromDaemonConf(t *testing.T) {
+	for _, args := range [][]string{{"--background"}, nil} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			home := isolateDaemonHome(t)
+			keepDaemonRunGlobals(t)
+			conf, err := config.DefaultDaemonConfigPath()
+			if err != nil {
+				t.Fatal(err)
+			}
+			os.MkdirAll(filepath.Dir(conf), 0o700)
+			if err := os.WriteFile(conf, []byte("[daemon]\nmax_concurrent = 50\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			origDaemonize := daemonize
+			daemonize = func([]string) error { t.Error("daemon run --background started a daemon"); return nil }
+			t.Cleanup(func() { daemonize = origDaemonize })
+
+			_, err = runDaemonCommand(t, newDaemonRunCmd(), append(args, "--download-dir", filepath.Join(home, "downloads"), "--state-file", filepath.Join(home, "state.json"))...)
+			if want := "max_concurrent in daemon.conf must be between 1 and 20, got 50"; err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("daemon run: %v, want an error containing %q", err, want)
+			}
+			if saved := reporting.HandleCLIError(err, "cli", "rescale-int daemon run", ""); saved != "" {
+				t.Errorf("the refused start saved an error report to %s", saved)
+			}
+			if _, err := os.Stat(daemon.PIDFilePath()); !os.IsNotExist(err) {
+				t.Errorf("the refused start left a PID file (stat: %v)", err)
 			}
 		})
 	}
@@ -272,6 +321,9 @@ func TestDaemonStopSaysSoWhenTheDaemonDoesNotExit(t *testing.T) {
 	}
 	if strings.Contains(out, "stopped successfully") {
 		t.Errorf("daemon stop claimed success for a daemon that is still running:\n%s", out)
+	}
+	if saved := reporting.HandleCLIError(err, "cli", "rescale-int daemon stop", ""); saved != "" {
+		t.Errorf("the timed-out stop saved an error report to %s", saved)
 	}
 
 	if out, err = runDaemonCommand(t, newDaemonStatusCmd()); err != nil || !strings.Contains(out, "stopping") {

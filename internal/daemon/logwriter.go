@@ -10,6 +10,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"gopkg.in/natefinch/lumberjack.v2"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // DaemonLogWriter is a multi-writer that sends logs to:
@@ -64,9 +66,12 @@ func NewDaemonLogWriter(cfg DaemonLogConfig) *DaemonLogWriter {
 }
 
 // Write implements io.Writer for zerolog.
-// Parses JSON log entries and routes to appropriate destinations.
+// Parses JSON log entries and routes to appropriate destinations. Every entry
+// is redacted first: an error it quotes can carry a signed URL, and the daemon's
+// standard logger, notices and zerolog all end here.
 func (w *DaemonLogWriter) Write(p []byte) (n int, err error) {
 	n = len(p)
+	p = []byte(reporting.RedactSecrets(string(p)))
 
 	// Parse the JSON log entry
 	var entry struct {

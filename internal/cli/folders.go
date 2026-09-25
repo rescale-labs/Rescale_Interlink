@@ -810,8 +810,9 @@ Examples:
 			if result.FilesFailed > 0 {
 				fmt.Printf("  Files failed:       %d\n", result.FilesFailed)
 			}
-			// A cancel fails the files it interrupts and never starts the rest,
-			// which no count here includes.
+			if result.FilesNotStarted > 0 {
+				fmt.Printf("  Files not started:  %d\n", result.FilesNotStarted)
+			}
 			if ctx.Err() != nil {
 				fmt.Println("  Stopped:            cancelled before every file was downloaded")
 			}

@@ -24,6 +24,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/service"
 )
 
@@ -54,6 +55,10 @@ var daemonize = daemon.Daemonize
 // startupLog is the Windows daemon's early log; elsewhere it writes nothing. A
 // variable so a test can see when 'daemon run' would write it.
 var startupLog = daemon.WriteStartupLog
+
+// shouldBlockSubprocess finds a Windows daemon a new one would conflict with;
+// elsewhere it finds none. A variable so a test can refuse on any system.
+var shouldBlockSubprocess = service.ShouldBlockSubprocess
 
 // daemonNotifyFunc adapts the rate limit notice hook to the daemon's logger,
 // which reaches the log file and the IPC log buffer. Levels come from the
@@ -175,6 +180,10 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := daemon.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
+			}
+
 			// Early startup logging for debugging Windows subprocess launch issues.
 			// This writes to a file BEFORE the logger is fully initialized.
 			logStartup := func() {
@@ -194,12 +203,10 @@ Examples:
 					svcLogger := logging.NewLogger("service", nil)
 					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
 				}
-
-				// Only blocks when service is RUNNING (not just installed)
-				if blocked, reason := service.ShouldBlockSubprocess(); blocked {
-					fmt.Println(reason)
-					return fmt.Errorf("cannot start daemon: %s", reason)
-				}
+			}
+			// Only blocks when service is RUNNING (not just installed)
+			if blocked, reason := shouldBlockSubprocess(); blocked {
+				return reporting.UsageError(fmt.Errorf("cannot start daemon: %s", reason))
 			}
 
 			// One daemon at a time, in every mode: two would poll the same jobs
@@ -280,6 +287,10 @@ Examples:
 			}
 			if !cmd.Flags().Changed("max-concurrent") && daemonConf.Daemon.MaxConcurrent > 0 {
 				maxConcurrent = daemonConf.Daemon.MaxConcurrent
+				// Here, not in a background daemon's child, whose refusal no one sees.
+				if err := daemon.CheckMaxConcurrent(maxConcurrent, "max_concurrent in daemon.conf"); err != nil {
+					return err
+				}
 			}
 			if !cmd.Flags().Changed("use-job-id") {
 				useJobID = !daemonConf.Daemon.UseJobNameDir
@@ -523,7 +534,8 @@ Examples:
 	cmd.Flags().StringVar(&namePrefix, "name-prefix", "", "Only download jobs with names starting with this prefix")
 	cmd.Flags().StringVar(&nameContains, "name-contains", "", "Only download jobs with names containing this string")
 	cmd.Flags().StringArrayVar(&excludeNames, "exclude", nil, "Exclude jobs with names starting with these prefixes")
-	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", constants.DefaultMaxConcurrent, "Maximum concurrent file downloads per job")
+	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", constants.DefaultMaxConcurrent,
+		fmt.Sprintf("Maximum concurrent file downloads per job (%d-%d)", constants.MinMaxConcurrent, constants.MaxMaxConcurrent))
 	cmd.Flags().StringVar(&stateFile, "state-file", daemon.DefaultStateFilePath(), "Path to daemon state file")
 	cmd.Flags().BoolVar(&useJobID, "use-job-id", false, "Use job ID instead of job name for output directory names")
 	cmd.Flags().BoolVar(&runOnce, "once", false, "Run once and exit (useful for cron jobs)")
@@ -773,7 +785,7 @@ On Windows, behavior depends on mode:
 			// between still finds the old daemon.
 			for deadline := time.Now().Add(daemonStopWait); !daemonExited(pid); time.Sleep(250 * time.Millisecond) {
 				if time.Now().After(deadline) {
-					return fmt.Errorf("%s did not exit within %s of the shutdown request; check with 'rescale-int daemon status'", name, daemonStopWait)
+					return reporting.UsageError(fmt.Errorf("%s did not exit within %s of the shutdown request; check with 'rescale-int daemon status'", name, daemonStopWait))
 				}
 			}
 			fmt.Println("Daemon stopped successfully.")

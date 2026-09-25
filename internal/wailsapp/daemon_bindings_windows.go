@@ -170,18 +170,9 @@ func (a *App) StartDaemon() error {
 	// Read daemon-stderr for actual error message instead of generic timeout
 	stderrPath := filepath.Join(logsDir, config.DaemonStderrLogName)
 	errDetail := ""
-	if stderrData, readErr := os.ReadFile(stderrPath); readErr == nil && len(stderrData) > 0 {
-		lines := strings.Split(strings.TrimSpace(string(stderrData)), "\n")
-		// Take last 3 non-empty lines
-		var lastLines []string
-		for i := len(lines) - 1; i >= 0 && len(lastLines) < 3; i-- {
-			line := strings.TrimSpace(lines[i])
-			if line != "" {
-				lastLines = append([]string{line}, lastLines...)
-			}
-		}
-		if len(lastLines) > 0 {
-			errDetail = "; stderr: " + strings.Join(lastLines, " | ")
+	if stderrData, readErr := os.ReadFile(stderrPath); readErr == nil {
+		if why := childStderr(string(stderrData)); why != "" {
+			errDetail = "; stderr: " + why
 		}
 	}
 
@@ -190,8 +181,39 @@ func (a *App) StartDaemon() error {
 	return errors.New(errMsg)
 }
 
+// childStderr is why the daemon's captured stderr says it stopped: its last
+// "Error:" line, which Cobra prints before the usage text that would fill the
+// tail, or else its last 3 non-empty lines.
+func childStderr(stderr string) string {
+	lines := strings.Split(stderr, "\n")
+	var tail []string
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "Error:") {
+			return line
+		}
+		if line != "" && len(tail) < 3 {
+			tail = append([]string{line}, tail...)
+		}
+	}
+	return strings.Join(tail, " | ")
+}
+
 // startDaemonSubprocess launches the daemon as a detached subprocess.
 func (a *App) startDaemonSubprocess() error {
+	// Load settings from daemon.conf
+	daemonCfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Warning: failed to load daemon.conf: %v (using defaults)", err))
+		daemonCfg = config.NewDaemonConfig()
+	}
+	// The detached daemon would refuse it where no one sees why.
+	if n := daemonCfg.Daemon.MaxConcurrent; n > 0 {
+		if err := daemon.CheckMaxConcurrent(n, "max_concurrent in daemon.conf"); err != nil {
+			return err
+		}
+	}
+
 	// Find rescale-int.exe in the same directory as the GUI
 	exePath, err := os.Executable()
 	if err != nil {
@@ -206,13 +228,6 @@ func (a *App) startDaemonSubprocess() error {
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
 		daemon.WriteStartupLog("ERROR: CLI not found: %s", cliPath)
 		return fmt.Errorf("CLI not found: %s", cliPath)
-	}
-
-	// Load settings from daemon.conf
-	daemonCfg, err := config.LoadDaemonConfig("")
-	if err != nil {
-		a.logWarn("Daemon", fmt.Sprintf("Warning: failed to load daemon.conf: %v (using defaults)", err))
-		daemonCfg = config.NewDaemonConfig()
 	}
 
 	downloadDir := daemonCfg.Daemon.DownloadFolder

@@ -16,6 +16,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/config"
 	intfips "github.com/rescale/rescale-int/internal/fips"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // AppInfoDTO contains application version, FIPS, and platform information.
@@ -365,7 +366,8 @@ func (a *App) TestConnection() ConnectionResultDTO {
 		if err != nil {
 			resultChan <- ConnectionResultDTO{
 				Success: false,
-				Error:   "Failed to create API client: " + err.Error(),
+				// It quotes the configured URL, which can be a pasted signed link.
+				Error: "Failed to create API client: " + reporting.RedactSecrets(err.Error()),
 			}
 			return
 		}

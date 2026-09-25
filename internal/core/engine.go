@@ -599,13 +599,11 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	// Emit completion event
 	stats := e.publishComplete(duration)
 
-	// Only report if all jobs failed, not cancelled, and there were jobs to run.
+	// Only report if all jobs failed, not cancelled, and there were jobs to run,
+	// on the first job error that warrants a report: the pipeline's roll-up
+	// names no cause, and a job an upload lock refused is the user's to act on.
 	if stats.Failed > 0 && stats.Completed == 0 && ctx.Err() == nil {
-		derivedErr := err
-		if derivedErr == nil {
-			derivedErr = fmt.Errorf("pipeline completed with %d/%d jobs failed", stats.Failed, stats.Total)
-		}
-		reporting.ClassifyAndPublish(e.eventBus, derivedErr, reporting.CategoryPURPipeline, "run", "")
+		reporting.ClassifyAndPublish(e.eventBus, err, reporting.CategoryPURPipeline, "run", "")
 	}
 
 	if err != nil {

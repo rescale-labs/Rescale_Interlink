@@ -23,6 +23,7 @@ import (
 	"github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // retryNoticeMinWait is the shortest retry backoff that gets its own notice.
@@ -373,7 +374,7 @@ func bodyExcerpt(body io.ReadCloser) string {
 	if err != nil && len(data) == 0 {
 		return ""
 	}
-	return strings.Join(strings.Fields(string(data)), " ")
+	return strings.Join(strings.Fields(reporting.RedactSecrets(string(data))), " ")
 }
 
 // backoff resolves how long to sleep before the next attempt.
@@ -621,12 +622,14 @@ func (c *Client) CloseIdleConnections() {
 // readResponseBody reads and returns the response body content as a string.
 // If reading fails, returns a placeholder message indicating the failure.
 // This ensures error messages are always informative even when body reading fails.
+// An error page can quote a signed URL or a key, and the error that quotes the
+// page reaches terminals, logs, the daemon's state file and the GUI.
 func readResponseBody(body io.ReadCloser) string {
 	data, err := io.ReadAll(io.LimitReader(body, 1<<20)) // 1MB cap for error bodies
 	if err != nil {
-		return fmt.Sprintf("(failed to read response body: %v)", err)
+		return fmt.Sprintf("(failed to read response body: %v)", reporting.RedactedError(err))
 	}
-	return string(data)
+	return reporting.RedactSecrets(string(data))
 }
 
 // doRequest performs an HTTP request with authentication and rate limiting.
@@ -702,7 +705,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	url := c.baseURL + path
 	req, err := nethttp.NewRequestWithContext(ctx, method, url, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		// It quotes the URL, which a next page's link can make a signed one.
+		return nil, fmt.Errorf("failed to create request: %w", reporting.RedactedError(err))
 	}
 
 	// Add headers
@@ -715,6 +719,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// A redirect can make the URL it quotes a signed one.
+		err = reporting.RedactedError(err)
+
 		// Check for specific error types by string matching
 		errStr := err.Error()
 
@@ -771,7 +778,20 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 			method, path, registry.ScopeDisplayString(scope), cooldown, budget))
 	}
 
+	resp.Body = redactedBody{resp.Body}
 	return resp, nil
+}
+
+// redactedBody redacts the errors a response's reads return, as doRequest
+// does the transport's, and passes its content and io.EOF through untouched.
+type redactedBody struct{ io.ReadCloser }
+
+func (b redactedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		err = reporting.RedactedError(err)
+	}
+	return n, err
 }
 
 func (c *Client) GetUserProfile(ctx context.Context) (*models.UserProfile, error) {

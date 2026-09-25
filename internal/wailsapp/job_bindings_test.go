@@ -321,6 +321,27 @@ func TestGetHistoricalJobRows_MissingFile(t *testing.T) {
 	}
 }
 
+// The row the GUI shows for a job in the state file quotes no signed URL,
+// whatever the file holds.
+func TestGetHistoricalJobRowsQuoteNoCredentials(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
+	statesDir := filepath.Join(home, ".rescale-int", "states")
+	if err := os.MkdirAll(statesDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	row := `1,job1,/work/job1,success,failed,0,failed,,upload failed: Put "https://acct.blob.core.windows.net/c/f?sv=2020-10-02&sig=FAKESIG": EOF`
+	if err := os.WriteFile(filepath.Join(statesDir, "pur_old.state"), []byte("header\n"+row+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := (&App{}).GetHistoricalJobRows("pur_old")
+	if err != nil || len(rows) != 1 || strings.Contains(rows[0].Error, "FAKESIG") || !strings.Contains(rows[0].Error, "sig=REDACTED") {
+		t.Errorf("GetHistoricalJobRows = %+v, %v; want the row's error without its signature", rows, err)
+	}
+}
+
 // TestGetRunHistory pins the home directory so the result does not depend on
 // whatever the developer's own states directory holds: a missing directory
 // yields an empty list rather than a panic, and a directory yields one entry

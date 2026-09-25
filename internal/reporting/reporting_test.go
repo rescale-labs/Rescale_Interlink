@@ -2,6 +2,7 @@ package reporting
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -359,6 +360,10 @@ func TestRedactSecrets(t *testing.T) {
 			[]string{"aBc"}, []string{`?subject=CacheErrorInfo%20-%20ERR_ACCESS_DENIED&body=GET%20%2Fc%2Ff%3Fse%3DREDACTED">`}},
 		{`<p>https://a.blob.core.windows.net/c/f?se=2026-09-24&#38;sig=aBc%3D&#38;sp=r</p>`,
 			[]string{"aBc"}, []string{`?se=REDACTED&#38;sig=REDACTED&#38;sp=REDACTED</p>`}},
+		// the credentials endpoint's own fields, as an error page can echo them
+		{`{"storageType":"S3Storage","accessKey":"FAKEACCESS","secretKey":"FAKESECRET","sessionToken":"FAKESESSION"}`,
+			[]string{"FAKEACCESS", "FAKESECRET", "FAKESESSION"},
+			[]string{`{"storageType":"S3Storage","accessKey":"REDACTED","secretKey":"REDACTED","sessionToken":"REDACTED"}`}},
 		{"DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=abc123secret456+base64==;EndpointSuffix=core.windows.net",
 			[]string{"abc123secret456"}, []string{"AccountKey=REDACTED", "AccountName=myaccount"}},
 		{"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature",
@@ -408,6 +413,23 @@ func TestRedactSecrets(t *testing.T) {
 	for _, tt := range [][2]string{
 		{`AWS_SECRET_ACCESS_KEY="FAKEKEY" secret_key='FAKEKEY' AccountKey="FAKEKEY"`, `AWS_SECRET_ACCESS_KEY="REDACTED" secret_key='REDACTED' AccountKey="REDACTED"`},
 		{`msg="session_token=\"FAKEKEY\"" {"message":"secret_key=\"FAKEKEY\""}`, `msg="session_token=\"REDACTED\"" {"message":"secret_key=\"REDACTED\""}`},
+		{`error="{\"SecretKey\": \"FAKEKEY\", \"SESSION_TOKEN\":\"FAKEKEY\"}" {'accessKey': 'FAKEKEY'}`,
+			`error="{\"SecretKey\": \"REDACTED\", \"SESSION_TOKEN\":\"REDACTED\"}" {'accessKey': 'REDACTED'}`},
+		// a JSON credential field's whole value, escapes and punctuation too, at
+		// any depth of escaping
+		{`{"secretKey":"\u0046AKESECRET","sessionToken":"FAKE/SESSION\/TAIL"}`, `{"secretKey":"REDACTED","sessionToken":"REDACTED"}`},
+		{`{"accessKey":"FAKE KEY, WITH \"QUOTES\"; AND } ] <&>","code":"x"}`, `{"accessKey":"REDACTED","code":"x"}`},
+		{`{"SeCrEtKeY": "FAKE", "SecretAccessKey":"FAKE", "aws_session_token" : "FAKE"}`,
+			`{"SeCrEtKeY": "REDACTED", "SecretAccessKey":"REDACTED", "aws_session_token" : "REDACTED"}`},
+		{`{"error":"{\"secretKey\":\"FAKE\\\"KEY\\\\\",\"code\":\"x\"}"}`, `{"error":"{\"secretKey\":\"REDACTED\",\"code\":\"x\"}"}`},
+		{`{"log":"{\"error\":\"{\\\"sessionToken\\\":\\\"FAKE\\\\\\\"TOKEN\\\"}\"}"}`,
+			`{"log":"{\"error\":\"{\\\"sessionToken\\\":\\\"REDACTED\\\"}\"}"}`},
+		// escaped whitespace before the value; a ' value ends at the string around it
+		{`{"error":"{\"secretKey\":\n\"FAKESECRET\"}"}`, `{"error":"{\"secretKey\":\n\"REDACTED\"}"}`},
+		{`{"log":"{\"error\":\"{\\\"secretKey\\\":\\r\\n\\t\\\"FAKESECRET\\\"}\"}"}`,
+			`{"log":"{\"error\":\"{\\\"secretKey\\\":\\r\\n\\t\\\"REDACTED\\\"}\"}"}`},
+		{`{"message":"'secretKey':'unterminated"}`, `{"message":"'secretKey':'REDACTED"}`},
+		{`{"log":"{\"message\":\"'secretKey':'unterminated\"}"}`, `{"log":"{\"message\":\"'secretKey':'REDACTED\"}"}`},
 		{`error="Authorization: Digest username=\"u\", response=\"FAKEDIGEST\"" status=401`, `error="Authorization: Digest REDACTED" status=401`},
 		{`{"message":"Authorization: Digest username=\"u\", response=\"FAKEDIGEST\"","code":"AuthorizationFailure"}`, `{"message":"Authorization: Digest REDACTED","code":"AuthorizationFailure"}`},
 		{`Authorization: Digest username = "u", response = "FAKEDIGEST"`, `Authorization: Digest REDACTED`},
@@ -422,7 +444,7 @@ func TestRedactSecrets(t *testing.T) {
 		{`error="Authorization: Basic FAKEPADDED==" status="401"`, `error="Authorization: Basic REDACTED" status="401"`},
 		{`{"error":{"message":"Authorization: Basic FAKEPADDED==","code":"AuthorizationFailure"}}`, `{"error":{"message":"Authorization: Basic REDACTED","code":"AuthorizationFailure"}}`},
 	} {
-		if got := RedactSecrets(tt[0]); got != tt[1] {
+		if got := RedactSecrets(tt[0]); got != tt[1] || json.Valid([]byte(tt[0])) && !json.Valid([]byte(got)) {
 			t.Errorf("RedactSecrets(%q) = %q, want %q", tt[0], got, tt[1])
 		}
 	}
@@ -440,6 +462,8 @@ func TestRedactSecrets(t *testing.T) {
 		"Token file could not be read",
 		"token file could not be read",
 		"bearer of bad news",
+		"access key: missing for this storage",
+		`{"mysecretKey":"results.dat","field":"secretKey","errors":{"accessKey":["required"]}}`,
 		`{"detail":"Token is invalid or expired"}`,
 		`operation error S3: PutObject, exceeded maximum number of attempts, 1, https response error StatusCode: 0, RequestID: , ` +
 			`HostID: , request send failed, Put "https://b.s3.us-east-1.amazonaws.com/user/in.dat?x-id=PutObject": connect: connection refused`,

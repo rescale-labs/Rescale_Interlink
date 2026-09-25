@@ -10,6 +10,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // DownloadedJob tracks a job that has been downloaded by the daemon.
@@ -137,6 +139,13 @@ func (s *State) load(locked bool) error {
 	// Ensure map is initialized
 	if s.Downloaded == nil {
 		s.Downloaded = make(map[string]*DownloadedJob)
+	}
+	// Failures are redacted as they are loaded, since 'daemon list --failed'
+	// prints them.
+	for _, job := range s.Downloaded {
+		if job != nil {
+			job.Error = reporting.RedactSecrets(job.Error)
+		}
 	}
 
 	// A 1.0.0 count is of polls, not attempts under the backoff, so a job that
@@ -414,7 +423,7 @@ func (s *State) MarkFailed(jobID, jobName string, err error) {
 		JobID:        jobID,
 		JobName:      jobName,
 		DownloadedAt: now,
-		Error:        err.Error(),
+		Error:        reporting.RedactSecrets(err.Error()),
 		RetryCount:   retryCount + 1,
 		LastAttempt:  now,
 	}

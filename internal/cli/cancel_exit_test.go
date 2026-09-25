@@ -35,11 +35,9 @@ func runWithCancel(t *testing.T, cmd *cobra.Command, fn func(context.Context, do
 }
 
 // A cancel that lands while a file downloads fails that file and stops the
-// batch before the next starts: the command fails, and its summary, which
-// counts only the files the download reached, says it stopped. Skipped files
-// are counted without a cause: a cancel skips a file that reaches its worker
-// before its download starts, as well as one that already exists (sub3's f1,
-// which the scan lists before sub2's own files).
+// batch before the next starts: the command fails, and its summary counts the
+// file already there (sub3's f1, which the scan lists before sub2's own files),
+// the interrupted one and the one never started, and says it stopped.
 func TestFoldersDownloadDirFailsWhenCancelled(t *testing.T) {
 	lib := newFakeLibrary(t)
 	lib.files["f4"], lib.files["f5"] = "sub2", "sub2"
@@ -57,9 +55,9 @@ func TestFoldersDownloadDirFailsWhenCancelled(t *testing.T) {
 		return ctx.Err()
 	}, "download-dir", "sub2", "--outdir", out, "--merge", "--max-concurrent", "1")
 	if !errors.Is(err, context.Canceled) || !strings.Contains(printed, "Files skipped:      1\n") ||
-		!strings.Contains(printed, "Files failed:       1\n") ||
+		!strings.Contains(printed, "Files failed:       1\n") || !strings.Contains(printed, "Files not started:  1\n") ||
 		!strings.Contains(printed, "Stopped:            cancelled before every file was downloaded\n") {
-		t.Errorf("folders download-dir returned %v after printing\n%s\nwant it to fail, the skipped and interrupted files counted and the stop stated", err, printed)
+		t.Errorf("folders download-dir returned %v after printing\n%s\nwant it to fail, every file counted and the stop stated", err, printed)
 	}
 }
 

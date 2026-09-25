@@ -13,6 +13,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -307,10 +308,10 @@ func TestCheckBatchCompletion_LockRefusalsAreNotReported(t *testing.T) {
 	}
 }
 
-// The service logs each failed transfer to stderr, which the Windows daemon
-// keeps as daemon-stderr.log: an Azure SAS or an S3 presigned URL in the error
-// is redacted there.
-func TestTransferServiceLogsNoCredentials(t *testing.T) {
+// The services log each failed transfer or file operation to stderr, which the
+// Windows daemon keeps as daemon-stderr.log: an Azure SAS or an S3 presigned
+// URL in the error is redacted there.
+func TestServicesLogNoCredentials(t *testing.T) {
 	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
 	if err != nil {
 		t.Fatal(err)
@@ -318,14 +319,16 @@ func TestTransferServiceLogsNoCredentials(t *testing.T) {
 	defer stderr.Close()
 	orig := os.Stderr
 	os.Stderr = stderr
-	ts := NewTransferService(nil, nil, TransferServiceConfig{})
+	loggers := []*logging.Logger{NewTransferService(nil, nil, TransferServiceConfig{}).logger, NewFileService(nil, nil).logger}
 	os.Stderr = orig
-	ts.logger.Error().Err(errors.New(`Put "https://a.blob.core.windows.net/c/f?comp=block&sig=SECRET": EOF`)).Msg("Upload failed")
-	ts.logger.Error().Err(errors.New(`Get "https://b.s3.amazonaws.com/k?X-Amz-Signature=SECRET": EOF`)).Msg("Download failed")
+	for _, logger := range loggers {
+		logger.Error().Err(errors.New(`Put "https://a.blob.core.windows.net/c/f?comp=block&sig=SECRET": EOF`)).Msg("Upload failed")
+		logger.Error().Err(errors.New(`Get "https://b.s3.amazonaws.com/k?X-Amz-Signature=SECRET": EOF`)).Msg("Download failed")
+	}
 
 	printed, _ := os.ReadFile(stderr.Name())
-	if strings.Contains(string(printed), "SECRET") || strings.Count(string(printed), "=REDACTED") != 2 {
-		t.Errorf("logged %q, want both credentials redacted", printed)
+	if strings.Contains(string(printed), "SECRET") || strings.Count(string(printed), "=REDACTED") != 4 {
+		t.Errorf("logged %q, want every credential redacted", printed)
 	}
 }
 

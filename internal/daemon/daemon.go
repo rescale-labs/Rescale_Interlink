@@ -91,6 +91,16 @@ func DefaultConfig() *Config {
 	}
 }
 
+// CheckMaxConcurrent refuses a max_concurrent 'daemon run' does not accept,
+// naming where it came from. It is a usage error: the user set it.
+func CheckMaxConcurrent(n int, source string) error {
+	if n < constants.MinMaxConcurrent || n > constants.MaxMaxConcurrent {
+		return reporting.UsageError(fmt.Errorf("%s must be between %d and %d, got %d",
+			source, constants.MinMaxConcurrent, constants.MaxMaxConcurrent, n))
+	}
+	return nil
+}
+
 // Daemon is the background service for auto-downloading completed jobs.
 type Daemon struct {
 	cfg       *Config
@@ -377,7 +387,7 @@ func (d *Daemon) DaemonTransferSnapshot() *ipc.DaemonTransferSnapshot {
 			CreatedAt:   qt.CreatedAt.UnixMilli(),
 		}
 		if qt.Error != nil {
-			info.Error = qt.Error.Error()
+			info.Error = reporting.RedactSecrets(qt.Error.Error())
 		}
 		if !qt.StartedAt.IsZero() {
 			info.StartedAt = qt.StartedAt.UnixMilli()
@@ -804,7 +814,7 @@ func (d *Daemon) recordScanError(err error) {
 		return
 	}
 	d.scanErrMu.Lock()
-	d.lastScanErr = err.Error()
+	d.lastScanErr = reporting.RedactSecrets(err.Error())
 	d.lastScanErrAt = time.Now()
 	d.scanErrMu.Unlock()
 }

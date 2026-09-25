@@ -27,6 +27,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/util/buffers"
 )
 
@@ -212,7 +213,9 @@ func stagedBlocksExist(ctx context.Context, azureClient *AzureClient, blobPath s
 				staged = 0
 				return nil
 			}
-			return listErr
+			// The list's page passes the transport untouched, and the SDK
+			// quotes it for a status or a Size it did not expect.
+			return reporting.RedactedError(listErr)
 		}
 		staged = len(resp.UncommittedBlocks)
 		return nil

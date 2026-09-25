@@ -43,7 +43,13 @@ func TestGUICarriesNoCredentials(t *testing.T) {
 			t.Fatalf("UpdateState: %v", err)
 		}
 	}
-	shown := []string{a.GetRunStatus().Error}
+	// A configured URL the connection test refuses, which a pasted link can sign.
+	a.config = &config.Config{APIKey: "k", APIBaseURL: "https://acct.blob.core.windows.net/c/f?sp=r&sig=SECRETSIGNATURE"}
+	connection := a.TestConnection().Error
+	if !strings.Contains(connection, "invalid platform URL") {
+		t.Errorf("the connection test says %q, want why it failed", connection)
+	}
+	shown := []string{a.GetRunStatus().Error, connection}
 	for _, row := range a.GetJobRows() {
 		shown = append(shown, row.Error)
 	}

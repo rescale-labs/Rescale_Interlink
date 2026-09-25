@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/rescale/rescale-int/internal/cloud/state"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // lockFile takes the exclusive lock that claims of the PID file and rewrites of
@@ -71,7 +72,7 @@ func CheckPIDFile() error {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
 	if exited, _ := state.ProcessExited(pid); !exited && pid != os.Getpid() {
-		return fmt.Errorf("daemon is already running (PID %d)", pid)
+		return reporting.UsageError(fmt.Errorf("daemon is already running (PID %d)", pid))
 	}
 	return nil
 }

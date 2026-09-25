@@ -1,8 +1,10 @@
 package reporting
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -26,7 +28,13 @@ var (
 	reSignedURLParam = regexp.MustCompile(`(?i)([?&]|\\u0026|&amp;|&#38;|%3F|%26)(sig|se|st|sp|sv|sr|si|ss|srt|spr|sip|sdd|ses|scid|` +
 		`skoid|sktid|skt|ske|sks|skv|saoid|suoid|rsc[cdelt]|x-amz-[a-z0-9-]+)(=|%3D)` + credentialValue)
 	// A key's value, quoted or not; its quotes stay.
-	reAWSKey   = regexp.MustCompile(`(?i)((?:access.?key|secret.?key|session.?token)=\\?["']?)` + credentialValue)
+	reAWSKey = regexp.MustCompile(`(?i)((?:access.?key|secret.?key|session.?token)=\\?["']?)` + credentialValue)
+	// A JSON (or Python) field named for a credential, as the credentials
+	// endpoint names them ("secretKey":"x"), up to its value's opening quote,
+	// whose escapes (group 1) tell how deep in other strings the JSON sits. The
+	// whole name counts: "mysecretKey" is another field. Whitespace after the
+	// colon may be escaped too, as JSON inside a string prints a newline.
+	reJSONKey  = regexp.MustCompile(`(?i)["'](?:aws.?)?(?:secret.?)?(?:access.?key|secret.?key|session.?token)\\*["']\s*:(?:\s|\\+[nrt])*(\\*)(["'])`)
 	reAzureKey = regexp.MustCompile(`(?i)(AccountKey=\\?["']?)` + credentialValue)
 	// An Authorization header's value however it is printed: the scheme stays
 	// and the rest of the field goes. A quoted value (JSON, a list) ends at its
@@ -59,6 +67,7 @@ var (
 func RedactSecrets(s string) string {
 	s = reSignedURLParam.ReplaceAllString(s, "${1}${2}${3}REDACTED")
 	s = reAWSKey.ReplaceAllString(s, "${1}REDACTED")
+	s = redactJSONKeys(s)
 	s = reAzureKey.ReplaceAllString(s, "${1}REDACTED")
 	s = reAuthorizationList.ReplaceAllStringFunc(s, func(list string) string {
 		i := strings.IndexByte(list, '[')
@@ -67,6 +76,39 @@ func RedactSecrets(s string) string {
 	s = reAuthorization.ReplaceAllString(s, "${1}${2}${3}${4}REDACTED${5}")
 	s = reAWSAccessKeyID.ReplaceAllString(s, "[REDACTED_AWS_KEY]")
 	return s
+}
+
+// redactJSONKeys replaces each reJSONKey field's whole string value, escapes
+// and all, and keeps its quotes. A value opened by n escapes and a quote is
+// closed by the quote with n more than a multiple of 2(n+1) escapes before it
+// (each level of escaping doubles them and adds one); fewer than n end the
+// string the JSON sits in, as any " does a ' value's.
+func redactJSONKeys(s string) string {
+	var b strings.Builder
+	for {
+		m := reJSONKey.FindStringSubmatchIndex(s)
+		if m == nil {
+			return b.String() + s
+		}
+		n, q, i := m[3]-m[2], s[m[4]], m[1]
+		for r := 0; i < len(s) && s[i] != '\n'; i++ {
+			if q == '\'' && s[i] == '"' {
+				i -= r
+				break
+			}
+			if s[i] == q && (r < n || (r-n)%(2*n+2) == 0) {
+				i -= min(r, n)
+				break
+			}
+			if s[i] == '\\' {
+				r++
+			} else {
+				r = 0
+			}
+		}
+		b.WriteString(s[:m[1]] + "REDACTED")
+		s = s[i:]
+	}
 }
 
 // RedactWriter returns a writer that passes each write through RedactSecrets
@@ -89,6 +131,34 @@ func RedactedLogger(mode string, w io.Writer) *logging.Logger {
 	l := logging.NewLogger(mode, nil)
 	l.SetOutput(RedactWriter(w))
 	return l
+}
+
+// RedactedError is err without the credentials its text can quote, such as a
+// redirect's URL or a Location net/http could not parse. The retry and report
+// classifiers still see the cause: errors.Is and As reach it, and it answers
+// Timeout and Temporary for the net.Error they would have found in its chain.
+// An error it made comes back unchanged, but not one wrapping such an error:
+// the wrapper's own text may quote a credential.
+func RedactedError(err error) error {
+	if _, done := err.(redactedError); done || err == nil {
+		return err
+	}
+	return redactedError{err}
+}
+
+type redactedError struct{ error }
+
+func (e redactedError) Error() string { return RedactSecrets(e.error.Error()) }
+func (e redactedError) Unwrap() error { return e.error }
+
+func (e redactedError) Timeout() bool {
+	var n net.Error
+	return errors.As(e.error, &n) && n.Timeout()
+}
+
+func (e redactedError) Temporary() bool {
+	var n net.Error
+	return errors.As(e.error, &n) && n.Temporary()
 }
 
 // Regex patterns for redaction

@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/bloberror"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blockblob"
 
 	"github.com/rescale/rescale-int/internal/cloud"
@@ -378,27 +377,11 @@ func (p *Provider) ValidateStreamingUploadExists(ctx context.Context, uploadID, 
 	}
 
 	blobName := filepath.Base(storagePath)
-	staged := 0
-	err = azureClient.RetryWithBackoff(ctx, "GetBlockList", func() error {
-		blockBlobClient := azureClient.Client().ServiceClient().
-			NewContainerClient(azureClient.Container()).NewBlockBlobClient(blobName)
-		resp, listErr := blockBlobClient.GetBlockList(ctx, blockblob.BlockListTypeUncommitted, nil)
-		if listErr != nil {
-			if bloberror.HasCode(listErr, bloberror.BlobNotFound) {
-				// Nothing was ever staged, or it has all been swept.
-				staged = 0
-				return nil
-			}
-			return listErr
-		}
-		staged = len(resp.UncommittedBlocks)
-		return nil
-	})
+	exists, err := stagedBlocksExist(ctx, azureClient, blobName)
 	if err != nil {
 		return false, fmt.Errorf("failed to check the staged blocks of %s: %w", blobName, err)
 	}
-
-	return staged > 0, nil
+	return exists, nil
 }
 
 // readSeekCloser wraps bytes.Reader to implement io.ReadSeekCloser

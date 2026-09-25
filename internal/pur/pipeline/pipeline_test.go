@@ -648,26 +648,6 @@ func TestCheckJobHasInputs(t *testing.T) {
 	}
 }
 
-// The state file records archive paths under this directory, so it must be
-// absolute even when the jobs share nothing below a volume root.
-func TestTarballDirIsAbsolute(t *testing.T) {
-	vol := filepath.VolumeName(t.TempDir()) + string(filepath.Separator)
-	jobs := []models.JobSpec{
-		{JobName: "a", Directory: filepath.Join(vol, "data")},
-		{JobName: "b", Directory: filepath.Join(vol, "scratch", "run1")},
-	}
-	if got := findCommonParent(jobs); got != "." {
-		t.Fatalf("findCommonParent() = %q, want \".\" for this layout", got)
-	}
-	dir, err := tarballDir(jobs)
-	if err != nil {
-		t.Fatalf("tarballDir: %v", err)
-	}
-	if !filepath.IsAbs(dir) {
-		t.Errorf("tarballDir() = %q, want an absolute path", dir)
-	}
-}
-
 // findCommonParent answers with the directory *containing* each job's own
 // directory, so every expectation here sits one level above the job dirs.
 func TestFindCommonParent(t *testing.T) {
@@ -717,7 +697,7 @@ func TestFindCommonParent(t *testing.T) {
 		{
 			// The only shared ancestor is the volume root, which is not a place
 			// to write archives.
-			name: "a job directory at the volume root settles on the working directory",
+			name: "a job directory at the volume root has no common parent",
 			jobs: []models.JobSpec{
 				{JobName: "a", Directory: filepath.Join(vol, "data")},
 				{JobName: "b", Directory: filepath.Join(vol, "scratch", "run1")},

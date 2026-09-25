@@ -4,11 +4,13 @@ package services
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // FileService handles file and folder operations.
@@ -25,7 +27,7 @@ func NewFileService(apiClient *api.Client, eventBus *events.EventBus) *FileServi
 	return &FileService{
 		apiClient: apiClient,
 		eventBus:  eventBus,
-		logger:    logging.NewLogger("file-service", nil),
+		logger:    reporting.RedactedLogger("file-service", os.Stderr),
 	}
 }
 

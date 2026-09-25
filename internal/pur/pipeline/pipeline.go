@@ -24,6 +24,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/ratelimit"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/tags"
@@ -122,6 +123,7 @@ type Pipeline struct {
 	activeWorkers map[string]int
 	completedJobs int
 	totalJobs     int
+	jobErrs       []error // each failed job's error, which a report on the run weighs
 
 	// Phase timing
 	pipelineStart time.Time
@@ -165,19 +167,6 @@ type workItem struct {
 // whether or not Directory is set; see models.JobSpec.LocalInputFiles.
 func hasLocalArchive(spec models.JobSpec) bool {
 	return spec.Directory != "" || len(spec.LocalInputFiles) > 0
-}
-
-// tarballDir is where a batch's archives are written: the jobs' common parent,
-// made absolute. findCommonParent answers "." when the jobs share no ancestor
-// below a volume root, and a relative directory would be recorded into the
-// state file's archive paths, which a resume from another working directory
-// could not find.
-func tarballDir(jobs []models.JobSpec) (string, error) {
-	dir, err := filepath.Abs(findCommonParent(jobs))
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve tarball directory: %w", err)
-	}
-	return dir, nil
 }
 
 // archiveNamespacePrefix marks a directory as one a batch's archives live in.
@@ -226,15 +215,41 @@ func archiveNamespace(statePath string) string {
 	return fmt.Sprintf("%s%08x", archiveNamespacePrefix, h.Sum32())
 }
 
-// findCommonParent finds the common parent directory of all job directories
-func findCommonParent(jobs []models.JobSpec) string {
-	if len(jobs) == 0 {
-		return "."
+// stagingDir is the archive directory of a batch whose inputs share only a
+// volume root: in the user's cache rather than a shared temp directory, and the
+// same for each run of a state file, so that a resume can remove an archive an
+// earlier run left there. The cache is the user's own, and these checks do not
+// defend it against anyone who can already write to it: the directory is
+// refused if it is itself a link, and on Unix it is set to mode 0700, which
+// fails unless the user owns it. On Windows it keeps the access the cache
+// gives it. With no cache location it is a new temporary directory, mode 0700
+// on Unix, so a resume there cannot remove an earlier run's archives.
+func stagingDir(statePath string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return os.MkdirTemp("", archiveNamespacePrefix)
 	}
+	dir := filepath.Join(cache, "rescale", "staging", archiveNamespace(statePath))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("%s is a link or not a directory", dir)
+	}
+	return dir, os.Chmod(dir, 0o700)
+}
 
-	// Get absolute paths and find common parent
+// findCommonParent finds the common parent directory of the jobs that have
+// something to archive, "" when none has, or "." when they share nothing below
+// a volume root. A job without one has no directory, and Abs("") is the working
+// directory, whose parent is not the batch's to write in: "/" for a GUI
+// launched from Finder.
+func findCommonParent(jobs []models.JobSpec) string {
 	var absPaths []string
 	for _, job := range jobs {
+		if !hasLocalArchive(job) {
+			continue
+		}
 		dir := job.Directory
 		// A job archiving an explicit file list has no directory of its own.
 		// Deriving one from its first file keeps a batch of such rows anchored on
@@ -251,6 +266,9 @@ func findCommonParent(jobs []models.JobSpec) string {
 		// Get the parent directory (the directory containing Run_X)
 		parent := filepath.Dir(absPath)
 		absPaths = append(absPaths, parent)
+	}
+	if len(absPaths) == 0 {
+		return ""
 	}
 
 	// Find common prefix
@@ -272,7 +290,7 @@ func findCommonParent(jobs []models.JobSpec) string {
 	}
 
 	// A batch whose only shared ancestor is a volume root would site every
-	// archive in "/" or "C:\"; the working directory is the safer home.
+	// archive in "/" or "C:\".
 	if filepath.Dir(common) == common {
 		return "."
 	}
@@ -352,10 +370,7 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 
 	// Find common parent directory of all jobs - this is where the batch's
 	// archive directory is created
-	commonParent, err := tarballDir(jobs)
-	if err != nil {
-		return nil, err
-	}
+	commonParent := findCommonParent(jobs)
 
 	// Use existing state manager if provided (shared with Engine/GUI),
 	// otherwise create a new one (CLI paths). Resolved before the archive
@@ -372,10 +387,20 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	if statePath == "" {
 		statePath = stateMgr.FilePath()
 	}
-	tempDir := filepath.Join(commonParent, archiveNamespace(statePath))
-
-	// Ensure the directory exists (it should already, but be safe)
-	if err := os.MkdirAll(tempDir, 0755); err != nil {
+	var tempDir string
+	var err error
+	switch {
+	case commonParent == "" || opts.SkipTarUpload: // nothing to archive
+	case commonParent == ".":
+		// No directory below a volume root holds every input, and the working
+		// directory is not the run's to write in: "/" for a GUI launched from
+		// Finder.
+		tempDir, err = stagingDir(statePath)
+	default:
+		tempDir = filepath.Join(commonParent, archiveNamespace(statePath))
+		err = os.MkdirAll(tempDir, 0755)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("failed to access tarball directory: %w", err)
 	}
 
@@ -638,6 +663,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	p.logf("INFO", "pipeline", "", "Starting pipeline with %d jobs", p.totalJobs)
 	p.logf("INFO", "pipeline", "", "Workers: tar=%d upload=%d job=%d", p.tarWorkers, p.uploadWorkers, p.jobWorkers)
 
+	// The batch's archive directory is not left behind empty, however the run
+	// ends. os.Remove refuses a directory that still holds anything, which is
+	// exactly the archives a run without --rm-tar-on-success is meant to keep.
+	defer os.Remove(p.tempDir)
+
 	// Resolve shared files synchronously (fast: parses IDs or uploads 1-2 files)
 	sharedStart := time.Now()
 	if err := p.ResolveSharedFiles(ctx); err != nil {
@@ -828,12 +858,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	p.logf("INFO", "pipeline", "", "Pipeline completed: %d/%d jobs finished in %v",
 		p.completedJobs, p.totalJobs, time.Since(p.pipelineStart))
 
-	// The batch's archive directory sits in the user's own tree, so an empty one
-	// is not left behind. os.Remove refuses a directory that still holds
-	// anything, which is exactly the archives a run without --rm-tar-on-success
-	// is meant to keep.
-	os.Remove(p.tempDir)
-
 	// A job that may already exist is neither done nor failed, so it is counted
 	// and named on its own: only someone looking at the platform can say which
 	// of the two it is, and until they do the batch is not finished.
@@ -858,11 +882,20 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				len(unconfirmed), strings.Join(unconfirmed, ", ")))
 		}
 		if len(problems) > 0 {
-			return errors.New(strings.Join(problems, "; "))
+			return reporting.BatchError(strings.Join(problems, "; "), p.jobErrs)
 		}
 	}
 
 	return nil
+}
+
+// jobFailed keeps a job's error for the error the run returns, and returns
+// its text for the job's row.
+func (p *Pipeline) jobFailed(err error) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.jobErrs = append(p.jobErrs, err)
+	return err.Error()
 }
 
 // clearStaleFailures resets the failure markers belonging to stages this run is
@@ -1177,7 +1210,7 @@ func (p *Pipeline) tarWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				p.logf("ERROR", "tar", item.state.JobName, "Failed: %v", err)
 				item.state.TarStatus = "failed"
 				item.state.SubmitStatus = "failed"
-				item.state.ErrorMessage = err.Error()
+				item.state.ErrorMessage = p.jobFailed(err)
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "tar", "failed", "", err.Error(), 0.0)
 				p.setActiveWorker("tar", -1)
@@ -1323,7 +1356,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				p.logf("ERROR", "upload", item.state.JobName, "Failed to stat file: %v", err)
 				item.state.UploadStatus = "failed"
 				item.state.SubmitStatus = "failed"
-				item.state.ErrorMessage = err.Error()
+				item.state.ErrorMessage = p.jobFailed(err)
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
 				p.setActiveWorker("upload", -1)
@@ -1405,7 +1438,7 @@ func (p *Pipeline) uploadWorker(ctx context.Context, wg *sync.WaitGroup, workerI
 				}
 				item.state.UploadStatus = "failed"
 				item.state.SubmitStatus = "failed"
-				item.state.ErrorMessage = err.Error()
+				item.state.ErrorMessage = p.jobFailed(err)
 				p.stateMgr.UpdateState(item.state)
 				p.reportStateChange(item.state.JobName, "upload", "failed", "", err.Error(), 0.0)
 				p.setActiveWorker("upload", -1)
@@ -1629,7 +1662,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 					}
 					p.logf("ERROR", "job", item.state.JobName, "Failed to create: %v", err)
 					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = err.Error()
+					item.state.ErrorMessage = p.jobFailed(err)
 					p.stateMgr.UpdateState(item.state)
 					p.reportStateChange(item.state.JobName, "create", "failed", "", err.Error(), 0.0)
 					p.setActiveWorker("job", -1)
@@ -1705,7 +1738,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				if err != nil {
 					p.logf("ERROR", "job", item.state.JobName, "Failed to submit: %v", err)
 					item.state.SubmitStatus = "failed"
-					item.state.ErrorMessage = err.Error()
+					item.state.ErrorMessage = p.jobFailed(err)
 					p.stateMgr.UpdateState(item.state)
 					p.reportStateChange(item.state.JobName, "submit", "failed", item.state.JobID, err.Error(), 0.0)
 					p.setActiveWorker("job", -1)

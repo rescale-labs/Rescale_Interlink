@@ -16,9 +16,11 @@ import (
 func ExecuteCompat() (error, int) {
 	// Suppress [BATCH]/[DEBUG] log.Printf output in compat mode.
 	// These use Go's standard log package and pollute CLI output.
-	// RESCALE_DEBUG restores debug output for troubleshooting.
-	if os.Getenv("RESCALE_DEBUG") == "" {
-		log.SetOutput(io.Discard)
+	// RESCALE_DEBUG restores debug output for troubleshooting, redacted: a
+	// transfer's diagnostics quote storage URLs.
+	log.SetOutput(io.Discard)
+	if os.Getenv("RESCALE_DEBUG") != "" {
+		log.SetOutput(reporting.RedactWriter(os.Stderr))
 	}
 
 	rootCmd, cc := NewCompatRootCmd()

@@ -96,14 +96,5 @@ func ShouldBlockSubprocess() (bool, string) {
 		return true, d.Error
 	}
 
-	// Check if service is installed but stopped - warn but don't block
-	if installed, _ := IsInstalledWithReason(); installed {
-		if status, err := QueryStatus(); err == nil && status != StatusRunning {
-			// Service is installed but not running - allow subprocess but log warning
-			debugLog("Warning: Service installed but stopped (status=%s). Allowing subprocess, but service may start later.", status.String())
-			daemon.WriteStartupLog("WARNING: Windows Service is installed but stopped. Subprocess allowed, but service may start later and cause conflicts.")
-		}
-	}
-
 	return false, ""
 }

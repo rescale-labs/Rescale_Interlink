@@ -2,17 +2,22 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
+	"io"
 	nethttp "net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	cloudstate "github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // runStatelessBatch runs a whole pipeline with no state file, the way
@@ -165,5 +170,72 @@ func TestStatelessRunsGetDistinctArchives(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("archive %s missing: %v", path, err)
 		}
+	}
+}
+
+// lockedOrUploaded refuses each archive of a job named "locked" as another
+// transfer's upload lock does, and uploads the rest.
+type lockedOrUploaded struct{}
+
+func (lockedOrUploaded) UploadFileSync(_ context.Context, params SyncUploadParams) (*models.CloudFile, error) {
+	if strings.Contains(params.Name, "locked") {
+		return nil, fmt.Errorf("failed to acquire upload lock: %w", cloudstate.ErrUploadLocked)
+	}
+	return &models.CloudFile{ID: "file-" + params.Name}, nil
+}
+
+// A run whose jobs failed is reported on the first job error that warrants a
+// report, never on its roll-up, which names no cause: a job an upload lock
+// refused is the user's to act on, and a server failure is a report's,
+// whichever of them came first.
+func TestFailedRunIsReportedOnItsJobsErrors(t *testing.T) {
+	server := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.WriteHeader(nethttp.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"detail":"FAKE server failure"}`)
+	}))
+	defer server.Close()
+
+	for _, tc := range []struct {
+		jobs   []string
+		report bool
+	}{
+		{[]string{"locked_1", "locked_2"}, false},
+		{[]string{"server_1", "server_2"}, true},
+		{[]string{"locked_1", "server_1"}, true},
+		{[]string{"server_1", "locked_1"}, true},
+	} {
+		t.Run(strings.Join(tc.jobs, "+"), func(t *testing.T) {
+			root := namespaceTestRoot(t)
+			var jobs []models.JobSpec
+			for _, name := range tc.jobs {
+				dir := filepath.Join(root, name)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "input.dat"), []byte("in"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				spec := uploadedJobSpec(dir)
+				spec.JobName = name
+				jobs = append(jobs, spec)
+			}
+			p, err := NewPipeline(&config.Config{TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1, TarCompression: "gzip"}, nil, jobs, PipelineOptions{})
+			if err != nil {
+				t.Fatalf("NewPipeline: %v", err)
+			}
+			p.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+			p.analysisResolver = &mockAnalysisResolver{}
+			p.SetSyncUploader(lockedOrUploaded{})
+
+			err = p.Run(context.Background())
+			if err == nil {
+				t.Fatal("the run succeeded, want every job failed")
+			}
+			report := reporting.IsReportable(err, reporting.CategoryPURPipeline)
+			if cause := reporting.Classify(err, reporting.CategoryPURPipeline, "run", "").ErrorMessage; report != tc.report ||
+				report && !strings.Contains(cause, "FAKE server failure") {
+				t.Errorf("reportable %v on %q, want %v on the server's failure", report, cause, tc.report)
+			}
+		})
 	}
 }
