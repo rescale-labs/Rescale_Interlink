@@ -63,9 +63,12 @@ func Classify(err error, category ErrorCategory, operation, backend string) *Cla
 	if err == nil {
 		return nil
 	}
+	if cause := reportedError(err, category); cause != nil {
+		err = cause // a batch's report is on the error that warrants one
+	}
 
 	msg := err.Error()
-	class := classifyError(err)
+	class := ClassifyErrorClass(err)
 
 	severity := SeverityError
 	if category == CategoryAuth || class == ClassAuth {
@@ -92,7 +95,7 @@ func Classify(err error, category ErrorCategory, operation, backend string) *Cla
 // unclassified internal errors, and batch/pipeline wipeouts where something
 // genuinely broke.
 func IsReportable(err error, category ErrorCategory) bool {
-	if err == nil {
+	if err = reportedError(err, category); err == nil {
 		return false
 	}
 
@@ -106,7 +109,7 @@ func IsReportable(err error, category ErrorCategory) bool {
 	}
 
 	// Rate limit 429 is transient
-	if status, _ := statusOf(err); status == 429 || strings.Contains(msg, "rate limit") {
+	if status, _ := StatusOf(err); status == 429 || strings.Contains(msg, "rate limit") {
 		return false
 	}
 
@@ -117,7 +120,7 @@ func IsReportable(err error, category ErrorCategory) bool {
 
 	// Classify the error to filter user-fixable problems.
 	// Only server errors (5xx) and unclassified internal errors are reportable.
-	class := classifyError(err)
+	class := ClassifyErrorClass(err)
 	switch class {
 	case ClassAuth: // wrong/expired credentials — user can fix
 		return false
@@ -138,20 +141,49 @@ func IsReportable(err error, category ErrorCategory) bool {
 	return true
 }
 
-// classifyError is ClassifyErrorClass for an error value. An upload refused by
+type batchError struct {
+	msg  string
+	errs []error
+}
+
+func (e batchError) Error() string   { return e.msg }
+func (e batchError) Unwrap() []error { return e.errs }
+
+// BatchError is the error of a batch in which several items failed. It reads
+// as msg and holds each item's error, which a report weighs one by one: a lock
+// refusal or a cancel among them hides no failure, whichever came first.
+func BatchError(msg string, errs []error) error { return batchError{msg, errs} }
+
+// reportedError is err, or for a BatchError the first of its errors that
+// warrants a report on its own (nil when none does).
+func reportedError(err error, category ErrorCategory) error {
+	var batch batchError
+	if !errors.As(err, &batch) {
+		return err
+	}
+	for _, e := range batch.errs {
+		if IsReportable(e, category) {
+			return reportedError(e, category)
+		}
+	}
+	return nil
+}
+
+// ClassifyErrorClass maps an error to an ErrorClass. An upload refused by
 // another transfer's lock is the user's to act on, whatever its text says.
-func classifyError(err error) ErrorClass {
+func ClassifyErrorClass(err error) ErrorClass {
 	if errors.Is(err, state.ErrUploadLocked) {
 		return ClassLocalFS
 	}
-	status, response := statusOf(err)
+	status, response := StatusOf(err)
 	return classifyMessage(err.Error(), status, response)
 }
 
-// statusOf returns the HTTP status of the response err reports and the text
-// reporting it. An S3 or Azure SDK error carries both itself, free of any path
-// wrapped around it; for any other error both are read from err's text.
-func statusOf(err error) (int, string) {
+// StatusOf returns the HTTP status of the response err reports (0 for none)
+// and the text reporting it. An S3 or Azure SDK error carries both itself, free
+// of any path wrapped around it; for any other error both are read from a status
+// its text states, never from digits in a path or name.
+func StatusOf(err error) (int, string) {
 	var s3Err interface{ HTTPStatusCode() int } // smithy-go's ResponseError, behind every S3 response error
 	if errors.As(err, &s3Err) {
 		return s3Err.HTTPStatusCode(), s3Err.(error).Error()
@@ -180,12 +212,6 @@ func httpStatus(msg string) int {
 		return code
 	}
 	return 0
-}
-
-// ClassifyErrorClass maps an error message to an ErrorClass. Exported for the
-// partial-batch failure gate in transfer_service.go, which has only the text.
-func ClassifyErrorClass(msg string) ErrorClass {
-	return classifyMessage(msg, httpStatus(msg), msg)
 }
 
 // classifyMessage maps an error message, the HTTP status of the response it

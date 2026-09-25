@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 )
 
 // TestExecuteWithRetry_Success verifies basic success case returns nil on first attempt.
@@ -134,6 +136,15 @@ func TestClassifyError(t *testing.T) {
 		{"context canceled", context.Canceled, ErrorTypeFatal},
 		{"proxy 407", fmt.Errorf("407 proxy authentication required"), ErrorTypeFatal},
 		{"unknown error", fmt.Errorf("something completely unexpected"), ErrorTypeFatal},
+
+		// A status is the one an error states, never digits in a path or URL.
+		{"API 503", fmt.Errorf("register file failed: status 503: busy"), ErrorTypeRetryable},
+		{"Azure 503 under Run_403/", fmt.Errorf("failed to stage block 0 of /sweep/Run_403/in.dat: %w",
+			&azcore.ResponseError{StatusCode: 503, ErrorCode: "ServerBusy"}), ErrorTypeRetryable},
+		{"Azure 404 under Run_503/", fmt.Errorf("failed to get properties of /sweep/Run_503/in.dat: %w",
+			&azcore.ResponseError{StatusCode: 404, ErrorCode: "BlobNotFound"}), ErrorTypeFatal},
+		{"local error under Run_503/", fmt.Errorf("open /sweep/Run_503/in.dat: permission denied"), ErrorTypeFatal},
+		{"local error under case_403/", fmt.Errorf("read /sweep/case_403/in.dat: input/output error"), ErrorTypeFatal},
 
 		// nil
 		{"nil error", nil, ErrorTypeSuccess},

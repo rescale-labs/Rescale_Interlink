@@ -14,6 +14,8 @@ import (
 	"github.com/vbauerster/mpb/v8"
 	"github.com/vbauerster/mpb/v8/decor"
 	"golang.org/x/term"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // barGroup is the mpb plumbing behind UploadUI and DownloadUI: one progress
@@ -71,12 +73,13 @@ func (g *barGroup) Wait() {
 	}
 }
 
-// LogWriter returns an io.Writer that safely prints above the progress bars
+// LogWriter returns an io.Writer that safely prints above the progress bars.
+// Retry notices written there quote storage errors, so it redacts them.
 func (g *barGroup) LogWriter() io.Writer {
 	if g.progress != nil && g.isTerminal {
-		return g.progress
+		return reporting.RedactWriter(g.progress)
 	}
-	return os.Stderr
+	return reporting.RedactWriter(os.Stderr)
 }
 
 // Writer returns an io.Writer for output during progress operations.
@@ -244,11 +247,11 @@ func (b *barBase) finish(arrow, localPath, peer, fileID string, err error) {
 	}
 
 	retries := atomic.LoadInt32(&b.retries)
-	b.write(fmt.Sprintf("✗ %s %s %s: %v (after %d retries)\n",
+	b.write(fmt.Sprintf("✗ %s %s %s: %s (after %d retries)\n",
 		truncatePath(localPath, 2),
 		arrow,
 		peer,
-		err,
+		reporting.RedactSecrets(err.Error()),
 		retries))
 }
 

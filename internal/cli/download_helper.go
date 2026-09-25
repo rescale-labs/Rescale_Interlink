@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/util/paths"
@@ -36,15 +36,6 @@ var (
 	downloadFileFn = func(ctx context.Context, params download.DownloadParams) error {
 		return download.DownloadFile(ctx, params)
 	}
-)
-
-// Precompiled regexes for sanitizeErrorString — avoids recompilation per call.
-var (
-	reSASToken       = regexp.MustCompile(`(sig|se|sp|sv|sr|spr|sip|srt|ss)=[^&\s"')]+`)
-	reAWSKey         = regexp.MustCompile(`(?i)(access.?key|secret.?key|session.?token)=\S+`)
-	reAzureKey       = regexp.MustCompile(`(?i)AccountKey=[^;&\s"']+`)
-	reBearerToken    = regexp.MustCompile(`(?i)(Authorization:\s*)?((Bearer|Token)\s+)[A-Za-z0-9._\-/+=]+`)
-	reAWSAccessKeyID = regexp.MustCompile(`AKIA[A-Z0-9]{16}`)
 )
 
 // cliDownloadItem wraps a file for download with index info.
@@ -647,7 +638,7 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
 			}
 
-			failure := logger.Debug().Str("error", sanitizeErrorString(err.Error())).Str("file_id", item.fileID).Str("file_name", item.name)
+			failure := logger.Debug().Str("error", reporting.RedactSecrets(err.Error())).Str("file_id", item.fileID).Str("file_name", item.name)
 			if opts.jobID != "" {
 				failure = failure.Str("job_id", opts.jobID)
 			}
@@ -731,17 +722,6 @@ func filterValidJobFiles(files []models.JobFile) ([]models.JobFile, []error) {
 	return valid, errs
 }
 
-// sanitizeErrorString removes secrets (SAS tokens, access keys, session tokens)
-// from error messages to prevent leakage in logs and user-facing output.
-func sanitizeErrorString(s string) string {
-	s = reSASToken.ReplaceAllString(s, "$1=REDACTED")
-	s = reAWSKey.ReplaceAllString(s, "$1=REDACTED")
-	s = reAzureKey.ReplaceAllString(s, "AccountKey=REDACTED")
-	s = reBearerToken.ReplaceAllString(s, "${1}${2}REDACTED")
-	s = reAWSAccessKeyID.ReplaceAllString(s, "[REDACTED_AWS_KEY]")
-	return s
-}
-
 // classifyDownloadStep inspects the error chain to identify which download step failed.
 func classifyDownloadStep(err error) string {
 	s := err.Error()
@@ -785,7 +765,7 @@ func formatDownloadError(fileName, fileID, jobID, storageType string, err error)
 	if strings.Contains(rootMsg, "Go struct field") || strings.Contains(rootMsg, "json:") {
 		rootMsg = "unexpected credential response format"
 	}
-	rootMsg = sanitizeErrorString(rootMsg)
+	rootMsg = reporting.RedactSecrets(rootMsg)
 
 	// Build context string
 	errCtx := fmt.Sprintf("file %s", fileID)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // SubmitStatusIndeterminate marks a job whose creation may or may not have
@@ -152,18 +153,21 @@ func (m *Manager) saveUnlocked() error {
 		return nil
 	}
 
-	// Create directory if it doesn't exist
+	// Create directory if it doesn't exist. A reason can quote a storage error,
+	// so the state is the user's alone.
 	dir := filepath.Dir(m.filePath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
 
-	// Write to temporary file first
-	tempFile := m.filePath + ".tmp"
-	file, err := os.Create(tempFile)
+	// Write to a temporary file first, one of this save's own, created with mode
+	// 0600: a fixed name would follow a link planted there, keep the mode of a
+	// file an earlier build left behind, and be shared by two runs saving at once.
+	file, err := os.CreateTemp(dir, filepath.Base(m.filePath)+".tmp-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp state file: %w", err)
 	}
+	tempFile := file.Name()
 
 	// Use a flag to track successful completion for cleanup
 	success := false
@@ -204,7 +208,7 @@ func (m *Manager) saveUnlocked() error {
 			state.JobID,
 			state.SubmitStatus,
 			state.ExtraFileIDs,
-			state.ErrorMessage,
+			reporting.RedactSecrets(state.ErrorMessage),
 			state.LastUpdated.Format(time.RFC3339),
 		}
 		if err := writer.Write(record); err != nil {

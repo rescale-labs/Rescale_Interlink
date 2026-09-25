@@ -13,9 +13,10 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/diskspace"
-	"github.com/rescale/rescale-int/internal/pathutil"
 	inthttp "github.com/rescale/rescale-int/internal/http"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
@@ -545,8 +546,7 @@ Examples:
 					fmt.Println("\n💾 Disk space errors:")
 					for _, e := range reportable {
 						if diskspace.IsInsufficientSpaceError(e.Error) {
-							relPath, _ := filepath.Rel(localPath, e.FilePath)
-							fmt.Printf("  - %s: %v\n", relPath, e.Error)
+							printUploadFailure(localPath, e)
 						}
 					}
 				}
@@ -556,8 +556,7 @@ Examples:
 					fmt.Println("\n❌ Other upload failures:")
 					for _, e := range reportable {
 						if !diskspace.IsInsufficientSpaceError(e.Error) {
-							relPath, _ := filepath.Rel(localPath, e.FilePath)
-							fmt.Printf("  - %s: %v\n", relPath, e.Error)
+							printUploadFailure(localPath, e)
 						}
 					}
 				}
@@ -606,6 +605,12 @@ Examples:
 	cmd.Flags().MarkHidden("skip-existing") // Hide deprecated flag
 
 	return cmd
+}
+
+// printUploadFailure prints one line of upload-dir's list of failed files.
+func printUploadFailure(localPath string, e UploadError) {
+	relPath, _ := filepath.Rel(localPath, e.FilePath)
+	fmt.Printf("  - %s: %s\n", relPath, reporting.RedactSecrets(e.Error.Error()))
 }
 
 // newFoldersDeleteCmd creates the 'folders delete' command.
@@ -774,7 +779,7 @@ Examples:
 			}
 
 			// Get API client
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -800,10 +805,15 @@ Examples:
 			fmt.Printf("  Folders created:    %d\n", result.FoldersCreated)
 			fmt.Printf("  Files downloaded:   %d\n", result.FilesDownloaded)
 			if result.FilesSkipped > 0 {
-				fmt.Printf("  Files skipped:      %d (already existed)\n", result.FilesSkipped)
+				fmt.Printf("  Files skipped:      %d\n", result.FilesSkipped)
 			}
 			if result.FilesFailed > 0 {
 				fmt.Printf("  Files failed:       %d\n", result.FilesFailed)
+			}
+			// A cancel fails the files it interrupts and never starts the rest,
+			// which no count here includes.
+			if ctx.Err() != nil {
+				fmt.Println("  Stopped:            cancelled before every file was downloaded")
 			}
 			fmt.Printf("  Total data:         %.2f MB\n", float64(result.TotalBytes)/(1024*1024))
 			fmt.Printf("  Elapsed time:       %s\n", time.Since(startTime).Round(time.Second))
@@ -813,6 +823,9 @@ Examples:
 
 			fmt.Println(strings.Repeat("=", 60))
 
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("download cancelled: %w", err)
+			}
 			if result.FilesFailed > 0 {
 				return fmt.Errorf("some files failed to download")
 			}
@@ -828,7 +841,7 @@ Examples:
 	cmd.Flags().BoolVarP(&overwriteAll, "overwrite", "w", false, "Overwrite existing files without prompting")
 	cmd.Flags().BoolVarP(&skipAll, "skip", "S", false, "Skip existing files/folders without prompting")
 	cmd.Flags().BoolVarP(&mergeAll, "merge", "m", false, "Merge into existing folders, skip existing files")
-	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Skip checksum verification (not recommended; the file-size check still applies)")
+	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Warn instead of failing when the checksum does not match (not recommended; the file-size check still applies)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview what would be downloaded without actually downloading")
 
 	return cmd

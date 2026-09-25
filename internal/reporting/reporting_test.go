@@ -145,7 +145,7 @@ func TestClassifyErrorClass(t *testing.T) {
 			"<html><head><title>504 Gateway Time-out</title></head></html>", ClassInternal},
 	}
 	for _, tt := range tests {
-		got := ClassifyErrorClass(tt.msg)
+		got := ClassifyErrorClass(errors.New(tt.msg))
 		if got != tt.want {
 			t.Errorf("ClassifyErrorClass(%q) = %q, want %q", tt.msg, got, tt.want)
 		}
@@ -166,7 +166,7 @@ func TestClassifyErrorClass(t *testing.T) {
 		`register file failed: status 400: {"name": ["This field is required."]}`: ClassClientError,
 	} {
 		for _, at := range []string{"", "failed to upload /Users/jd/sweep/network_model/in.dat: ", "failed to upload /Users/jd/sweep/timeout_study/in.dat: "} {
-			if got := ClassifyErrorClass(at + msg); got != want {
+			if got := ClassifyErrorClass(errors.New(at + msg)); got != want {
 				t.Errorf("ClassifyErrorClass(%q) = %q, want %q", at+msg, got, want)
 			}
 		}
@@ -317,6 +317,136 @@ func TestRedactError(t *testing.T) {
 				t.Errorf("RedactError(%q) = %q, did not pass check", tt.input, got)
 			}
 		})
+	}
+}
+
+func TestRedactSecrets(t *testing.T) {
+	// Each credential leaves both RedactSecrets' text and a report's; the rest
+	// of the text stays readable.
+	redacted := []struct {
+		input         string
+		secrets, kept []string
+	}{
+		{ // Azure's own text for a failed StageBlock under an account SAS
+			`Put "https://acct.blob.core.windows.net/c/data.bin?blockid=YmxvY2stMDAwMDAw&comp=block&se=2026-09-24T00%3A00%3A00Z` +
+				`&sig=FAKESIGNATURE%2Fx%3D&sp=rwdlac&spr=https&srt=co&ss=b&sv=2025-11-05": connect: connection refused`,
+			[]string{"FAKESIGNATURE"},
+			[]string{`?blockid=YmxvY2stMDAwMDAw&comp=block&se=REDACTED&sig=REDACTED&sp=REDACTED&spr=REDACTED&srt=REDACTED&ss=REDACTED&sv=REDACTED": connect`},
+		},
+		{ // a user delegation SAS
+			`?se=2026-09-24T00%3A00%3A00Z&sig=aBc%2Fd%3D&ske=2026-09-24T00%3A00%3A00Z&skoid=FAKEOID&sks=b&skt=2026-09-23T00%3A00%3A00Z` +
+				`&sktid=FAKETENANT&skv=2025-11-05&sp=r&spr=https&sr=b&st=2026-09-23T00%3A00%3A00Z&sv=2025-11-05`,
+			[]string{"aBc", "FAKEOID", "FAKETENANT"},
+			[]string{"?se=REDACTED&sig=REDACTED&ske=REDACTED&skoid=REDACTED&sks=REDACTED&skt=REDACTED&sktid=REDACTED&skv=REDACTED&sp=REDACTED" +
+				"&spr=REDACTED&sr=REDACTED&st=REDACTED&sv=REDACTED"},
+		},
+		{ // an S3 presigned GET, as Go's HTTP client reports it
+			`Get "https://b.s3.us-east-1.amazonaws.com/k?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAPROBE%2F20260923%2Fus-east-1` +
+				`%2Fs3%2Faws4_request&X-Amz-Date=20260923T231809Z&X-Amz-Expires=900&X-Amz-Security-Token=FAKESESSIONTOKEN&X-Amz-SignedHeaders=host` +
+				`&x-id=GetObject&X-Amz-Signature=c34fe397ed88fb4e": connect: connection refused`,
+			[]string{"ASIAPROBE", "FAKESESSIONTOKEN", "c34fe397ed88fb4e"},
+			[]string{`&x-id=GetObject&X-Amz-Signature=REDACTED": connect`},
+		},
+		{`{"sasToken":"sv=2025-11-05&sig=aBc%2Fd%3D&sp=r"}`, []string{"aBc"}, []string{`&sig=REDACTED&sp=REDACTED"}`}},
+		// a proxy's error page echoing the URL, which the SDK's error quotes, and a
+		// CLI log field: the value stops at the escape
+		{`<p>Blocked URL: https://a.blob.core.windows.net/c/f?se=2026-09-24&amp;sig=aBc%3D&amp;sp=r</p>`,
+			[]string{"aBc"}, []string{`?se=REDACTED&amp;sig=REDACTED&amp;sp=REDACTED</p>`}},
+		{`error="Put \"https://a.blob.core.windows.net/c/f?comp=block&sig=aBc&sv=2025-11-05\": EOF"`,
+			[]string{"aBc"}, []string{`&sig=REDACTED&sv=REDACTED\": EOF"`}},
+		// Squid's error page mails the request line percent-encoded; others escape "&" by number
+		{`<a href="mailto:webmaster?subject=CacheErrorInfo%20-%20ERR_ACCESS_DENIED&body=GET%20%2Fc%2Ff%3Fse%3D2026-09-24%26sig%3DaBc%252Fd%26sp%3Dr%20HTTP%2F1.1">`,
+			[]string{"aBc"}, []string{`?subject=CacheErrorInfo%20-%20ERR_ACCESS_DENIED&body=GET%20%2Fc%2Ff%3Fse%3DREDACTED">`}},
+		{`<p>https://a.blob.core.windows.net/c/f?se=2026-09-24&#38;sig=aBc%3D&#38;sp=r</p>`,
+			[]string{"aBc"}, []string{`?se=REDACTED&#38;sig=REDACTED&#38;sp=REDACTED</p>`}},
+		{"DefaultEndpointsProtocol=https;AccountName=myaccount;AccountKey=abc123secret456+base64==;EndpointSuffix=core.windows.net",
+			[]string{"abc123secret456"}, []string{"AccountKey=REDACTED", "AccountName=myaccount"}},
+		{"Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature",
+			[]string{"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"}, []string{"Bearer REDACTED"}},
+		{"Token abc123def456", []string{"abc123def456"}, []string{"Token REDACTED"}},
+		// credentials without a digit, which prose tells apart by where they stand
+		{"Authorization: Bearer abcdef", []string{"abcdef"}, []string{"Authorization: Bearer REDACTED"}},
+		{"Token abcdef", []string{"abcdef"}, []string{"Token REDACTED"}},
+		{"map[Authorization:[Token abcdef] Content-Type:[application/json]]", []string{"abcdef"},
+			[]string{"map[Authorization:[Token REDACTED] Content-Type:[application/json]]"}},
+		{"Proxy-Authorization: Basic dXNlcjpwYXNz", []string{"dXNlcjpwYXNz"}, []string{"Proxy-Authorization: Basic REDACTED"}},
+		// any scheme, the whole value, and a standalone credential in any case
+		{"Authorization: Negotiate abcdef", []string{"abcdef"}, []string{"Authorization: Negotiate REDACTED"}},
+		{"Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260923/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=fe5f80f7",
+			[]string{"AKIDEXAMPLE", "fe5f80f7"}, []string{"Authorization: AWS4-HMAC-SHA256 REDACTED"}},
+		// quoted parameters, and the header escaped or in a list, which keeps its structure
+		{`Authorization: Digest username="u", realm="r", response="FAKEDIGEST"`, []string{"FAKEDIGEST"}, []string{`Authorization: Digest REDACTED`}},
+		{`{"headers":{"Authorization":"Digest username=\"u\", response=\"FAKEDIGEST\""},"code":"AuthorizationFailure"}`, []string{"FAKEDIGEST"},
+			[]string{`{"headers":{"Authorization":"Digest REDACTED"},"code":"AuthorizationFailure"}`}},
+		{`msg="{\"Authorization\": \"Negotiate abcdef\"}"`, []string{"abcdef"}, []string{`msg="{\"Authorization\": \"Negotiate REDACTED\"}"`}},
+		{`{"Authorization":["Basic dXNlcjpwYXNz"]}`, []string{"dXNlcjpwYXNz"}, []string{`{"Authorization":["Basic REDACTED"]}`}},
+		{`{'Authorization': ['Bearer abcdef']}`, []string{"abcdef"}, []string{`{'Authorization': ['Bearer REDACTED']}`}},
+		{`Authorization: ["Basic abcdef"] <Message>token abcdef</Message>`, []string{"abcdef"},
+			[]string{`Authorization: ["Basic REDACTED"] <Message>token REDACTED</Message>`}},
+		{"bearer abcdef", []string{"abcdef"}, []string{"bearer REDACTED"}},
+		{`{"auth":"Bearer abcdef"}`, []string{"abcdef"}, []string{`{"auth":"Bearer REDACTED"}`}},
+		{"token abcdef", []string{"abcdef"}, []string{"token REDACTED"}},
+		{"credentials error: AKIAIOSFODNN7EXAMPLE used for request", []string{"AKIAIOSFODNN7EXAMPLE"}, []string{"[REDACTED_AWS_KEY]"}},
+	}
+	for _, tt := range redacted {
+		got := RedactSecrets(tt.input)
+		for _, secret := range tt.secrets {
+			if strings.Contains(got, secret) || strings.Contains(RedactError(tt.input), secret) {
+				t.Errorf("RedactSecrets(%q) = %q; want %q out of it and out of a report", tt.input, got, secret)
+			}
+		}
+		for _, want := range tt.kept {
+			if !strings.Contains(got, want) {
+				t.Errorf("RedactSecrets(%q) = %q, want it to contain %q", tt.input, got, want)
+			}
+		}
+	}
+
+	// Exactly the credential goes: a quoted key keeps its quotes; an escaped
+	// Digest parameter, one with spaces around "=" and each value of a list go;
+	// and the field that follows stays.
+	for _, tt := range [][2]string{
+		{`AWS_SECRET_ACCESS_KEY="FAKEKEY" secret_key='FAKEKEY' AccountKey="FAKEKEY"`, `AWS_SECRET_ACCESS_KEY="REDACTED" secret_key='REDACTED' AccountKey="REDACTED"`},
+		{`msg="session_token=\"FAKEKEY\"" {"message":"secret_key=\"FAKEKEY\""}`, `msg="session_token=\"REDACTED\"" {"message":"secret_key=\"REDACTED\""}`},
+		{`error="Authorization: Digest username=\"u\", response=\"FAKEDIGEST\"" status=401`, `error="Authorization: Digest REDACTED" status=401`},
+		{`{"message":"Authorization: Digest username=\"u\", response=\"FAKEDIGEST\"","code":"AuthorizationFailure"}`, `{"message":"Authorization: Digest REDACTED","code":"AuthorizationFailure"}`},
+		{`Authorization: Digest username = "u", response = "FAKEDIGEST"`, `Authorization: Digest REDACTED`},
+		{`{"Authorization":["Basic FAKEONE","Basic FAKETWO"],"code":"AuthorizationFailure"}`, `{"Authorization":["Basic REDACTED","Basic REDACTED"],"code":"AuthorizationFailure"}`},
+		{`{'Authorization': ['Negotiate FAKEONE', 'Basic FAKETWO']}`, `{'Authorization': ['Negotiate REDACTED', 'Basic REDACTED']}`},
+		{`msg="{\"Authorization\":[\"Basic FAKEONE\",\"Basic FAKETWO\"]}"`, `msg="{\"Authorization\":[\"Basic REDACTED\",\"Basic REDACTED\"]}"`},
+		// as json.Indent prints a list, which azcore's errors do, and with CRLF
+		{"{\n  \"Authorization\": [\n    \"Basic FAKEONE\",\n    \"NTLM FAKETWO\"\n  ],\n  \"code\": \"AuthorizationFailure\"\n}",
+			"{\n  \"Authorization\": [\n    \"Basic REDACTED\",\n    \"NTLM REDACTED\"\n  ],\n  \"code\": \"AuthorizationFailure\"\n}"},
+		{"{\r\n\"Authorization\": [\r\n\t\"NTLM FAKEONE\",\r\n\t\"Basic FAKETWO\"\r\n],\r\n\"code\": \"AuthorizationFailure\"}",
+			"{\r\n\"Authorization\": [\r\n\t\"NTLM REDACTED\",\r\n\t\"Basic REDACTED\"\r\n],\r\n\"code\": \"AuthorizationFailure\"}"},
+		{`error="Authorization: Basic FAKEPADDED==" status="401"`, `error="Authorization: Basic REDACTED" status="401"`},
+		{`{"error":{"message":"Authorization: Basic FAKEPADDED==","code":"AuthorizationFailure"}}`, `{"error":{"message":"Authorization: Basic REDACTED","code":"AuthorizationFailure"}}`},
+	} {
+		if got := RedactSecrets(tt[0]); got != tt[1] {
+			t.Errorf("RedactSecrets(%q) = %q, want %q", tt[0], got, tt[1])
+		}
+	}
+
+	// Text without a credential reads as written: job names made of parameters,
+	// the words "token" and "Authorization", and the S3 SDK's own error, whose
+	// URL carries none.
+	for _, clean := range []string{
+		"connection timeout after 30 seconds",
+		"✗ mass=5_1_phase=2_case=3: response=500 thickness=0.5",
+		"--config /tmp/cfg/Token has the name of the token file, which holds the API key; give the configuration file another name",
+		"failed to read token file: open /tmp/cfg/token: permission denied",
+		"the API token 5 of 7 expired",
+		"Authorization unavailable: owner SID not captured at daemon startup",
+		"Token file could not be read",
+		"token file could not be read",
+		"bearer of bad news",
+		`{"detail":"Token is invalid or expired"}`,
+		`operation error S3: PutObject, exceeded maximum number of attempts, 1, https response error StatusCode: 0, RequestID: , ` +
+			`HostID: , request send failed, Put "https://b.s3.us-east-1.amazonaws.com/user/in.dat?x-id=PutObject": connect: connection refused`,
+	} {
+		if got := RedactSecrets(clean); got != clean {
+			t.Errorf("RedactSecrets(%q) = %q, want it unchanged", clean, got)
+		}
 	}
 }
 
@@ -632,7 +762,18 @@ func TestIsCLIUsageError(t *testing.T) {
 		{"no valid files upload", "no valid files to upload", true},
 		{"no files found", "no files found matching criteria", true},
 
+		// Refusals of the flags given, which name them first
+		{"config names a directory", "--config /tmp/cfg names a directory; give the path of the configuration file", true},
+		{"config is the token", "--config /tmp/cfg/Token has the name of the token file, which holds the API key; give the configuration file another name", true},
+		{"output names a directory", "--output /tmp/out/ names a directory; give the path of the file to write", true},
+		{"flag for another mode", "--max-concurrent applies only when downloading all of a job's files, not with --file-id", true},
+		{"flag out of range", "--max-concurrent must be between 1 and 20, got 32", true},
+		{"conflicting flags", "only one of --overwrite, --skip, or --resume can be specified", true},
+		{"one flag twice", "use either --job-id or --id, not both: they are the same flag, so passing both discards one of the values", true},
+		{"flags that exclude", "cannot use both --ids and --jobs-csv", true},
+
 		// Real errors — should NOT be filtered
+		{"failure naming a flag", "failed to locate folder for XyZ: get file info failed: status 503: unavailable (use --permanent to delete by ID without trashing)", false},
 		{"server error", "API returned 500 internal server error", false},
 		{"auth error", "401 unauthorized", false},
 		{"network error", "connection refused", false},

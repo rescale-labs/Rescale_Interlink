@@ -74,7 +74,7 @@ func NewTransferService(apiClient *api.Client, eventBus *events.EventBus, config
 		apiClient:   apiClient,
 		eventBus:    eventBus,
 		queue:       queue,
-		logger:      logging.NewLogger("transfer-service", nil),
+		logger:      reporting.RedactedLogger("transfer-service", os.Stderr),
 		semaphore:   make(chan struct{}, config.MaxConcurrent),
 		resourceMgr: resourceMgr,
 		transferMgr: transferMgr,
@@ -1171,17 +1171,17 @@ func (ts *TransferService) checkBatchCompletion(batchID, direction string) {
 }
 
 // dominantFailure samples a batch's failed tasks and returns the most common
-// error class together with a representative message of that class.
+// error class together with a representative error of that class.
 // ok is false when no failed task recorded an error to reason about.
-func (ts *TransferService) dominantFailure(batchID string) (cls reporting.ErrorClass, representative string, ok bool) {
+func (ts *TransferService) dominantFailure(batchID string) (cls reporting.ErrorClass, representative error, ok bool) {
 	failedTasks := ts.queue.GetFailedTaskErrors(batchID, 5)
 	if len(failedTasks) == 0 {
-		return "", "", false
+		return "", nil, false
 	}
 
 	classCounts := make(map[reporting.ErrorClass]int)
-	for _, errMsg := range failedTasks {
-		classCounts[reporting.ClassifyErrorClass(errMsg)]++
+	for _, err := range failedTasks {
+		classCounts[reporting.ClassifyErrorClass(err)]++
 	}
 	var maxCount int
 	for c, count := range classCounts {
@@ -1191,9 +1191,9 @@ func (ts *TransferService) dominantFailure(batchID string) (cls reporting.ErrorC
 		}
 	}
 
-	for _, errMsg := range failedTasks {
-		if reporting.ClassifyErrorClass(errMsg) == cls {
-			return cls, errMsg, true
+	for _, err := range failedTasks {
+		if reporting.ClassifyErrorClass(err) == cls {
+			return cls, err, true
 		}
 	}
 	return cls, failedTasks[0], true
@@ -1207,7 +1207,7 @@ func (ts *TransferService) reportTotalBatchFailure(batchID, direction string) {
 	if !ok {
 		return // Nothing concrete to report
 	}
-	reporting.ClassifyAndPublish(ts.eventBus, errors.New(representative),
+	reporting.ClassifyAndPublish(ts.eventBus, representative,
 		reporting.CategoryTransfer, "folder_"+direction, "")
 }
 
@@ -1239,16 +1239,16 @@ func (ts *TransferService) reportPartialBatchFailure(batchID, direction string, 
 	case reporting.ClassServerError, reporting.ClassInternal:
 		// Use normal reporting path — these are already reportable via IsReportable.
 		// Re-classify using the representative error so the classifier sees the original markers.
-		reporting.ClassifyAndPublish(ts.eventBus, errors.New(representativeErr),
+		reporting.ClassifyAndPublish(ts.eventBus, representativeErr,
 			reporting.CategoryTransfer, "folder_"+direction, "")
 		return
 	}
 
 	// Build message with batch context + representative failure (for network/timeout override)
-	msg := fmt.Sprintf("batch %s partial failure: %d/%d succeeded, %d failed; representative error: %s",
+	err := fmt.Errorf("batch %s partial failure: %d/%d succeeded, %d failed; representative error: %w",
 		direction, bs.Completed, bs.Total, bs.Failed, representativeErr)
 
-	classified := reporting.Classify(errors.New(msg), reporting.CategoryTransfer, "folder_"+direction, "")
+	classified := reporting.Classify(err, reporting.CategoryTransfer, "folder_"+direction, "")
 	if classified == nil {
 		return
 	}

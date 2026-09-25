@@ -4,6 +4,7 @@ package wailsapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -670,7 +671,7 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 				info, statErr := os.Stat(localPath)
 				if statErr != nil {
 					wailsLogger.Error().Err(statErr).Str("path", localPath).Msg("Cannot access file/folder")
-					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Cannot access %s: %v", localPath, statErr))
+					a.failSingleJob(jobSpec.JobName, fmt.Errorf("Cannot access %s: %w", localPath, statErr))
 					return
 				}
 				if info.IsDir() {
@@ -689,13 +690,13 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 			}
 
 			if len(expandedPaths) == 0 {
-				a.failSingleJob(jobSpec.JobName, "No files found in the selected paths")
+				a.failSingleJob(jobSpec.JobName, errors.New("No files found in the selected paths"))
 				return
 			}
 
 			ts := a.engine.TransferService()
 			if ts == nil {
-				a.failSingleJob(jobSpec.JobName, "Transfer service not available")
+				a.failSingleJob(jobSpec.JobName, errors.New("Transfer service not available"))
 				return
 			}
 
@@ -733,7 +734,7 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 				})
 				if uploadErr != nil {
 					wailsLogger.Error().Err(uploadErr).Str("file", filePath).Msg("File upload failed")
-					a.failSingleJob(jobSpec.JobName, fmt.Sprintf("Upload failed: %v", uploadErr))
+					a.failSingleJob(jobSpec.JobName, fmt.Errorf("Upload failed: %w", uploadErr))
 					return
 				}
 				fileIDs = append(fileIDs, cloudFile.ID)
@@ -762,7 +763,8 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 // Pre-expansion failures (stat error, empty paths) happen before the row
 // exists; fall back to creating it at Index 1 so polling still shows a
 // failed state.
-func (a *App) failSingleJob(jobName string, errMsg string) {
+func (a *App) failSingleJob(jobName string, err error) {
+	errMsg := err.Error()
 	if sm := a.engine.GetState(); sm != nil {
 		updated := false
 		for _, js := range sm.GetAllStates() {
@@ -797,7 +799,7 @@ func (a *App) failSingleJob(jobName string, errMsg string) {
 	}
 
 	if a.reporter != nil {
-		a.reporter.Report(fmt.Errorf("%s", errMsg), reporting.CategoryJobCreate, "single_job", "")
+		a.reporter.Report(err, reporting.CategoryJobCreate, "single_job", "")
 	}
 }
 
@@ -910,7 +912,7 @@ func (a *App) GetRunStatus() RunStatusDTO {
 				if st := a.engine.GetState(); st != nil {
 					for _, js := range st.GetAllStates() {
 						if js.ErrorMessage != "" && !core.IsUnconfirmedCreate(js.SubmitStatus) {
-							status.Error = js.ErrorMessage
+							status.Error = reporting.RedactSecrets(js.ErrorMessage)
 							break
 						}
 					}
@@ -956,7 +958,7 @@ func (a *App) GetJobRows() []JobRowDTO {
 			Status:         state.SubmitStatus, // Use submit status as overall status
 			JobID:          state.JobID,
 			Progress:       0, // Transient - provided via events
-			Error:          state.ErrorMessage,
+			Error:          reporting.RedactSecrets(state.ErrorMessage),
 		}
 	}
 	return rows
@@ -1187,7 +1189,7 @@ func generateStateFilePath(runID string) string {
 		homeDir = "."
 	}
 	stateDir := filepath.Join(homeDir, ".rescale-int", "states")
-	os.MkdirAll(stateDir, 0755)
+	os.MkdirAll(stateDir, 0700) // a state file records each job's error
 	return filepath.Join(stateDir, fmt.Sprintf("%s.state", runID))
 }
 

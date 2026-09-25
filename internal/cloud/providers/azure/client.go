@@ -7,14 +7,19 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	nethttp "net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	azlog "github.com/Azure/azure-sdk-for-go/sdk/azcore/log"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
@@ -26,6 +31,7 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // AzureClient wraps the Azure blob client with auto-refreshing credentials and connection pooling.
@@ -131,11 +137,7 @@ func NewAzureClient(ctx context.Context, storageInfo *models.StorageInfo, apiCli
 	}
 
 	// Create Azure client with custom HTTP transport
-	client, err := azblob.NewClientWithNoCredential(sasURL, &azblob.ClientOptions{
-		ClientOptions: azcore.ClientOptions{
-			Transport: httpClient, // Critical: Preserve connection pool
-		},
-	})
+	client, err := newBlobClient(sasURL, httpClient) // Critical: Preserve connection pool
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Azure client: %w", err)
 	}
@@ -181,7 +183,13 @@ func buildSASURL(storageInfo *models.StorageInfo, creds *models.AzureCredentials
 		sasToken = GetPerFileSASToken(creds, fileInfo[0].PathParts.Path)
 	}
 
-	return fmt.Sprintf("https://%s.blob.core.windows.net/?%s", accountName, sasToken), nil
+	sasURL := fmt.Sprintf("https://%s.blob.core.windows.net/?%s", accountName, sasToken)
+	// The SDK parses this URL for each request, before the transport sees it,
+	// so it is checked here first, and only the cause is reported.
+	if _, err := url.Parse(sasURL); err != nil {
+		return "", fmt.Errorf("Azure storage URL from the API is not valid: %w", errors.Unwrap(err))
+	}
+	return sasURL, nil
 }
 
 // GetPerFileSASToken returns the blob-level SAS token for a specific file path,
@@ -253,11 +261,7 @@ func (c *AzureClient) EnsureFreshCredentials(ctx context.Context) error {
 	defer c.clientMu.Unlock()
 
 	// Recreate client with new SAS token BUT reuse HTTP transport
-	client, err := azblob.NewClientWithNoCredential(sasURL, &azblob.ClientOptions{
-		ClientOptions: azcore.ClientOptions{
-			Transport: c.httpClient, // CRITICAL: Reuse same HTTP client!
-		},
-	})
+	client, err := newBlobClient(sasURL, c.httpClient) // CRITICAL: Reuse same HTTP client!
 	if err != nil {
 		return fmt.Errorf("failed to recreate Azure client: %w", err)
 	}
@@ -290,6 +294,90 @@ func (c *AzureClient) RetryWithBackoff(ctx context.Context, operation string, fn
 		}
 		return err
 	})
+}
+
+// With AZURE_SDK_GO_LOGGING=all the SDK logs every request, response and error
+// to stderr, and a reason phrase or an error page can quote a signed URL. This
+// listener prints the SDK's own lines less their credentials. Without the
+// variable the SDK logs nothing and none is installed.
+func init() {
+	if os.Getenv("AZURE_SDK_GO_LOGGING") == "all" {
+		azlog.SetListener(func(event azlog.Event, msg string) {
+			fmt.Fprintf(os.Stderr, "[%s] %s: %s\n", time.Now().Format(time.StampMicro), event, reporting.RedactSecrets(msg))
+		})
+	}
+}
+
+// newBlobClient is the SDK client on sasURL over httpClient, sharing its
+// connection pool. A transport error's URL loses its query, the SAS token,
+// before the SDK, which logs and retries the error, or anything else formats it:
+// Go's HTTP client quotes the whole request URL. The SDK's response errors name
+// the URL without its query but quote the reason phrase and the body of any
+// status they did not expect, and a proxy's page can quote the request, so every
+// reason phrase is redacted, and every body but a GET's 200 or 206, the blob's
+// or GetBlockList's, which passes untouched; a redacted body is cut at a MiB.
+func newBlobClient(sasURL string, httpClient *nethttp.Client) (*azblob.Client, error) {
+	return azblob.NewClientWithNoCredential(sasURL, &azblob.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Transport: sasFreeTransport{httpClient}},
+	})
+}
+
+// errorBodyWait bounds the read of a body the transport redacts. azcore sets no
+// per-try timeout, so a page that stops arriving would hold the call until its
+// caller gave up; it ends where it stalled instead, keeping its status. Tests
+// replace afterFunc to fire the timer at the boundary.
+var (
+	errorBodyWait = 30 * time.Second
+	afterFunc     = time.AfterFunc
+)
+
+type sasFreeTransport struct{ *nethttp.Client }
+
+func (t sasFreeTransport) Do(req *nethttp.Request) (*nethttp.Response, error) {
+	resp, err := t.Client.Do(req)
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		urlErr.URL, _, _ = strings.Cut(urlErr.URL, "?")
+		urlErr.Err = redactedError{urlErr.Err}
+	}
+	if resp != nil { // a refused redirect returns its response with the error
+		resp.Status = reporting.RedactSecrets(resp.Status)
+	}
+	if err == nil && (req.Method != nethttp.MethodGet || resp.StatusCode != 200 && resp.StatusCode != 206) {
+		// The callback can outlive Stop, so it holds the page, not the field.
+		page := resp.Body
+		stall := afterFunc(errorBodyWait, func() { page.Close() })
+		body, readErr := io.ReadAll(io.LimitReader(page, 1<<20))
+		if !stall.Stop() {
+			readErr = nil
+		}
+		page.Close()
+		if readErr != nil {
+			return nil, redactedError{readErr}
+		}
+		resp.Body = io.NopCloser(strings.NewReader(reporting.RedactSecrets(string(body))))
+	}
+	return resp, err
+}
+
+// redactedError is a transport error's cause, or a failed read of a body to
+// redact, without the credentials its text can quote, such as a redirect's
+// Location that net/http could not parse. The retry classifier still sees the
+// cause: errors.Is and As reach it, and it answers Timeout and Temporary, which
+// url.Error asks of it.
+type redactedError struct{ error }
+
+func (e redactedError) Error() string { return reporting.RedactSecrets(e.error.Error()) }
+func (e redactedError) Unwrap() error { return e.error }
+
+func (e redactedError) Timeout() bool {
+	t, ok := e.error.(interface{ Timeout() bool })
+	return ok && t.Timeout()
+}
+
+func (e redactedError) Temporary() bool {
+	t, ok := e.error.(interface{ Temporary() bool })
+	return ok && t.Temporary()
 }
 
 // currentCredentials is the credential the client is built around right now.

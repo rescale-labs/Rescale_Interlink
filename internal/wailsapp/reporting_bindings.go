@@ -144,7 +144,7 @@ func (a *App) SaveLogExport(content string) (path string, err error) {
 		return "", nil // User cancelled
 	}
 
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(reporting.RedactSecrets(content)), 0600); err != nil {
 		return "", fmt.Errorf("write log export: %w", err)
 	}
 

@@ -3392,3 +3392,19 @@ func TestUploadStreamingPlansAfreshWhenTheBackendLostTheUpload(t *testing.T) {
 		t.Errorf("available upload memory = %d after the upload, want the full %d", got, int64(512*mib))
 	}
 }
+
+// A registration's hint follows its error's wording in any letter case: the
+// API's 408 says "Request Timeout".
+func TestRegisterHint(t *testing.T) {
+	for msg, want := range map[string]string{
+		"register file failed: status 408: 408 Request Timeout":                              " (API timeout - check network)",
+		"register file failed: status 504: upstream request timeout":                         " (API timeout - check network)",
+		`Post "https://platform.rescale.com/api/v3/files/": net/http: TLS handshake timeout`: " (connection pool exhausted - try reducing --max-concurrent)",
+		"rate limiter cancelled: context canceled":                                           " (rate limited - this is temporary)",
+		`register file failed: status 400: {"detail": "Bad request."}`:                       "",
+	} {
+		if got := registerHint(errors.New(msg)); got != want {
+			t.Errorf("registerHint(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}

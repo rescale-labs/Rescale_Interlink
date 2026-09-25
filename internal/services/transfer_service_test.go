@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
@@ -268,6 +271,61 @@ func TestCheckBatchCompletion_PartialAuthFailure(t *testing.T) {
 		t.Fatal("expected NO ReportableErrorEvent for partial auth failure, but got one")
 	case <-time.After(200 * time.Millisecond):
 		// Expected — auth errors in partial batch should NOT be reported
+	}
+}
+
+// A transfer refused by another transfer's upload lock is the user's to act
+// on, so a batch of them reports nothing: the refusal reaches the classifier as
+// the error it is, not as its text.
+func TestCheckBatchCompletion_LockRefusalsAreNotReported(t *testing.T) {
+	refused := fmt.Errorf("S3Storage upload failed: failed to acquire upload lock: %w", state.ErrUploadLocked)
+	for name, completed := range map[string]int{"every transfer refused": 0, "some transfers refused": 3} {
+		t.Run(name, func(t *testing.T) {
+			eb := events.NewEventBus(100)
+			defer eb.Close()
+			ch := eb.Subscribe(events.EventReportableError)
+			ts := NewTransferService(nil, eb, TransferServiceConfig{})
+			q := ts.GetQueue()
+			for i := 0; i < completed+2; i++ {
+				task := q.TrackTransferWithBatch(fmt.Sprintf("file%d.dat", i), 1024, transfer.TaskTypeUpload,
+					"/src", "/dst", "FileBrowser", "batch-locked", "TestBatch")
+				if i < completed {
+					q.Complete(task.ID)
+				} else {
+					q.Fail(task.ID, refused)
+				}
+			}
+
+			ts.checkBatchCompletion("batch-locked", "upload")
+
+			select {
+			case event := <-ch:
+				t.Fatalf("reported a lock refusal: %s", event.(*events.ReportableErrorEvent).ErrorMessage)
+			case <-time.After(200 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// The service logs each failed transfer to stderr, which the Windows daemon
+// keeps as daemon-stderr.log: an Azure SAS or an S3 presigned URL in the error
+// is redacted there.
+func TestTransferServiceLogsNoCredentials(t *testing.T) {
+	stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	orig := os.Stderr
+	os.Stderr = stderr
+	ts := NewTransferService(nil, nil, TransferServiceConfig{})
+	os.Stderr = orig
+	ts.logger.Error().Err(errors.New(`Put "https://a.blob.core.windows.net/c/f?comp=block&sig=SECRET": EOF`)).Msg("Upload failed")
+	ts.logger.Error().Err(errors.New(`Get "https://b.s3.amazonaws.com/k?X-Amz-Signature=SECRET": EOF`)).Msg("Download failed")
+
+	printed, _ := os.ReadFile(stderr.Name())
+	if strings.Contains(string(printed), "SECRET") || strings.Count(string(printed), "=REDACTED") != 2 {
+		t.Errorf("logged %q, want both credentials redacted", printed)
 	}
 }
 

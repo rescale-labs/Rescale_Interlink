@@ -1,16 +1,36 @@
 package reporting
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 )
 
+// usageError marks a refusal of what the user typed; see UsageError.
+type usageError struct{ error }
+
+func (e usageError) Unwrap() error { return e.error }
+
+// UsageError marks err as a refusal of the command line (a template, path or
+// other input the command will not take) that its wording alone does not show.
+// HandleCLIError prints it without a report. Mark only the command's own
+// refusals, never a failure it passes on.
+func UsageError(err error) error { return usageError{err} }
+
 // isCLIUsageError returns true for Cobra parse errors and local validation
 // errors that represent user mistakes, not system failures.
 func isCLIUsageError(msg string) bool {
 	lower := strings.ToLower(msg)
+
+	// Refusals of the flags given, which name them first: "--output X names a
+	// directory", "only one of --overwrite, --skip, or --resume can be
+	// specified". A failure from below never starts with a flag.
+	if strings.HasPrefix(msg, "--") || strings.HasPrefix(lower, "only one of --") ||
+		strings.HasPrefix(lower, "use either --") || strings.HasPrefix(lower, "cannot use both --") {
+		return true
+	}
 
 	// Cobra command/flag parse errors
 	if strings.HasPrefix(lower, "unknown flag") ||
@@ -117,7 +137,7 @@ func HandleCLIError(err error, mode, operation, backend string) string {
 	}
 
 	// CLI usage errors (typos, wrong flags, bad local paths) are user mistakes
-	if isCLIUsageError(err.Error()) {
+	if errors.As(err, new(usageError)) || isCLIUsageError(err.Error()) {
 		return ""
 	}
 

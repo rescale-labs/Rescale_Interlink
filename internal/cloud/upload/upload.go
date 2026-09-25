@@ -221,21 +221,7 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	// Register file with Rescale
 	cloudFile, err := params.APIClient.RegisterFile(ctx, fileReq)
 	if err != nil {
-		// Provide helpful context based on error type
-		fileName := filepath.Base(params.LocalPath)
-		if strings.Contains(err.Error(), "TLS handshake timeout") {
-			return nil, fmt.Errorf("failed to register file %s (connection pool exhausted - try reducing --max-concurrent): %w",
-				fileName, err)
-		}
-		if strings.Contains(err.Error(), "rate limiter") {
-			return nil, fmt.Errorf("failed to register file %s (rate limited - this is temporary): %w",
-				fileName, err)
-		}
-		if strings.Contains(err.Error(), "timeout") {
-			return nil, fmt.Errorf("failed to register file %s (API timeout - check network): %w",
-				fileName, err)
-		}
-		return nil, fmt.Errorf("failed to register file %s: %w", fileName, err)
+		return nil, fmt.Errorf("failed to register file %s%s: %w", filepath.Base(params.LocalPath), registerHint(err), err)
 	}
 
 	regTimer.StopWithMessage("file_id=%s", cloudFile.ID)
@@ -243,6 +229,21 @@ func UploadFile(ctx context.Context, params UploadParams) (*models.CloudFile, er
 	overallTimer.StopWithThroughput(fileInfo.Size())
 
 	return cloudFile, nil
+}
+
+// registerHint names the likely cause of a failed registration, from its
+// wording, or returns "".
+func registerHint(err error) string {
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "tls handshake timeout"):
+		return " (connection pool exhausted - try reducing --max-concurrent)"
+	case strings.Contains(msg, "rate limiter"):
+		return " (rate limited - this is temporary)"
+	case strings.Contains(msg, "timeout"):
+		return " (API timeout - check network)"
+	}
+	return ""
 }
 
 // destinationPathBase is the prefix a storage builds the object keys it

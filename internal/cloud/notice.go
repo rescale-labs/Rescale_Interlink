@@ -8,6 +8,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // NoticeFromAttempt is the retry number from which a retry is reported to the
@@ -35,13 +36,14 @@ type RetryEvent struct {
 
 // Notice returns the one-line message for this retry, or "" when the attempt is
 // too early to be worth reporting. Callers that render their own output use this
-// so the "when to speak up" rule lives in one place.
+// so the "when to speak up" rule lives in one place. It prints without --verbose,
+// even for a transfer that then succeeds, so the error is redacted.
 func (e RetryEvent) Notice() string {
 	if e.Attempt < NoticeFromAttempt {
 		return ""
 	}
-	return fmt.Sprintf("⟳ Retrying %s (attempt %d/%d, %s): %v — waiting %s",
-		e.Operation, e.Attempt, e.MaxAttempts, e.Cause, e.Err, e.NextDelay.Round(100*time.Millisecond))
+	return fmt.Sprintf("⟳ Retrying %s (attempt %d/%d, %s): %s — waiting %s",
+		e.Operation, e.Attempt, e.MaxAttempts, e.Cause, reporting.RedactSecrets(fmt.Sprint(e.Err)), e.NextDelay.Round(100*time.Millisecond))
 }
 
 // RetryObserver carries a caller's retry-visibility hooks down to the provider

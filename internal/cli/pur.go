@@ -22,6 +22,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 	"github.com/rescale/rescale-int/internal/pur/state"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/transfer/folder"
 	"github.com/rescale/rescale-int/internal/util/multipart"
 	"github.com/rescale/rescale-int/internal/util/tags"
@@ -138,7 +139,7 @@ Examples:
 			// Check if output exists
 			if !overwrite {
 				if _, err := os.Stat(outputPath); err == nil {
-					return fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath)
+					return reporting.UsageError(fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath))
 				}
 			}
 
@@ -339,7 +340,7 @@ Examples:
 			if generate {
 				if !overwrite {
 					if _, err := os.Stat(outputPath); err == nil {
-						return fmt.Errorf("output file %s exists (use --overwrite)", outputPath)
+						return reporting.UsageError(fmt.Errorf("output file %s exists (use --overwrite)", outputPath))
 					}
 				}
 
@@ -354,7 +355,7 @@ Examples:
 				var renderSkips, templateWarnings []string
 				jobs, renderSkips, templateWarnings, err = filescan.BuildJobs(templateJobs[0], result.Jobs)
 				if err != nil {
-					return err
+					return reporting.UsageError(err) // the template's own mistake
 				}
 				// A file the template could not render is as skipped as one the
 				// scan itself passed over, so the summary reports them together.
@@ -827,7 +828,9 @@ func printFailedJobs(w io.Writer, failed []*models.JobState) {
 	// A name comes from the jobs CSV or the state file, and a reason can quote an
 	// API response body: either can run to many lines, and a reason to a megabyte.
 	oneLine := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
-	field := func(s string, width int) string { return truncateField(sanitizeErrorString(oneLine.Replace(s)), width) }
+	field := func(s string, width int) string {
+		return truncateField(reporting.RedactSecrets(oneLine.Replace(s)), width)
+	}
 	for i, st := range failed {
 		if i == shown {
 			fmt.Fprintf(w, "... and %d more (--verbose lists them all)\n", len(failed)-shown)

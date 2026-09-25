@@ -10,6 +10,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/watch"
 )
 
@@ -102,16 +103,16 @@ func compatSyncCallbacks(cc *CompatContext, errorLabel string) *watch.Callbacks 
 		},
 		OnDownloadPass: func(jID string, err error) {
 			if err != nil {
-				cc.Printf("%s - sync download error for %s: %v\n",
-					FormatSLF4JTimestamp(time.Now()), jID, err)
+				cc.Printf("%s - sync download error for %s: %s\n",
+					FormatSLF4JTimestamp(time.Now()), jID, reporting.RedactSecrets(err.Error()))
 			}
 		},
 		OnTerminal: func(jID, finalStatus string) {
 			cc.Printf("Job %s reached terminal status: %s\n", jID, finalStatus)
 		},
 		OnError: func(jID string, err error) {
-			cc.Printf("%s - %s for %s: %v\n",
-				FormatSLF4JTimestamp(time.Now()), errorLabel, jID, err)
+			cc.Printf("%s - %s for %s: %s\n",
+				FormatSLF4JTimestamp(time.Now()), errorLabel, jID, reporting.RedactSecrets(err.Error()))
 		},
 	}
 }

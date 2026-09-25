@@ -9,6 +9,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // ErrorType represents different classes of errors for retry strategy
@@ -76,9 +78,10 @@ func ClassifyError(err error) ErrorType {
 	}
 
 	errStr := strings.ToLower(err.Error())
+	status, _ := reporting.StatusOf(err) // the status err states, not digits in a path
 
 	// Proxy authentication failures should not be retried (must check before generic network errors).
-	if strings.Contains(errStr, "407") ||
+	if status == 407 ||
 		strings.Contains(errStr, "proxy authentication required") ||
 		strings.Contains(errStr, "proxyauthenticationrequired") {
 		return ErrorTypeFatal
@@ -89,7 +92,7 @@ func ClassifyError(err error) ErrorType {
 	if strings.Contains(errStr, "expired") ||
 		strings.Contains(errStr, "invalid token") ||
 		strings.Contains(errStr, "expiredtoken") ||
-		strings.Contains(errStr, "403") ||
+		status == 403 ||
 		strings.Contains(errStr, "unauthorized") ||
 		strings.Contains(errStr, "authentication failed") ||
 		strings.Contains(errStr, "authenticationfailed") ||
@@ -130,11 +133,7 @@ func ClassifyError(err error) ErrorType {
 		strings.Contains(errStr, "serviceunavailable") ||
 		strings.Contains(errStr, "slowdown") ||
 		strings.Contains(errStr, "throttl") ||
-		strings.Contains(errStr, "429") ||
-		strings.Contains(errStr, "500") ||
-		strings.Contains(errStr, "502") ||
-		strings.Contains(errStr, "503") ||
-		strings.Contains(errStr, "504") ||
+		status == 429 || status == 500 || status == 502 || status == 503 || status == 504 ||
 		strings.Contains(errStr, "server busy") ||
 		strings.Contains(errStr, "serverbusy") ||
 		strings.Contains(errStr, "operationtimeout") ||
@@ -143,14 +142,8 @@ func ClassifyError(err error) ErrorType {
 		return ErrorTypeRetryable
 	}
 
-	// Client errors - don't retry (bad request, not found, etc.)
-	if strings.Contains(errStr, "400") ||
-		strings.Contains(errStr, "404") ||
-		strings.Contains(errStr, "invalid") {
-		return ErrorTypeFatal
-	}
-
-	// Unknown errors - treat as fatal to avoid infinite retries on unexpected errors
+	// Client errors (bad request, not found) and unknown errors - don't retry,
+	// to avoid infinite retries on unexpected errors
 	return ErrorTypeFatal
 }
 

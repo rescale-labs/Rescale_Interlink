@@ -11,6 +11,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // EventBridge forwards events from internal EventBus to Wails runtime.
@@ -212,12 +213,12 @@ func logEventToDTO(e *events.LogEvent) LogEventDTO {
 	dto := LogEventDTO{
 		Timestamp: e.Timestamp().Format(time.RFC3339Nano),
 		Level:     e.Level.String(),
-		Message:   e.Message,
+		Message:   reporting.RedactSecrets(e.Message),
 		Stage:     e.Stage,
 		JobName:   e.JobName,
 	}
 	if e.Error != nil {
-		dto.Error = e.Error.Error()
+		dto.Error = reporting.RedactSecrets(e.Error.Error())
 	}
 	return dto
 }
@@ -242,7 +243,7 @@ func stateChangeEventToDTO(e *events.StateChangeEvent) StateChangeEventDTO {
 		NewStatus:      e.NewStatus,
 		Stage:          e.Stage,
 		JobID:          e.JobID,
-		ErrorMessage:   e.ErrorMessage,
+		ErrorMessage:   reporting.RedactSecrets(e.ErrorMessage),
 		UploadProgress: e.UploadProgress,
 	}
 }
@@ -258,7 +259,7 @@ type ErrorEventDTO struct {
 func errorEventToDTO(e *events.ErrorEvent) ErrorEventDTO {
 	msg := ""
 	if e.Error != nil {
-		msg = e.Error.Error()
+		msg = reporting.RedactSecrets(e.Error.Error())
 	}
 	return ErrorEventDTO{
 		Timestamp: e.Timestamp().Format(time.RFC3339Nano),
@@ -312,7 +313,7 @@ func transferEventToDTO(e *events.TransferEvent) TransferEventDTO {
 		Speed:     e.Speed,
 	}
 	if e.Error != nil {
-		dto.Error = e.Error.Error()
+		dto.Error = reporting.RedactSecrets(e.Error.Error())
 	}
 	return dto
 }
@@ -344,7 +345,7 @@ func enumerationEventToDTO(e *events.EnumerationEvent) EnumerationEventDTO {
 		FilesFound:     e.FilesFound,
 		BytesFound:     e.BytesFound,
 		IsComplete:     e.IsComplete,
-		Error:          e.Error,
+		Error:          reporting.RedactSecrets(e.Error),
 		StatusMessage:  e.StatusMessage,
 		Phase:          e.Phase,
 		FoldersTotal:   e.FoldersTotal,
@@ -371,7 +372,7 @@ func scanProgressEventToDTO(e *events.ScanProgressEvent) ScanProgressEventDTO {
 		ItemsFound: e.ItemsFound,
 		IsComplete: e.IsComplete,
 		IsCached:   e.IsCached,
-		Error:      e.Error,
+		Error:      reporting.RedactSecrets(e.Error),
 	}
 }
 

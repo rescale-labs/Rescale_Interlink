@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // ExecuteCompat runs the compat-mode command tree.
@@ -44,7 +46,7 @@ func ExecuteCompat() (error, int) {
 	if err != nil {
 		if !cc.Quiet {
 			// SLF4J one-liner only — no Interlink error report box in compat mode
-			fmt.Fprintln(os.Stdout, FormatErrorMessage(err.Error()))
+			fmt.Fprintln(os.Stdout, FormatErrorMessage(reporting.RedactSecrets(err.Error())))
 		}
 		return err, ExitCodeCompatError
 	}

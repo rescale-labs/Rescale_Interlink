@@ -1,7 +1,10 @@
 package progress
 
 import (
+	"errors"
+	"fmt"
 	"log"
+	"os"
 	"strings"
 	"testing"
 )
@@ -89,6 +92,39 @@ func TestStdlibLogRoutesThroughSink(t *testing.T) {
 	}
 	if !strings.Contains(fallback.String(), "after") {
 		t.Errorf("log line after the bars should hit the terminal: %q", fallback.String())
+	}
+}
+
+// Every line a transfer prints can quote a storage error, and with it a signed
+// URL's credentials: its failure line, the log lines passed to the terminal, and
+// the notices written above the bars.
+func TestTransferOutputRedactsCredentials(t *testing.T) {
+	capture := func(std **os.File, fn func()) string {
+		f, err := os.CreateTemp(t.TempDir(), "out")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		orig := *std
+		*std = f
+		defer func() { *std = orig }()
+		fn()
+		out, _ := os.ReadFile(f.Name())
+		return string(out)
+	}
+	cause := errors.New(`failed to stage block 0: Put "https://a.blob.core.windows.net/c/f?comp=block&sig=SECRET": EOF`)
+	var logged strings.Builder
+	fmt.Fprintln(SinkWriter(&logged), cause)
+	for sink, out := range map[string]string{
+		"log line": logged.String(),
+		"notice":   capture(&os.Stderr, func() { fmt.Fprintln((&barGroup{}).LogWriter(), cause) }),
+		"failure line": capture(&os.Stdout, func() {
+			(&barBase{group: &barGroup{}}).finish("→", "/in/data.bin", "folder", "", cause)
+		}),
+	} {
+		if strings.Contains(out, "SECRET") || !strings.Contains(out, "sig=REDACTED") {
+			t.Errorf("the %s printed %q, want the signature redacted", sink, out)
+		}
 	}
 }
 

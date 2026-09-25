@@ -5,6 +5,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
 )
 
@@ -283,7 +284,7 @@ func transferTaskToDTO(t services.TransferTask) TransferTaskDTO {
 	}
 
 	if t.Error != nil {
-		dto.Error = t.Error.Error()
+		dto.Error = reporting.RedactSecrets(t.Error.Error())
 	}
 	if !t.StartedAt.IsZero() {
 		dto.StartedAt = t.StartedAt.Format(time.RFC3339)

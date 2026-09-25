@@ -72,7 +72,7 @@ Examples:
 			}
 
 			logger := GetLogger()
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -86,6 +86,10 @@ Examples:
 				Interval: time.Duration(interval) * time.Second,
 			}
 
+			// A job's last download pass is the one that counts: a job that
+			// completed while its results failed to download, or while the user
+			// cancelled that download, was not watched to a good end.
+			lastPass := map[string]error{}
 			cb := &watch.Callbacks{
 				OnStatusChange: func(jID, oldStatus, newStatus string) {
 					ts := time.Now().Format("15:04:05")
@@ -96,6 +100,7 @@ Examples:
 					}
 				},
 				OnDownloadPass: func(jID string, dlErr error) {
+					lastPass[jID] = dlErr
 					if dlErr != nil {
 						logger.Warn().Str("job_id", jID).Err(dlErr).Msg("Download pass error")
 					}
@@ -110,9 +115,19 @@ Examples:
 			}
 
 			if jobID != "" {
-				return runSingleJobWatch(ctx, jobID, outdir, maxConcurrent, filterPatterns, excludePatterns, searchTerms, cfg, cb, apiClient, logger)
+				err = runSingleJobWatch(ctx, jobID, outdir, maxConcurrent, filterPatterns, excludePatterns, searchTerms, cfg, cb, apiClient, logger)
+			} else {
+				err = runNewerThanWatch(ctx, newerThan, outdir, maxConcurrent, cfg, cb, apiClient, logger)
 			}
-			return runNewerThanWatch(ctx, newerThan, outdir, maxConcurrent, cfg, cb, apiClient, logger)
+			if err != nil {
+				return err
+			}
+			for jID, dlErr := range lastPass {
+				if dlErr != nil {
+					return fmt.Errorf("job %s: last download pass failed: %w", jID, dlErr)
+				}
+			}
+			return nil
 		},
 	}
 

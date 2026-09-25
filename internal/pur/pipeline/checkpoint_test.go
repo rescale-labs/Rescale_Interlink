@@ -32,16 +32,20 @@ func (s *stubUploader) UploadFileSync(ctx context.Context, params SyncUploadPara
 	return &models.CloudFile{ID: "file-123"}, nil
 }
 
-// breakStateWrites makes every later Save fail: the manager writes its CSV to
-// "<state file>.tmp" before renaming it into place, and os.Create refuses a
-// path a directory already occupies. Failure injection rather than a fake
-// manager, because the pipeline holds the concrete *state.Manager the GUI
-// shares with it.
+// breakStateWrites makes every later Save fail: the manager renames its CSV
+// into place, and no rename replaces a directory. The last state saved moves to
+// "<state file>.saved", which is what a resume would read. Failure injection
+// rather than a fake manager, because the pipeline holds the concrete
+// *state.Manager the GUI shares with it. t.Errorf, not Fatalf: a server's
+// handler calls it too.
 func breakStateWrites(t *testing.T, stateFile string) {
 	t.Helper()
 
-	if err := os.MkdirAll(stateFile+".tmp", 0o755); err != nil {
-		t.Fatalf("block state writes: %v", err)
+	if err := os.Rename(stateFile, stateFile+".saved"); err != nil {
+		t.Errorf("block state writes: %v", err)
+	}
+	if err := os.Mkdir(stateFile, 0o755); err != nil {
+		t.Errorf("block state writes: %v", err)
 	}
 }
 
@@ -142,7 +146,6 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 
 	var mu sync.Mutex
 	var created, submitted int
-	var breakErr error
 	server := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -152,9 +155,7 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 			w.WriteHeader(nethttp.StatusOK)
 		default:
 			created++
-			if err := os.MkdirAll(stateFile+".tmp", 0o755); err != nil {
-				breakErr = err
-			}
+			breakStateWrites(t, stateFile)
 			w.WriteHeader(nethttp.StatusCreated)
 			_, _ = w.Write([]byte(`{"id":"job-abc"}`))
 		}
@@ -196,9 +197,6 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if breakErr != nil {
-		t.Fatalf("break state writes: %v", breakErr)
-	}
 	if created != 1 {
 		t.Fatalf("job created %d times, want 1", created)
 	}
@@ -209,7 +207,7 @@ func TestJobCheckpointFailureStopsBeforeSubmission(t *testing.T) {
 		t.Errorf("run counts %d failed job(s), want 1", failed)
 	}
 
-	onDisk := stateOf(t, stateFile, 1)
+	onDisk := stateOf(t, stateFile+".saved", 1)
 	if onDisk.JobID != "" {
 		t.Errorf("JobID = %q on disk, want empty: the checkpoint failed", onDisk.JobID)
 	}

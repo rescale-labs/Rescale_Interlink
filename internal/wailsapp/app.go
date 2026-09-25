@@ -39,8 +39,9 @@ import (
 var Assets embed.FS
 
 var (
-	// wailsLogger is the package-level logger for Wails mode
-	wailsLogger *logging.Logger
+	// wailsLogger is the package-level logger for Wails mode. Errors it logs can
+	// quote a signed URL, so it writes through the redactor.
+	wailsLogger = reporting.RedactedLogger("wails", os.Stderr)
 )
 
 // App is the main Wails application struct.
@@ -131,6 +132,10 @@ func NewApp() *App {
 const maxLogMessageLen = 1000
 
 func (a *App) log(level string, stage string, message string) {
+	// A message can quote an error, and the terminal and interlink.log get no
+	// credentials.
+	message = reporting.RedactSecrets(message)
+
 	// Truncate very long messages to prevent memory issues
 	if len(message) > maxLogMessageLen {
 		message = message[:maxLogMessageLen] + "... (truncated)"
@@ -217,8 +222,7 @@ func (a *App) startup(ctx context.Context) {
 
 		// Route backend log.Printf to GUI Activity Logs via TeeWriter.
 		// This intercepts all stdlib log output and publishes to EventBus.
-		tee := logging.NewTeeWriter(os.Stderr, a.engine.Events())
-		log.SetOutput(tee)
+		log.SetOutput(stdLogTee(a.engine.Events()))
 
 		// Wire rate limit visibility notifications for GUI Activity Logs
 		eb := a.engine.Events()
@@ -248,6 +252,12 @@ func (a *App) startup(ctx context.Context) {
 	go a.launchTrayIfNeeded()
 
 	wailsLogger.Info().Msg("Wails application started")
+}
+
+// stdLogTee is where the GUI's standard logger writes: stderr, redacted, and
+// the Activity tab through the event bus.
+func stdLogTee(bus *events.EventBus) *logging.TeeWriter {
+	return logging.NewTeeWriter(reporting.RedactWriter(os.Stderr), bus)
 }
 
 func getHomeDir() string {
@@ -296,9 +306,6 @@ func Run(args []string) error {
 		fmt.Printf("[WARN] Failed to initialize file logging: %v\n", err)
 	}
 	defer CloseFileLogger()
-
-	// Initialize Wails logger
-	wailsLogger = logging.NewLogger("wails", nil)
 
 	// Set log level based on RESCALE_DEBUG environment variable
 	if os.Getenv("RESCALE_DEBUG") != "" {

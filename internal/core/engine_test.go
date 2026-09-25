@@ -564,3 +564,23 @@ func TestEngine_ScanToSpecs_RejectsUnsubstitutedTokens(t *testing.T) {
 		})
 	}
 }
+
+// The engine prints each log line to stdout as well: a line quoting a storage
+// error, an Azure SAS or an S3 presigned URL, carries no credential there.
+func TestPublishLogPrintsNoCredentials(t *testing.T) {
+	engine := newScanEngine(t)
+	stdout, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+	defer func(orig *os.File) { os.Stdout = orig }(os.Stdout)
+	os.Stdout = stdout
+	engine.publishLog(events.ErrorLevel, `upload failed: Put "https://a.blob.core.windows.net/c/f?comp=block&sig=SECRET": EOF`, "run", "job_1")
+	engine.publishLog(events.ErrorLevel, `download failed: Get "https://b.s3.amazonaws.com/k?X-Amz-Signature=SECRET": EOF`, "run", "job_2")
+
+	printed, _ := os.ReadFile(stdout.Name())
+	if strings.Contains(string(printed), "SECRET") || strings.Count(string(printed), "=REDACTED") != 2 {
+		t.Errorf("printed %q, want both credentials redacted", printed)
+	}
+}

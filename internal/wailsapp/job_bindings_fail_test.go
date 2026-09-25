@@ -1,11 +1,18 @@
 package wailsapp
 
 import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // appWithEngine spins up a minimal App wired to a real core.Engine so
@@ -30,7 +37,7 @@ func TestFailSingleJob_updatesExistingRow(t *testing.T) {
 	a, eng := appWithEngine(t)
 
 	eng.EnsureSingleJobState("job1")
-	a.failSingleJob("job1", "upload blew up")
+	a.failSingleJob("job1", errors.New("upload blew up"))
 
 	all := eng.GetState().GetAllStates()
 	if len(all) != 1 {
@@ -58,7 +65,7 @@ func TestFailSingleJob_preExpansionFallbackCreatesIndex1(t *testing.T) {
 	a, eng := appWithEngine(t)
 
 	// No EnsureSingleJobState call.
-	a.failSingleJob("ghost", "cannot access path")
+	a.failSingleJob("ghost", errors.New("cannot access path"))
 
 	all := eng.GetState().GetAllStates()
 	if len(all) != 1 || all[0].Index != 1 || all[0].JobName != "ghost" {
@@ -73,7 +80,7 @@ func TestFailSingleJob_publishesOneCompleteEvent(t *testing.T) {
 
 	ch := eng.Events().Subscribe(events.EventComplete)
 	eng.EnsureSingleJobState("job1")
-	a.failSingleJob("job1", "oops")
+	a.failSingleJob("job1", errors.New("oops"))
 
 	select {
 	case evt := <-ch:
@@ -90,5 +97,42 @@ func TestFailSingleJob_publishesOneCompleteEvent(t *testing.T) {
 		t.Errorf("unexpected second event: %T", evt)
 	case <-time.After(50 * time.Millisecond):
 		// good
+	}
+}
+
+// An upload that another transfer's lock refused fails the job, but it is the
+// user's to act on, so the GUI offers no error report for it.
+func TestFailSingleJob_lockRefusalIsNotReported(t *testing.T) {
+	a, eng := appWithEngine(t)
+	a.reporter = reporting.NewReporter(eng.Events())
+	ch := eng.Events().Subscribe(events.EventReportableError)
+
+	refused := fmt.Errorf("S3Storage upload failed: failed to acquire upload lock: %w", state.ErrUploadLocked)
+	a.failSingleJob("job1", fmt.Errorf("Upload failed: %w", refused))
+
+	select {
+	case event := <-ch:
+		t.Fatalf("reported a lock refusal: %s", event.(*events.ReportableErrorEvent).ErrorMessage)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// A GUI run's state file records each job's error, so its directories are the
+// user's alone, as the ones the PUR state manager creates are.
+func TestRunStateDirectoryIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission bits do not apply on Windows")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	generateStateFilePath("run")
+	for _, dir := range []string{"", "states"} {
+		info, err := os.Stat(filepath.Join(home, ".rescale-int", dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("%s has mode %v, want 0700", info.Name(), info.Mode().Perm())
+		}
 	}
 }

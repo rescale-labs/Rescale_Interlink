@@ -2,11 +2,94 @@ package reporting
 
 import (
 	"fmt"
+	"io"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/events"
+	"github.com/rescale/rescale-int/internal/logging"
 )
+
+// A credential's value ends where the text around it does: at a space, quote,
+// escape or markup, or a query's, list's or JSON object's separator. An XML or
+// JSON error body keeps its structure, and so its error code, without it.
+const credentialValue = `[^\s"'\\<&,;})\]]+`
+
+// Credentials an error's text can carry, removed by RedactSecrets.
+var (
+	// A parameter of a signed URL's query: each one azblob's SAS parser knows
+	// (sas.NewQueryParameters, less "snapshot") and each X-Amz-* one of an S3
+	// presigned URL. Only after "?" or "&" (or its JSON, HTML or percent
+	// escape, as a proxy's error page quotes the request), so that a job named
+	// "mass=5_1" or "phase=2" keeps its name.
+	reSignedURLParam = regexp.MustCompile(`(?i)([?&]|\\u0026|&amp;|&#38;|%3F|%26)(sig|se|st|sp|sv|sr|si|ss|srt|spr|sip|sdd|ses|scid|` +
+		`skoid|sktid|skt|ske|sks|skv|saoid|suoid|rsc[cdelt]|x-amz-[a-z0-9-]+)(=|%3D)` + credentialValue)
+	// A key's value, quoted or not; its quotes stay.
+	reAWSKey   = regexp.MustCompile(`(?i)((?:access.?key|secret.?key|session.?token)=\\?["']?)` + credentialValue)
+	reAzureKey = regexp.MustCompile(`(?i)(AccountKey=\\?["']?)` + credentialValue)
+	// An Authorization header's value however it is printed: the scheme stays
+	// and the rest of the field goes. A quoted value (JSON, a list) ends at its
+	// closing quote, one escaped in a log line at the escape, and a header's
+	// ("Authorization: Digest a="b", c = \"d\"", Go's map[Authorization:[Token
+	// abc]]) at the end of its line, list or quote, taking in its quoted
+	// parameters, escaped or not. A quote that opens on a space or closes before
+	// a word is the next field's, as status's is in
+	// error="Authorization: Basic YQ==" status="401".
+	// A bearer or token credential on its own is told from prose by its place,
+	// in any case: it fills a whole field, from the start of a line, a quote,
+	// bracket, tag or separator to the end of one, as "token abc" does and
+	// "Token file could not be read" does not.
+	reAuthorization = regexp.MustCompile(`(?im)(authorization["']?\s*[:=]\s*\[?\s*["']\s*(?:[a-z][\w-]*\s+)?)(?:\\.|[^"'\\\r\n])+|` +
+		`(authorization\\"\s*[:=]\s*\[?\s*\\"\s*(?:[a-z][\w-]*\s+)?)[^\\\r\n]+|` +
+		`(authorization\s*[:=]\s*\[?\s*(?:[a-z][\w-]*\s+)?)(?:=\s*(?:"(?:[^\s"][^"\r\n]*)?"|\\"(?:[^\s"\\][^"\\\r\n]*)?\\")\B|[^\r\n"'\[\])\\&<])+|` +
+		`((?:^|["'\[(=:,>]\s*)(?:bearer|token)\s+)[\w.~+/=-]+([\r"'\])\\,;&<]|$)`)
+	// Each value of an Authorization list, as JSON, Python or Go's %q prints a
+	// header's, on one line or indented over several: reAuthorization takes
+	// only the first.
+	reAuthorizationList = regexp.MustCompile(`(?i)authorization\\?["']?\s*[:=]\s*\[[^\]]*`)
+	reListValue         = regexp.MustCompile(`(?i)(\\["']\s*(?:[a-z][\w-]*\s+)?)[^"'\\\r\n]+(\\["'])|(["']\s*(?:[a-z][\w-]*\s+)?)(?:\\.|[^"'\\\r\n])+(["'])`)
+	reAWSAccessKeyID    = regexp.MustCompile(`AKIA[A-Z0-9]{16}`)
+)
+
+// RedactSecrets removes credentials from s: signed-URL signatures and tokens,
+// storage keys and authorization values. Error text goes through it on its way
+// to the terminal, a log, the GUI or a report, because an error can quote a
+// request URL, and a signed URL's query is its credential.
+func RedactSecrets(s string) string {
+	s = reSignedURLParam.ReplaceAllString(s, "${1}${2}${3}REDACTED")
+	s = reAWSKey.ReplaceAllString(s, "${1}REDACTED")
+	s = reAzureKey.ReplaceAllString(s, "${1}REDACTED")
+	s = reAuthorizationList.ReplaceAllStringFunc(s, func(list string) string {
+		i := strings.IndexByte(list, '[')
+		return list[:i] + reListValue.ReplaceAllString(list[i:], "${1}${3}REDACTED${2}${4}")
+	})
+	s = reAuthorization.ReplaceAllString(s, "${1}${2}${3}${4}REDACTED${5}")
+	s = reAWSAccessKeyID.ReplaceAllString(s, "[REDACTED_AWS_KEY]")
+	return s
+}
+
+// RedactWriter returns a writer that passes each write through RedactSecrets
+// on its way to w. Each write must hold whole lines, as the standard logger's,
+// zerolog's and cobra's do.
+func RedactWriter(w io.Writer) io.Writer { return redactWriter{w} }
+
+type redactWriter struct{ w io.Writer }
+
+func (r redactWriter) Write(p []byte) (int, error) {
+	if _, err := io.WriteString(r.w, RedactSecrets(string(p))); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// RedactedLogger is logging.NewLogger's logger for mode, writing its lines to w
+// through RedactWriter.
+func RedactedLogger(mode string, w io.Writer) *logging.Logger {
+	l := logging.NewLogger(mode, nil)
+	l.SetOutput(RedactWriter(w))
+	return l
+}
 
 // Regex patterns for redaction
 var (
@@ -23,8 +106,10 @@ var (
 )
 
 // RedactError strips sensitive data from an error message using an allowlist approach.
-// It removes hex tokens, URL query params, email addresses, and auth tokens.
+// On top of RedactSecrets it removes hex tokens, URL query params, email
+// addresses, auth tokens and home directories: a report leaves the machine.
 func RedactError(msg string) string {
+	msg = RedactSecrets(msg)
 	msg = hexTokenRe.ReplaceAllString(msg, "[REDACTED]")
 	msg = urlQueryRe.ReplaceAllString(msg, "?[REDACTED]")
 	msg = emailRe.ReplaceAllString(msg, "[EMAIL]")

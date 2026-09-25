@@ -10,6 +10,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/pur/doe"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/util/tags"
 )
 
@@ -97,7 +98,7 @@ Examples:
 			}
 			if outputPath != "" && !overwrite {
 				if _, err := os.Stat(outputPath); err == nil {
-					return fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath)
+					return reporting.UsageError(fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath))
 				}
 			}
 

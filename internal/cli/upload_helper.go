@@ -18,6 +18,7 @@ import (
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/util/glob"
 )
@@ -434,7 +435,7 @@ func UploadFilesWithIDs(
 			return fileBar
 		}
 
-		cloudFile, err := upload.UploadFile(ctx, upload.UploadParams{
+		cloudFile, err := uploadFileFn(ctx, upload.UploadParams{
 			LocalPath: fPath,
 			FolderID:  folderID,
 			APIClient: apiClient,
@@ -475,12 +476,19 @@ func UploadFilesWithIDs(
 		return nil
 	})
 
-	// Return first error but report count of all failures
-	if len(batchResult.Errors) > 0 {
-		if len(batchResult.Errors) == 1 {
-			return nil, batchResult.Errors[0]
+	// Return every error, read as the count of all failures and the first. A
+	// cancel stops the batch before it starts the files still queued, which
+	// leave no error of their own.
+	errs := batchResult.Errors
+	failed := len(items) - batchResult.Completed
+	if failed > len(errs) {
+		errs = append(errs, fmt.Errorf("%d file(s) not uploaded: %w", failed-len(errs), ctx.Err()))
+	}
+	if len(errs) > 0 {
+		if len(errs) == 1 {
+			return nil, errs[0]
 		}
-		return nil, fmt.Errorf("upload failed: %d file(s) failed (first error: %v)", len(batchResult.Errors), batchResult.Errors[0])
+		return nil, reporting.BatchError(fmt.Sprintf("upload failed: %d file(s) failed (first error: %v)", failed, errs[0]), errs)
 	}
 
 	// Summary

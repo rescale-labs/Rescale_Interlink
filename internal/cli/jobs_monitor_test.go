@@ -70,13 +70,10 @@ func TestMonitorJobUntilComplete_TerminalStatuses(t *testing.T) {
 	}
 }
 
-// runJobsTail executes the real 'jobs tail' command against a fake statuses
-// endpoint. Tail loops until the job is terminal, so the call is bounded: a
-// regression makes it poll forever rather than return, and the timeout turns
-// that into a fast failure instead of a hung suite.
-func runJobsTail(t *testing.T, statuses []models.JobStatusEntry) error {
+// useFakeStatuses points the CLI's API client, for one test, at a fake that
+// answers every request with statuses, as the job statuses endpoint does.
+func useFakeStatuses(t *testing.T, statuses []models.JobStatusEntry) {
 	t.Helper()
-
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"results": statuses})
@@ -88,6 +85,15 @@ func runJobsTail(t *testing.T, statuses []models.JobStatusEntry) error {
 		return api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"}), nil
 	}
 	t.Cleanup(func() { getAPIClientFn = orig })
+}
+
+// runJobsTail executes the real 'jobs tail' command against a fake statuses
+// endpoint. Tail loops until the job is terminal, so the call is bounded: a
+// regression makes it poll forever rather than return, and the timeout turns
+// that into a fast failure instead of a hung suite.
+func runJobsTail(t *testing.T, statuses []models.JobStatusEntry) error {
+	t.Helper()
+	useFakeStatuses(t, statuses)
 
 	cmd := newJobsTailCmd()
 	cmd.SetArgs([]string{"--job-id", "job123", "--interval", "1"})

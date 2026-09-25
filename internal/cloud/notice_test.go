@@ -49,6 +49,17 @@ func TestRetryEventNotice(t *testing.T) {
 	}
 }
 
+// The retry notice is printed redacted, without --verbose, even when the
+// transfer then succeeds.
+func TestRetryEventNoticeRedactsCredentials(t *testing.T) {
+	ev := RetryEvent{Operation: "StageBlock 1", Attempt: 2, MaxAttempts: 10, Cause: "network", Err: errors.New(
+		`Put "https://acct.blob.core.windows.net/container/file.bin?comp=block&sig=SECRETSIGNATURE%3D&sp=rwdlac": ` +
+			"dial tcp 192.0.2.1:443: connect: connection refused")}
+	if msg := ev.Notice(); strings.Contains(msg, "SECRETSIGNATURE") || !strings.Contains(msg, "sig=REDACTED") {
+		t.Errorf("notice %q, want the signature redacted", msg)
+	}
+}
+
 func TestRetryObserverNotify(t *testing.T) {
 	ev := RetryEvent{Operation: "PutObject", Attempt: 3, MaxAttempts: 10, Cause: "network",
 		Err: errors.New("connection reset"), NextDelay: time.Second}

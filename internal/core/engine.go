@@ -884,7 +884,7 @@ func (e *Engine) GetRunStats() (total, completed, failed, pending, unconfirmed i
 func (e *Engine) publishLog(level events.LogLevel, message, stage, jobName string) {
 	// Write to stdout directly (not log.Printf) to avoid double-publish
 	// when TeeWriter is active on stdlib log.
-	fmt.Printf("[%s] %s\n", level.String(), message)
+	fmt.Printf("[%s] %s\n", level.String(), reporting.RedactSecrets(message))
 
 	// Only publish events if enabled (to prevent deadlocks)
 	e.eventMu.RLock()

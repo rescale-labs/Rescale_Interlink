@@ -1133,17 +1133,17 @@ func (q *Queue) GetBatchTasks(batchID string, offset, limit int, stateFilter str
 	return page
 }
 
-// GetFailedTaskErrors returns error messages from failed tasks in a batch (up to limit).
-func (q *Queue) GetFailedTaskErrors(batchID string, limit int) []string {
+// GetFailedTaskErrors returns the errors of failed tasks in a batch (up to limit).
+func (q *Queue) GetFailedTaskErrors(batchID string, limit int) []error {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	var errs []string
+	var errs []error
 	for _, task := range q.tasks {
 		if task.BatchID != batchID || task.GetState() != TaskFailed {
 			continue
 		}
 		if err := task.GetError(); err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 			if len(errs) >= limit {
 				break
 			}

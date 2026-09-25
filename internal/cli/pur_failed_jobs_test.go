@@ -54,13 +54,16 @@ func TestPrintFailedJobs(t *testing.T) {
 		}
 	})
 
-	// A name is a CSV cell or a state-file field, which can hold anything.
+	// A name is a CSV cell or a state-file field, which can hold anything. A
+	// DOE sweep names jobs after its parameters, which must read as written.
 	t.Run("names over several lines or longer than any job's", func(t *testing.T) {
 		got := printed(
-			&models.JobState{JobName: "run_1\r\ncopy\nsig=FAKE%2BSIG%3D", ErrorMessage: "reason"},
+			&models.JobState{JobName: "run_1\r\ncopy\n?sig=FAKE%2BSIG%3D", ErrorMessage: "reason"},
 			&models.JobState{JobName: strings.Repeat("n", 1<<12), ErrorMessage: "reason"},
+			&models.JobState{JobName: "mass=5_1_phase=2_case=3", ErrorMessage: "response=500"},
 		)
-		want := "✗ run_1 copy sig=REDACTED: reason\n✗ " + strings.Repeat("n", 125) + "...: reason\n"
+		want := "✗ run_1 copy ?sig=REDACTED: reason\n✗ " + strings.Repeat("n", 125) + "...: reason\n" +
+			"✗ mass=5_1_phase=2_case=3: response=500\n"
 		if got != want {
 			t.Errorf("printed\n%s\nwant\n%s", got, want)
 		}

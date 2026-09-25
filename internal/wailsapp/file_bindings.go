@@ -17,7 +17,6 @@ import (
 	"github.com/rescale/rescale-int/internal/events"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/localfs"
-	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
@@ -34,20 +33,21 @@ func translateAPIError(err error) string {
 
 	errStr := err.Error()
 	errLower := strings.ToLower(errStr)
+	status, _ := reporting.StatusOf(err) // the status err states, not digits in a name or ID
 
 	// Common error patterns and their user-friendly messages
 	switch {
 	case strings.Contains(errLower, "duplicate") || strings.Contains(errLower, "already exists"):
 		return "Item already exists with that name"
-	case strings.Contains(errLower, "401") || strings.Contains(errLower, "unauthorized"):
+	case status == 401 || strings.Contains(errLower, "unauthorized"):
 		return "API key is invalid or expired - please update your API key"
-	case strings.Contains(errLower, "403") || strings.Contains(errLower, "forbidden"):
+	case status == 403 || strings.Contains(errLower, "forbidden"):
 		return "Access denied - you don't have permission for this operation"
-	case strings.Contains(errLower, "404") || strings.Contains(errLower, "not found"):
+	case status == 404 || strings.Contains(errLower, "not found"):
 		return "Item not found - it may have been deleted or moved"
-	case strings.Contains(errLower, "429") || strings.Contains(errLower, "rate limit"):
+	case status == 429 || strings.Contains(errLower, "rate limit"):
 		return "Rate limit exceeded - please wait a moment and try again"
-	case strings.Contains(errLower, "500") || strings.Contains(errLower, "internal server"):
+	case status == 500 || strings.Contains(errLower, "internal server"):
 		return "Server error - please try again later"
 	case strings.Contains(errLower, "timeout") || strings.Contains(errLower, "deadline exceeded"):
 		return "Request timed out - check your network connection"
@@ -55,7 +55,7 @@ func translateAPIError(err error) string {
 		return "Cannot connect to server - check your network connection"
 	default:
 		// Pass through the original error for uncommon errors
-		return errStr
+		return reporting.RedactSecrets(errStr)
 	}
 }
 
@@ -927,11 +927,15 @@ func (a *App) CheckFoldersExistForUpload(folderNames []string, parentFolderID st
 	return results
 }
 
+// folderUploadAPI is the API a folder upload runs against: the engine's. A test
+// swaps in a fake, since the engine's own client reaches only the platform.
+var folderUploadAPI = func(a *App) *api.Client { return a.engine.API() }
+
 // StartFolderUpload uploads a local folder recursively to the Rescale platform.
 // Creates remote folder structure (merge mode: reuses existing folders), scans local
 // files, and queues them to TransferService. Returns immediately — scan and uploads
 // proceed in background.
-func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTags []string) FolderUploadResultDTO {
+func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTags []string) (result FolderUploadResultDTO) {
 	displayName := filepath.Base(localPath)
 	a.logInfo("folder-upload", fmt.Sprintf("Starting folder upload: %s", displayName))
 
@@ -966,10 +970,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		}
 	}
 
-	// Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths
+	// Deferred completion — ensures EventEnumerationCompleted is emitted on ALL exit paths.
+	// The result's error quotes the API's, which can quote credentials.
 	completionEmitted := false
 	var deferredError string
 	defer func() {
+		result.Error = reporting.RedactSecrets(result.Error)
 		if !completionEmitted {
 			phase := events.EnumPhaseComplete
 			if deferredError != "" {
@@ -986,7 +992,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 	}
 
 	// Get API client from engine
-	apiClient := a.engine.API()
+	apiClient := folderUploadAPI(a)
 	if apiClient == nil {
 		deferredError = "API client not configured"
 		return FolderUploadResultDTO{Error: "API client not configured"}
@@ -1019,8 +1025,8 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		return FolderUploadResultDTO{Error: deferredError}
 	}
 
-	// Create logger for this upload
-	logger := logging.NewLogger("folder-upload", nil)
+	// The GUI's logger, which keeps credentials off stderr
+	logger := wailsLogger
 	ctx := context.Background()
 
 	inthttp.WarmupProxyIfNeeded(ctx, apiClient.GetConfig())

@@ -91,7 +91,7 @@ Security:
 			applyTimingFlag(timing)
 
 			// Initialize logger
-			logger = logging.NewDefaultCLILogger()
+			logger = reporting.RedactedLogger("cli", os.Stdout)
 			if VerboseOutput() {
 				logging.SetGlobalLevel(-1) // Debug level (zerolog.DebugLevel)
 			}
@@ -121,6 +121,10 @@ Security:
 			})
 		},
 	}
+
+	// Cobra prints a failed command's error itself, so it goes through the
+	// same redaction as every other output.
+	rootCmd.SetErr(reporting.RedactWriter(os.Stderr))
 
 	// Global flags
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "Configuration file path")
@@ -361,7 +365,7 @@ func VerboseOutput() bool {
 // GetLogger returns the global CLI logger.
 func GetLogger() *logging.Logger {
 	if logger == nil {
-		logger = logging.NewDefaultCLILogger()
+		logger = reporting.RedactedLogger("cli", os.Stdout)
 	}
 	return logger
 }

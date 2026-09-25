@@ -3,6 +3,8 @@ package progress
 import (
 	"io"
 	"sync"
+
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // While progress bars are live, mpb owns the terminal: it redraws its frame on a
@@ -47,9 +49,10 @@ func LogSink() io.Writer {
 // SinkWriter returns a writer that sends each write to the active progress
 // display when there is one and to fallback otherwise. It resolves the sink per
 // write, so it can be installed once (log.SetOutput) and will follow progress
-// bars as they come and go.
+// bars as they come and go. Log lines quote storage errors, so each write is
+// redacted first (reporting.RedactSecrets).
 func SinkWriter(fallback io.Writer) io.Writer {
-	return sinkRouter{fallback: fallback}
+	return reporting.RedactWriter(sinkRouter{fallback: fallback})
 }
 
 type sinkRouter struct {

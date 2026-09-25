@@ -1,11 +1,14 @@
 package state
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -340,5 +343,78 @@ func TestMayAlreadyExist(t *testing.T) {
 				t.Errorf("MayAlreadyExist() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// A job's recorded reason can quote a storage URL with its SAS signature, and
+// the state file stays on disk after the run. It is the user's alone, and it
+// keeps the reason without the credential.
+func TestStateFileIsPrivateAndHoldsNoCredentials(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	mgr := NewManager(filepath.Join(dir, "run.csv"))
+	st := mgr.InitializeState(1, "job_1", "/runs/Run_1")
+	st.UploadStatus = "failed"
+	st.ErrorMessage = `failed to stage block 0: Put "https://acct.blob.core.windows.net/container/file.bin?comp=block` +
+		`&sig=SECRETSIGNATURE%3D&sp=rwdlac": dial tcp 192.0.2.1:443: connect: connection refused`
+	if err := mgr.UpdateState(st); err != nil {
+		t.Fatalf("UpdateState: %v", err)
+	}
+
+	data, err := os.ReadFile(mgr.FilePath())
+	if err != nil || strings.Contains(string(data), "SECRETSIGNATURE") || !strings.Contains(string(data), "sig=REDACTED") {
+		t.Errorf("the state file holds %q (%v), want the reason without its signature", data, err)
+	}
+	if runtime.GOOS == "windows" {
+		return // no Unix permission bits
+	}
+	for path, want := range map[string]os.FileMode{dir: 0o700, mgr.FilePath(): 0o600} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Errorf("%s has mode %v, want %v", path, got, want)
+		}
+	}
+}
+
+// Two runs on one state file can save at once. Each save writes a temp file of
+// its own, so none fails and the state file is always one run's whole state,
+// saved in the latest round.
+func TestConcurrentSavesKeepTheStateFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.csv")
+	for round := range 50 {
+		var wg sync.WaitGroup
+		errs := make(chan error, 8)
+		for run := range 2 {
+			mgr := NewManager(path)
+			name := fmt.Sprintf("job_%d_%d", round, run)
+			mgr.InitializeState(1, name, "/runs/"+name)
+			for range 4 {
+				wg.Go(func() {
+					// Windows can refuse a rename onto a file another rename is
+					// replacing, with ERROR_ACCESS_DENIED (5) or ERROR_SHARING_VIOLATION
+					// (32), two of the errors Go's own robustio retries a rename on.
+					var linkErr *os.LinkError
+					if err := mgr.Save(); err != nil && !(runtime.GOOS == "windows" && errors.As(err, &linkErr) && linkErr.Op == "rename" &&
+						(linkErr.Err == syscall.Errno(5) || linkErr.Err == syscall.Errno(32))) {
+						errs <- err
+					}
+				})
+			}
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Fatalf("round %d: a save failed: %v", round, err)
+		}
+		loaded := NewManager(path)
+		err := loaded.Load()
+		if got := loaded.GetState(1); err != nil || got == nil || !strings.HasPrefix(got.JobName, fmt.Sprintf("job_%d_", round)) || got.Directory != "/runs/"+got.JobName {
+			t.Fatalf("round %d: the state file holds %+v (%v), want one of this round's runs, whole", round, got, err)
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Dir(path)); err != nil || len(entries) != 1 {
+		t.Errorf("the state directory holds %d entries (%v), want the state file alone", len(entries), err)
 	}
 }
