@@ -35,6 +35,7 @@ vi.mock('../../wailsjs/go/wailsapp/App', () => ({
   SaveConfig: vi.fn(() => Promise.resolve()),
   TestConnection: vi.fn(() => Promise.resolve()),
   SelectFile: vi.fn(() => Promise.resolve('')),
+  LoadJobsFromJSON: vi.fn(() => Promise.resolve([])),
   SelectDirectory: vi.fn(() => Promise.resolve('')),
 
   // File browser bindings

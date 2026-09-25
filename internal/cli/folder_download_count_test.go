@@ -194,3 +194,68 @@ func captureStderr(t *testing.T, f func()) string {
 	said, _ := os.ReadFile(file.Name())
 	return string(said)
 }
+
+// A folder download counts a folder it creates, root included, as created, and
+// one it merges into as merged: merges used to be counted as creations, and the
+// root's count was overwritten by the count of the folders below it.
+func TestDownloadFolderRecursive_CountsFolders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.Contains(r.URL.Path, "/folder123/") {
+			fmt.Fprint(w, `{"results":[]}`)
+			return
+		}
+		fmt.Fprint(w, `{"results":[`+
+			`{"type":"folder","item":{"id":"d1","name":"new1"}},`+
+			`{"type":"folder","item":{"id":"d2","name":"new2"}},`+
+			`{"type":"folder","item":{"id":"d3","name":"old1"}},`+
+			`{"type":"folder","item":{"id":"d4","name":"old2"}},`+
+			`{"type":"folder","item":{"id":"d5","name":"old3"}}]}`)
+	}))
+	defer server.Close()
+	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+	origMode, origFolder := askFolderDownloadMode, promptFolderDownloadConflictFn
+	t.Cleanup(func() { askFolderDownloadMode, promptFolderDownloadConflictFn = origMode, origFolder })
+	askFolderDownloadMode = func() (FolderDownloadMode, error) { return FolderDownloadModePrompt, nil }
+	promptFolderDownloadConflictFn = func(name, _ string) (FolderDownloadConflictAction, error) {
+		if name == "old3" {
+			return FolderDownloadSkipOnce, nil
+		}
+		return FolderDownloadMergeOnce, nil
+	}
+
+	for _, tc := range []struct {
+		name     string
+		existing []string // folders an earlier run left, root first
+		created  int
+		said     string
+	}{
+		{"into a new root", nil, 6, "✓ Created 5 local directories\n"},
+		{"into an existing tree", []string{"", "old1", "old2", "old3"}, 2, "✓ Handled 5 directories (2 created, 2 merged, 1 skipped)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outDir := t.TempDir()
+			for _, dir := range tc.existing {
+				if err := os.MkdirAll(filepath.Join(outDir, "myfolder", dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var result *DownloadResult
+			var err error
+			var printed string
+			captureStderr(t, func() { // the scan's progress line
+				printed = captureStdout(t, func() {
+					result, err = DownloadFolderRecursive(context.Background(), "folder123", "myfolder", outDir,
+						false, false, false, false, 1, true, false, client, logging.NewLoggerWithWriter(io.Discard),
+						resources.NewManager(resources.Config{AutoScale: true, MaxThreads: 4}))
+				})
+			})
+			if err != nil {
+				t.Fatalf("DownloadFolderRecursive: %v", err)
+			}
+			if result.FoldersCreated != tc.created || !strings.Contains(printed, tc.said) {
+				t.Errorf("counted %d folders created and printed\n%s\nwant %d and %q", result.FoldersCreated, printed, tc.created, tc.said)
+			}
+		})
+	}
+}

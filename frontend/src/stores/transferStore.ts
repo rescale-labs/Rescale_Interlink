@@ -124,7 +124,7 @@ interface TransferStore {
   cancelBatch: (batchID: string) => Promise<void>
   retryTransfer: (taskId: string) => Promise<string | null>
   retryFailedInBatch: (batchID: string) => Promise<void>
-  clearCompletedTransfers: () => void
+  clearCompletedTransfers: () => Promise<void>
   toggleBatchExpanded: (batchID: string) => void
   setBatchStatusFilter: (batchID: string, filter: string) => void
   handleProgressEvent: (event: ProgressEventDTO) => void
@@ -661,8 +661,13 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  clearCompletedTransfers: () => {
-    App.ClearCompletedTransfers()
+  clearCompletedTransfers: async () => {
+    try {
+      await App.ClearCompletedTransfers()
+    } catch (error) {
+      console.error('Failed to clear completed transfers:', error)
+      return
+    }
     // Invalidate all expanded batch caches — composition changed
     set(state => {
       const newEpochs = new Map(state.batchEpochs)

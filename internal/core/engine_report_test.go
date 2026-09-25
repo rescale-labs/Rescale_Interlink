@@ -60,8 +60,8 @@ func TestFailedRunIsReportedOnItsJobsErrors(t *testing.T) {
 			second := tc.job
 			second.JobName = "job2"
 
-			if err := engine.RunFromSpecs(context.Background(), []models.JobSpec{tc.job, second}, filepath.Join(t.TempDir(), "state.csv")); err == nil {
-				t.Fatal("RunFromSpecs succeeded, want a job failed")
+			if err := engine.RunFromSpecsWithOptions(context.Background(), []models.JobSpec{tc.job, second}, filepath.Join(t.TempDir(), "state.csv"), RunOptions{}); err == nil {
+				t.Fatal("the run succeeded, want a job failed")
 			}
 			got := ""
 			select {

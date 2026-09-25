@@ -25,7 +25,7 @@ export type {
 } from './jobStore';
 
 // Run session persistence stores
-export { useRunStore, isUnconfirmedRow } from './runStore';
+export { useRunStore, isUnconfirmedRow, isFailedRow } from './runStore';
 export { useSingleJobStore } from './singleJobStore';
 
 // Error report store

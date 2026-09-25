@@ -559,3 +559,47 @@ describe('runStore polling: a poll still outstanding when the run ends', () => {
     expect(run.unconfirmedJobs).toBe(0)
   })
 })
+
+// A job whose create call the platform answered with a rejection.
+function rejectedRow(jobName: string): JobRow {
+  return baseRow({
+    jobName,
+    tarStatus: 'completed',
+    uploadStatus: 'completed',
+    createStatus: 'failed',
+    error: 'FAKE create rejected',
+  })
+}
+
+describe('runStore: a rejected creation counts as failed before the run ends', () => {
+  it('when the state change arrives', () => {
+    const store = useRunStore.getState()
+    store.setupEventListeners()
+    store.registerRun('run_r1', 'pur', 1, [baseRow()])
+
+    runtime.handlers.get('interlink:state_change')!({ jobName: 'job1', stage: 'create', newStatus: 'failed' })
+
+    expect(useRunStore.getState().activeRun!.failedJobs).toBe(1)
+  })
+
+  it('when a poll taken before the answer arrives', async () => {
+    app.GetRunStatus.mockResolvedValue(runningStatus)
+    app.GetJobRows.mockResolvedValue([staleCreatingRow('job1')])
+
+    useRunStore.getState().registerRun('run_r2', 'pur', 1, [rejectedRow('job1')])
+    useRunStore.getState().startPolling(60_000)
+
+    await vi.waitFor(() => expect(useRunStore.getState().activeRun!.failedJobs).toBe(1))
+  })
+
+  it('when a cancelled run is finalized', async () => {
+    vi.useFakeTimers()
+    useRunStore.getState().registerRun('run_r3', 'pur', 1, [rejectedRow('job1')])
+
+    const cancelled = useRunStore.getState().cancelRun()
+    await vi.advanceTimersByTimeAsync(5000)
+    await cancelled
+
+    expect(useRunStore.getState().completedRuns[0].failedJobs).toBe(1)
+  })
+})

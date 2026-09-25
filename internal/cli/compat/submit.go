@@ -199,7 +199,6 @@ func newSubmitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&pCluster, "p-cluster", "", "Persistent cluster ID")
 	cmd.Flags().BoolVar(&waiveSLA, "waive-sla", false, "Waive SLA (low priority)")
 
-
 	// Accepted-but-ignored flags (rescale-cli has these, scripts may pass them)
 	var verify string
 	var maxConcurrent int
@@ -291,39 +290,15 @@ func compatAddFileToZip(w *zip.Writer, filePath string) error {
 	return err
 }
 
-// compatE2EDownload downloads job output files with optional filtering.
+// compatE2EDownload downloads the output files of a job submit -E has seen
+// through, filtered as its -f, --exclude and -s flags ask.
 func compatE2EDownload(ctx context.Context, jobID string, fileMatchers []string, excludeTerm, searchTerm string, apiClient *api.Client, cc *CompatContext) error {
-	allFiles, err := apiClient.ListJobFiles(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("failed to list job files: %w", err)
-	}
-
-	if len(allFiles) == 0 {
-		cc.Printf("No output files found\n")
-		return nil
-	}
-
-	files := allFiles
-
-	// Apply filters
-	if len(fileMatchers) > 0 || excludeTerm != "" || searchTerm != "" {
-		var filtered []models.JobFile
-		for _, f := range files {
-			if !matchesE2EFilters(f.Name, fileMatchers, excludeTerm, searchTerm) {
-				continue
-			}
-			filtered = append(filtered, f)
-		}
-		files = filtered
-	}
-
-	if len(files) == 0 {
-		cc.Printf("No files match the specified filters\n")
-		return nil
-	}
-
-	cc.Printf("Downloading %d output file(s)...\n", len(files))
-	return compatDownloadByJobID(ctx, jobID, compatDownloadOpts{OutputDir: "."}, apiClient, cc)
+	return compatDownloadByJobID(ctx, jobID, compatDownloadOpts{
+		OutputDir:    ".",
+		FileMatchers: fileMatchers,
+		ExcludeTerm:  excludeTerm,
+		SearchTerm:   searchTerm,
+	}, apiClient, cc)
 }
 
 // matchesE2EFilters checks if a filename passes the E2E download filters.
@@ -391,7 +366,7 @@ var submitCLIOnlyTopKeys = map[string]interface{}{
 	"htcSettings":          nil,
 	"isInteractive":        false,
 	"isLargeDoe":           false,
-	"jobUsername":           nil,
+	"jobUsername":          nil,
 	"ownerCompanyCode":     nil,
 	"ownerId":              nil,
 }

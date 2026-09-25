@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -441,5 +443,52 @@ func TestJobSpecDTO_CarriesSSHFields(t *testing.T) {
 	spec := dtoToJobSpec(dto)
 	if spec.CIDRRule != "10.0.0.0/8" || spec.PublicKey != "ssh-ed25519 AAAAC3Nz" || spec.SSHPort != 2222 {
 		t.Errorf("dtoToJobSpec dropped the SSH fields: %+v", spec)
+	}
+}
+
+// The GUI's PUR and single-job runs are refused before they start, with the
+// CLI's own checks, when the pipeline cannot run them: a worker count of zero
+// stalled the run, a negative one panicked while the pipeline was built, and an
+// unrecognized submit mode created every job and submitted none.
+func TestStartRun_RefusesWhatThePipelineCannotRun(t *testing.T) {
+	setIsolatedUserConfigEnv(t)
+	for _, tc := range []struct {
+		name, submitMode string
+		tarWorkers       int
+		want             string
+	}{
+		{"zero workers", "", 0, "tar_workers must be at least 1 (got 0)"},
+		{"negative workers", "", -1, "tar_workers must be at least 1 (got -1)"},
+		{"unknown submit mode", "maybe", 4, `unrecognized submitMode: "maybe"`},
+	} {
+		for _, start := range []struct {
+			name string
+			run  func(*App, JobSpecDTO) (string, error)
+		}{
+			{"PUR", func(a *App, job JobSpecDTO) (string, error) {
+				return a.StartBulkRunWithOptions([]JobSpecDTO{job}, PURRunOptionsDTO{})
+			}},
+			{"single job", func(a *App, job JobSpecDTO) (string, error) {
+				return a.StartSingleJob(SingleJobInputDTO{InputMode: "remoteFiles", RemoteFileIDs: []string{"FAKE"}, Job: job})
+			}},
+		} {
+			t.Run(start.name+"/"+tc.name, func(t *testing.T) {
+				cfg, err := config.LoadConfigCSV("") // defaults, no API key: nothing can reach a server
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg.TarWorkers = tc.tarWorkers
+				eng, err := core.NewEngine(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a := &App{engine: eng}
+				runID, err := start.run(a, JobSpecDTO{JobName: "job1", SubmitMode: tc.submitMode})
+				if err == nil || !strings.Contains(err.Error(), tc.want) || eng.IsRunActive() {
+					t.Errorf("started run %q (active %v) with error %v, want it refused with %q",
+						runID, eng.IsRunActive(), err, tc.want)
+				}
+			})
+		}
 	}
 }

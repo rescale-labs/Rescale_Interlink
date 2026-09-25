@@ -2,6 +2,9 @@ package core
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/models"
@@ -131,6 +135,44 @@ func TestEngine_Config(t *testing.T) {
 				t.Errorf("APIBaseURL = %q, want %q", got.APIBaseURL, tc.wantAPIBaseURL)
 			}
 		})
+	}
+}
+
+// The GUI checks a run's configuration before starting it, but shares that
+// configuration with the Setup tab, which can change it while the run is being
+// set up: here while the upload folder resolves, with the engine's lock
+// released. A worker count changed to -1 in that window panicked in make(chan …)
+// and 0 stalled the run, so the run is built from the copy that was checked.
+func TestRunIsBuiltFromTheCheckedConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg, _ := config.LoadConfigCSV("")
+	cfg.APIKey, cfg.ProxyMode, cfg.ProxyHost, cfg.ProxyPort = "test-key", "basic", "127.0.0.1", 9
+	engine, err := NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := *cfg
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/FAKE-PARENT/contents/") {
+			cfg.TarWorkers = -1
+			_, _ = io.WriteString(w, `{"results":[{"type":"folder","item":{"id":"FAKE-RUNS","name":"runs"}}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	engine.apiClient = api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test-key"})
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("the run was built from the changed config: %v", r)
+		}
+	}()
+
+	job := models.JobSpec{JobName: "job1", Directory: filepath.Join(t.TempDir(), "missing")}
+	err = engine.RunFromSpecsWithOptions(context.Background(), []models.JobSpec{job}, filepath.Join(t.TempDir(), "state.csv"),
+		RunOptions{Config: &checked, UploadFolderParent: "FAKE-PARENT", UploadFolder: "runs"})
+	if err == nil || !strings.Contains(err.Error(), "1 of 1 job(s) failed") {
+		t.Errorf("run ended with %v, want its one job failed on the missing folder", err)
 	}
 }
 

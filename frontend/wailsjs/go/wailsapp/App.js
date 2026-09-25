@@ -234,10 +234,6 @@ export function LoadConfigFromPath(arg1) {
   return window['go']['wailsapp']['App']['LoadConfigFromPath'](arg1);
 }
 
-export function LoadJobFromJSON(arg1) {
-  return window['go']['wailsapp']['App']['LoadJobFromJSON'](arg1);
-}
-
 export function LoadJobFromSGE(arg1) {
   return window['go']['wailsapp']['App']['LoadJobFromSGE'](arg1);
 }

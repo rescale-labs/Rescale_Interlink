@@ -59,18 +59,22 @@ interface TerminalCounts {
   unconfirmed: number
 }
 
+/**
+ * Whether a row has failed. A create call answered with a rejection is a
+ * failure even while the row's submit status is a poll's stale 'creating' — the
+ * same answer that stops isUnconfirmedRow counting the row as unresolved.
+ */
+export function isFailedRow(j: JobRow): boolean {
+  return j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' ||
+    j.createStatus === 'failed'
+}
+
 function countRows(rows: JobRow[]): TerminalCounts {
   return {
     completed: rows.filter((j) =>
       j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
     ).length,
-    // A create call answered with a rejection is a failure even while the row's
-    // submit status is a poll's stale 'creating' — the same answer that stops
-    // isUnconfirmedRow counting the row as unresolved.
-    failed: rows.filter((j) =>
-      j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' ||
-      j.createStatus === 'failed'
-    ).length,
+    failed: rows.filter(isFailedRow).length,
     unconfirmed: rows.filter(isUnconfirmedRow).length,
   }
 }
@@ -253,12 +257,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
     const current = get().activeRun
     if (current && current.status === 'cancelled') {
       stopPolling()
-      const completedCount = current.jobRows.filter((j) =>
-        j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-      ).length
-      const failedCount = current.jobRows.filter((j) =>
-        j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
-      ).length
+      const { completed: completedCount, failed: failedCount, unconfirmed } = countRows(current.jobRows)
 
       const completedRun: CompletedRun = {
         runId: current.runId,
@@ -268,7 +267,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
         totalJobs: current.totalJobs,
         completedJobs: completedCount,
         failedJobs: failedCount,
-        unconfirmedJobs: current.jobRows.filter(isUnconfirmedRow).length,
+        unconfirmedJobs: unconfirmed,
         durationMs: Date.now() - current.startTime,
         jobRows: [...current.jobRows],
         finalStatus: 'cancelled',
@@ -316,22 +315,16 @@ export const useRunStore = create<RunStore>((set, get) => ({
         jobRows[idx] = row
 
         const stageStats = computeStageStats(jobRows)
-
-        const completedJobs = jobRows.filter((j) =>
-          j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-        ).length
-        const failedJobs = jobRows.filter((j) =>
-          j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
-        ).length
+        const counts = countRows(jobRows)
 
         return {
           activeRun: {
             ...prev.activeRun,
             jobRows,
             pipelineStageStats: stageStats,
-            completedJobs,
-            failedJobs,
-            unconfirmedJobs: jobRows.filter(isUnconfirmedRow).length,
+            completedJobs: counts.completed,
+            failedJobs: counts.failed,
+            unconfirmedJobs: counts.unconfirmed,
             durationMs: Date.now() - prev.activeRun.startTime,
           },
         }
@@ -503,13 +496,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
           }))
 
           // Classify final status from rows
-          const completed = jobRows.filter((j) =>
-            j.submitStatus === 'success' || j.submitStatus === 'completed' || j.submitStatus === 'skipped'
-          ).length
-          const failed = jobRows.filter((j) =>
-            j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.submitStatus === 'failed'
-          ).length
-          const unconfirmed = jobRows.filter(isUnconfirmedRow).length
+          const { completed, failed, unconfirmed } = countRows(jobRows)
           const pending = jobRows.length - completed - failed - unconfirmed
 
           let finalStatus: CompletedRun['finalStatus']
@@ -590,21 +577,16 @@ export const useRunStore = create<RunStore>((set, get) => ({
           )
 
           const stageStats = computeStageStats(mergedRows)
-          const completedJobs = mergedRows.filter((j) =>
-            j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-          ).length
-          const failedJobs = mergedRows.filter((j) =>
-            j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
-          ).length
+          const counts = countRows(mergedRows)
 
           return {
             activeRun: {
               ...prev.activeRun,
               jobRows: mergedRows,
               pipelineStageStats: stageStats,
-              completedJobs,
-              failedJobs,
-              unconfirmedJobs: mergedRows.filter(isUnconfirmedRow).length,
+              completedJobs: counts.completed,
+              failedJobs: counts.failed,
+              unconfirmedJobs: counts.unconfirmed,
               durationMs: Date.now() - prev.activeRun.startTime,
             },
           }

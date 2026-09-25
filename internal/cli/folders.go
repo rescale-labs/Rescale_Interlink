@@ -464,8 +464,9 @@ Examples:
 			} else {
 				fmt.Println("📂 Starting streaming pipelined upload...")
 
-				// Convert flags to single skipExisting for pipelined mode
-				// Note: pipelined mode currently only supports merge behavior
+				// This path always merges. Under --skip-folder-conflicts an
+				// existing root has ended the command above, so it merges only
+				// into a folder another writer created below the new root meanwhile.
 				effectiveSkipExisting := mergeFolderConflicts || skipFolderConflicts
 
 				pipelineResourceMgr := CreateResourceManager()

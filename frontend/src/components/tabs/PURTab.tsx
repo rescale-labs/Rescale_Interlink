@@ -17,7 +17,7 @@ import {
   BeakerIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, useConfigStore, useRunStore, isUnconfirmedRow, DEFAULT_JOB_TEMPLATE } from '../../stores'
+import { useJobStore, useConfigStore, useRunStore, isUnconfirmedRow, isFailedRow, DEFAULT_JOB_TEMPLATE } from '../../stores'
 import type { JobRow, PipelineLogEntry, PipelineStageStats, WorkflowState } from '../../types/jobs'
 import { isTerminalRunState, type RunState } from '../../types/run'
 import { wailsapp } from '../../../wailsjs/go/models'
@@ -1588,9 +1588,7 @@ export function PURTab() {
       const completedJobs = runData ? runData.completedJobs : displayRows.filter((j) =>
         j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
       ).length
-      const failedJobs = runData ? runData.failedJobs : displayRows.filter((j) =>
-        j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed'
-      ).length
+      const failedJobs = runData ? runData.failedJobs : displayRows.filter(isFailedRow).length
       // Both action buttons key off the PUR run specifically, so a Single Job run
       // left in runStore offers neither.
       return renderPipelineRunView({

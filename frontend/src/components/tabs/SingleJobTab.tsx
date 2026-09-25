@@ -48,7 +48,6 @@ export function SingleJobTab() {
   // this tab on any change to any field of that store, and every useCallback
   // below that named the store object was rebuilt on the same schedule.
   const loadMemory = useJobStore((s) => s.loadMemory)
-  const loadJobFromJSON = useJobStore((s) => s.loadJobFromJSON)
   const saveJobToJSON = useJobStore((s) => s.saveJobToJSON)
   const loadJobFromSGE = useJobStore((s) => s.loadJobFromSGE)
   const saveJobToSGE = useJobStore((s) => s.saveJobToSGE)
@@ -61,6 +60,9 @@ export function SingleJobTab() {
   // The correctness layer is the Go-side dialogMu in config_bindings.go —
   // missing the gate is safe (user sees a clean "already open" error).
   const [dialogInFlight, setDialogInFlight] = useState(false)
+  // Says which job of a loaded list became the template, while that job is the
+  // one configured.
+  const [loadNotice, setLoadNotice] = useState<{ job: JobSpec; text: string } | null>(null)
 
   const state = useSingleJobStore((s) => s.state)
   const job = useSingleJobStore((s) => s.job)
@@ -167,22 +169,24 @@ export function SingleJobTab() {
     }
   }, [setShowLoadMenu, setJob, setState, setError])
 
-  // Load from JSON
+  // Load from JSON: a single job or a jobs list, whose first job is the template
   const handleLoadFromJSON = useCallback(async () => {
     setShowLoadMenu(false)
     try {
       const path = await App.SelectFile('Select Job JSON File')
       if (!path) return
 
-      const loadedJob = await loadJobFromJSON(path)
-      if (loadedJob) {
-        setJob(loadedJob)
+      const jobs = await App.LoadJobsFromJSON(path)
+      if (jobs && jobs.length > 0) {
+        const first = normalizeJobSpec(jobs[0])
+        setJob(first)
         setState('jobConfigured')
+        setLoadNotice(jobs.length > 1 ? { job: first, text: `Loaded the first of ${jobs.length} jobs as the template.` } : null)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
-  }, [setShowLoadMenu, setJob, setState, setError, loadJobFromJSON])
+  }, [setShowLoadMenu, setJob, setState, setError])
 
   // Load from SGE script
   const handleLoadFromSGE = useCallback(async () => {
@@ -518,6 +522,7 @@ export function SingleJobTab() {
             <div className="flex items-start justify-between">
               <div>
                 <h4 className="font-medium mb-2">Job Configuration</h4>
+                {loadNotice?.job === job && <p className="mb-2 text-sm text-gray-500">{loadNotice.text}</p>}
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <div>
                     <span className="text-gray-500">Job Name:</span> {job.jobName}

@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -20,6 +21,12 @@ type limiterEntry struct {
 	keyHash string
 	scope   Scope
 }
+
+// ErrCoordinatorUnreachable is what a CoordinatorClient returns, wrapped or not,
+// when it cannot reach the coordinator: the only error that sends a limiter to
+// its local fallback. It lives here rather than in the coordinator package,
+// which imports this one.
+var ErrCoordinatorUnreachable = errors.New("coordinator unreachable")
 
 // CoordinatorClient is the interface that the store uses to communicate with
 // the cross-process rate limit coordinator. This avoids a circular import
@@ -333,7 +340,7 @@ func (s *LimiterStore) injectCoordinatorHooks(
 	waitFn := func(ctx context.Context) error {
 		start := time.Now()
 		err := client.Acquire(ctx, baseURL, keyHash, scope)
-		if err != nil && isUnreachable(err) {
+		if errors.Is(err, ErrCoordinatorUnreachable) {
 			// Coordinator lost — reconfigure to fallback rate BEFORE returning error
 			s.handleCoordinatorDisconnect(limiter, client, baseURL, keyHash, scope, cfg)
 			return err
@@ -639,12 +646,6 @@ func (s *LimiterStore) keepaliveLoop(ctx context.Context) {
 			}
 		}
 	}
-}
-
-// isUnreachable checks if an error indicates the coordinator is unreachable.
-// Uses string matching to avoid importing the coordinator package.
-func isUnreachable(err error) bool {
-	return err != nil && err.Error() == "coordinator unreachable"
 }
 
 // makeKey builds a map key from {baseURL, hash(apiKey), scope}.

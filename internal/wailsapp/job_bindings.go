@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
@@ -549,13 +550,17 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 		return "", fmt.Errorf("a run is already in progress")
 	}
 
-	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
-	stateFile := generateStateFilePath(runID)
-
 	jobSpecs := make([]models.JobSpec, len(jobs))
 	for i, job := range jobs {
 		jobSpecs[i] = dtoToJobSpec(job)
 	}
+	cfg, err := a.runConfig(jobSpecs)
+	if err != nil {
+		return "", err
+	}
+
+	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
+	stateFile := generateStateFilePath(runID)
 
 	if err := a.engine.StartRun(runID, stateFile, len(jobs)); err != nil {
 		return "", err
@@ -583,6 +588,7 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 			UploadFolder:       opts.UploadFolder,
 			UploadFolderParent: opts.UploadFolderParent,
 			FileTags:           opts.FileTags,
+			Config:             cfg,
 		})
 		if err != nil && ctx.Err() == nil {
 			wailsLogger.Error().Err(err).Msg("Pipeline run failed")
@@ -590,6 +596,21 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	}()
 
 	return runID, nil
+}
+
+// runConfig applies the CLI's checks before a run starts, where a refusal reaches
+// the caller rather than a log line, and before a single job's local files are
+// uploaded. It returns the copy of the configuration it checked, which the run
+// is built from, so settings applied later cannot reach the pipeline unchecked.
+func (a *App) runConfig(jobs []models.JobSpec) (*config.Config, error) {
+	cfg := *a.engine.GetConfig()
+	if err := cli.ValidateWorkerCounts(&cfg); err != nil {
+		return nil, err
+	}
+	if err := cli.ValidateSubmitModes(jobs); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 // StartSingleJob starts a single job submission.
@@ -623,11 +644,15 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 		return "", fmt.Errorf("a run is already in progress")
 	}
 
-	runID := fmt.Sprintf("single_%d", time.Now().UnixNano())
-	stateFile := generateStateFilePath(runID)
-
 	// Convert DTO to job spec
 	jobSpec := dtoToJobSpec(input.Job)
+	cfg, err := a.runConfig([]models.JobSpec{jobSpec})
+	if err != nil {
+		return "", err
+	}
+
+	runID := fmt.Sprintf("single_%d", time.Now().UnixNano())
+	stateFile := generateStateFilePath(runID)
 
 	// Clear conflicting fields to prevent loaded templates or CSV carrying
 	// stale directory/InputFiles values into the wrong input mode.
@@ -747,7 +772,7 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 			a.engine.ReportUploadProgress(jobSpec.JobName, 1.0, "success", "")
 		}
 
-		err := a.engine.RunFromSpecs(ctx, []models.JobSpec{jobSpec}, stateFile)
+		err := a.engine.RunFromSpecsWithOptions(ctx, []models.JobSpec{jobSpec}, stateFile, core.RunOptions{Config: cfg})
 		if err != nil && ctx.Err() == nil {
 			wailsLogger.Error().Err(err).Msg("Single job run failed")
 		}
@@ -1228,25 +1253,6 @@ func (a *App) SaveJobsToCSV(path string, jobs []JobSpecDTO) error {
 	}
 
 	return config.SaveJobsCSV(path, specs)
-}
-
-// LoadJobFromJSON loads a single job specification from a JSON file.
-func (a *App) LoadJobFromJSON(path string) (JobSpecDTO, error) {
-	if path == "" {
-		return JobSpecDTO{}, fmt.Errorf("file path is required")
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return JobSpecDTO{}, fmt.Errorf("failed to read file: %w", err)
-	}
-
-	var job models.JobSpec
-	if err := json.Unmarshal(data, &job); err != nil {
-		return JobSpecDTO{}, fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	return jobSpecToDTO(job), nil
 }
 
 // SaveJobToJSON saves a single job specification to a JSON file.

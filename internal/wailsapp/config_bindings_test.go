@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	goruntime "runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -237,7 +238,7 @@ func TestUpdateConfig_ClearsCatalogCacheWhenTheAPIKeyChanges(t *testing.T) {
 			app.cachedCoreTypes = []CoreTypeDTO{{Code: "emerald"}}
 			app.cachedAnalyses = []AnalysisCodeDTO{{Code: "user_included"}}
 
-			if err := app.UpdateConfig(ConfigDTO{APIKey: tt.newKey}); err != nil {
+			if err := app.UpdateConfig(ConfigDTO{APIKey: tt.newKey, TarWorkers: 1, UploadWorkers: 1, JobWorkers: 1}); err != nil {
 				t.Fatalf("UpdateConfig: %v", err)
 			}
 
@@ -249,5 +250,21 @@ func TestUpdateConfig_ClearsCatalogCacheWhenTheAPIKeyChanges(t *testing.T) {
 					gotCached, tt.wantCached, app.cachedCoreTypes, app.cachedAnalyses)
 			}
 		})
+	}
+}
+
+// A run is built from this configuration, and a worker count below one panics
+// or stalls its pipeline, so UpdateConfig refuses one with the CLI's check and
+// keeps the count it had.
+func TestUpdateConfig_RefusesWorkerCountsBelowOne(t *testing.T) {
+	testLogger(t)
+	for _, n := range []int{0, -1} {
+		app := &App{config: &config.Config{TarWorkers: 4, UploadWorkers: 4, JobWorkers: 4}}
+		err := app.UpdateConfig(ConfigDTO{TarWorkers: 4, UploadWorkers: n, JobWorkers: 4})
+		want := "upload_workers must be at least 1 (got " + strconv.Itoa(n) + ")"
+		if err == nil || err.Error() != want || app.config.UploadWorkers != 4 {
+			t.Errorf("UpdateConfig(upload_workers %d) = %v with the count now %d, want %q and 4 kept",
+				n, err, app.config.UploadWorkers, want)
+		}
 	}
 }

@@ -111,3 +111,19 @@ func TestNewCompatRootCmd_FlagPlacement(t *testing.T) {
 		t.Errorf("api-token = %q, want %q", pf.Value.String(), "TOKEN")
 	}
 }
+
+// TestArgparseUsage_Metavar covers the metavar a flag's name gives: argparse,
+// whose help this imitates, turns the dashes of --job-id into underscores.
+func TestArgparseUsage_Metavar(t *testing.T) {
+	rootCmd, _ := NewCompatRootCmd()
+	statusCmd, _, err := rootCmd.Find([]string{"status"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := argparseUsage(statusCmd)
+	for _, want := range []string{"[-j JOB_ID]", "-j JOB_ID, --job-id JOB_ID", "[-p API_TOKEN]", "-p API_TOKEN, --api-token API_TOKEN"} {
+		if !strings.Contains(usage, want) {
+			t.Errorf("status help lacks %q:\n%s", want, usage)
+		}
+	}
+}

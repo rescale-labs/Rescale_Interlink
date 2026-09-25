@@ -203,8 +203,7 @@ func DownloadFolderRecursive(
 
 	// Create local directory structure
 	fmt.Println("📂 Creating local directory structure...")
-	foldersCreated := 0
-	foldersSkipped := 0
+	foldersCreated, foldersMerged, foldersSkipped := 0, 0, 0
 	for _, folder := range allFolders {
 		// Validate folder path to prevent escaping output directory
 		if err := validation.ValidatePathInDirectory(folder.RelativePath, rootOutputDir); err != nil {
@@ -228,8 +227,7 @@ func DownloadFolderRecursive(
 			case FolderDownloadAbort:
 				return nil, fmt.Errorf("download aborted by user")
 			case FolderDownloadMergeOnce, FolderDownloadMergeAll:
-				// Folder exists and we're merging - just continue (folder already there)
-				foldersCreated++ // Count as "handled"
+				foldersMerged++
 				continue
 			}
 		}
@@ -240,9 +238,10 @@ func DownloadFolderRecursive(
 		}
 		foldersCreated++
 	}
-	result.FoldersCreated = foldersCreated
-	if foldersSkipped > 0 {
-		fmt.Printf("✓ Handled %d directories (%d created, %d merged/skipped)\n", foldersCreated+foldersSkipped, foldersCreated-foldersSkipped, foldersSkipped)
+	result.FoldersCreated += foldersCreated
+	if foldersMerged+foldersSkipped > 0 {
+		fmt.Printf("✓ Handled %d directories (%d created, %d merged, %d skipped)\n",
+			foldersCreated+foldersMerged+foldersSkipped, foldersCreated, foldersMerged, foldersSkipped)
 	} else {
 		fmt.Printf("✓ Created %d local directories\n", foldersCreated)
 	}

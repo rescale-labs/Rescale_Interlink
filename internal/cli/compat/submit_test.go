@@ -2,10 +2,17 @@ package compat
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
 )
 
 func TestCompatStageSubmitFiles(t *testing.T) {
@@ -97,22 +104,22 @@ func TestTransformSubmitJSON(t *testing.T) {
 	// Simulate a v3 API job response with key fields
 	v3Response := map[string]interface{}{
 		// Shared keys (should survive)
-		"id":                 "testID",
-		"name":               "TestJob",
-		"dateInserted":       "2026-04-09T00:00:00Z",
-		"isLowPriority":     false,
+		"id":                   "testID",
+		"name":                 "TestJob",
+		"dateInserted":         "2026-04-09T00:00:00Z",
+		"isLowPriority":        false,
 		"billingPriorityValue": "INSTANT",
-		"sshPort":            22,
-		"archiveFilters":     []interface{}{},
-		"resourceFilters":    []interface{}{},
-		"cidrRule":           "1.2.3.4/32",
-		"publicKey":          "ssh-rsa AAAA",
-		"expectedRuns":       nil,
-		"isTemplateDryRun":   false,
-		"includeNominalRun":  false,
+		"sshPort":              22,
+		"archiveFilters":       []interface{}{},
+		"resourceFilters":      []interface{}{},
+		"cidrRule":             "192.0.2.4/32",
+		"publicKey":            "ssh-rsa AAAA",
+		"expectedRuns":         nil,
+		"isTemplateDryRun":     false,
+		"includeNominalRun":    false,
 		"monteCarloIterations": nil,
-		"paramFile":          nil,
-		"caseFile":           nil,
+		"paramFile":            nil,
+		"caseFile":             nil,
 
 		// v3-only keys (should be removed)
 		"owner":                    "test@example.com",
@@ -126,15 +133,15 @@ func TestTransformSubmitJSON(t *testing.T) {
 		// jobanalyses with nested structure
 		"jobanalyses": []interface{}{
 			map[string]interface{}{
-				"command":            "./run.sh",
-				"useRescaleLicense":  false,
-				"envVars":            map[string]interface{}{},
-				"inputFiles":         []interface{}{},
-				"inputFolders":       []interface{}{},
-				"templateTasks":      []interface{}{},
-				"preProcessScript":   nil,
+				"command":                  "./run.sh",
+				"useRescaleLicense":        false,
+				"envVars":                  map[string]interface{}{},
+				"inputFiles":               []interface{}{},
+				"inputFolders":             []interface{}{},
+				"templateTasks":            []interface{}{},
+				"preProcessScript":         nil,
 				"preProcessScriptCommand":  "",
-				"postProcessScript":  nil,
+				"postProcessScript":        nil,
 				"postProcessScriptCommand": "",
 
 				// v3-only JA keys (should be removed)
@@ -145,8 +152,8 @@ func TestTransformSubmitJSON(t *testing.T) {
 					"id":      "ver123",
 				},
 				"flags":                      map[string]interface{}{"igCv": true},
-				"onDemandLicenseSeller":       nil,
-				"userDefinedLicenseSettings":  nil,
+				"onDemandLicenseSeller":      nil,
+				"userDefinedLicenseSettings": nil,
 
 				// hardware with nested coreType
 				"hardware": map[string]interface{}{
@@ -332,5 +339,46 @@ func TestTransformSubmitJSON_InputFileFlattening(t *testing.T) {
 	}
 	if f["decompress"] != true {
 		t.Errorf("decompress = %v, want true", f["decompress"])
+	}
+}
+
+// TestCompatE2EDownload_AppliesFilters covers submit -E's download filters,
+// which were computed and then dropped, so every output file downloaded. The
+// kept file is already on disk at its full size and is skipped; the other one's
+// storage is no real backend, so a download of it fails at provider creation
+// without touching the network.
+func TestCompatE2EDownload_AppliesFilters(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/jobs/JOB1/files/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"results":[`+
+			`{"id":"f1","name":"results.dat","decryptedSize":4,"storage":{"storageType":"NotAStorageBackend"}},`+
+			`{"id":"f2","name":"debug.log","decryptedSize":4,"storage":{"storageType":"NotAStorageBackend"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+
+	for _, tc := range []struct {
+		flag                    string
+		matchers                []string
+		excludeTerm, searchTerm string
+	}{
+		{"-f '*.dat'", []string{"*.dat"}, "", ""},
+		{"--exclude log", nil, "log", ""},
+		{"-s results", nil, "", "results"},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			if err := os.WriteFile("results.dat", []byte("done"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := compatE2EDownload(context.Background(), "JOB1", tc.matchers, tc.excludeTerm, tc.searchTerm,
+				client, &CompatContext{Quiet: true}); err != nil {
+				t.Errorf("submit -E %s: %v, want debug.log filtered out", tc.flag, err)
+			}
+		})
 	}
 }

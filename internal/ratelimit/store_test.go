@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -281,7 +282,7 @@ func TestRuntimeDisconnectEmergencyCapInvariant(t *testing.T) {
 
 	// Simulate coordinator disconnect
 	mock.mu.Lock()
-	mock.acquireErr = errors.New("coordinator unreachable")
+	mock.acquireErr = ErrCoordinatorUnreachable
 	mock.mu.Unlock()
 
 	// Next Wait() should fail-over to local with reconfigured emergency rate
@@ -526,7 +527,7 @@ func TestDegradedModeNotifies(t *testing.T) {
 	}
 
 	coordUp := true
-	mock := &mockCoordClient{acquireErr: errors.New("coordinator unreachable")}
+	mock := &mockCoordClient{acquireErr: ErrCoordinatorUnreachable}
 	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
 		if coordUp {
 			return mock, nil
@@ -637,7 +638,7 @@ func TestHandleCoordinatorDisconnect_SetsDegraded(t *testing.T) {
 
 	disconnectTriggered := false
 	mock := &mockCoordClient{
-		acquireErr: errors.New("coordinator unreachable"),
+		acquireErr: fmt.Errorf("acquire: %w", ErrCoordinatorUnreachable), // recognized behind a wrap
 	}
 	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
 		if disconnectTriggered {

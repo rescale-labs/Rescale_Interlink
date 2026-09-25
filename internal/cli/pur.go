@@ -676,15 +676,16 @@ func (f *purPipelineFlags) warnNoStateFile(w io.Writer) {
 	fmt.Fprintln(w, "No --state file given: this run cannot be resumed and its progress is not recorded.")
 }
 
-// validateWorkerCounts refuses a worker count below one.
+// ValidateWorkerCounts refuses a worker count below one.
 //
 // Config.Validate enforces the same minimum but only 'config test' calls it, so
 // a count from config.csv reached the pipeline unchecked: zero sizes a stage's
 // queue at zero and starts no workers for it, which leaves the run stalled or
 // reports success having done nothing, and a negative count panics in
 // make(chan …) while the pipeline is being built. Both are answered here, where
-// the PUR commands read the config and before any of them has a pipeline.
-func validateWorkerCounts(cfg *config.Config) error {
+// the PUR commands and the GUI's runs read the config and before any of them
+// has a pipeline.
+func ValidateWorkerCounts(cfg *config.Config) error {
 	for _, w := range []struct {
 		key   string
 		value int
@@ -700,15 +701,14 @@ func validateWorkerCounts(cfg *config.Config) error {
 	return nil
 }
 
-// validateSubmitModes refuses a jobs CSV row whose Submit value the pipeline
-// cannot read.
+// ValidateSubmitModes refuses a job whose submit mode the pipeline cannot read.
 //
 // 'pur plan' reports such a value, but the pipeline itself swallowed it:
 // shouldSubmit turns any normalisation error into false, so an unrecognized
 // value created every job and submitted none of them without saying so. The
 // accepted set is NormalizeSubmitMode's own, called here rather than restated,
 // so this gate cannot drift from what the pipeline will honour.
-func validateSubmitModes(jobs []models.JobSpec) error {
+func ValidateSubmitModes(jobs []models.JobSpec) error {
 	for i, job := range jobs {
 		if _, err := pipeline.NormalizeSubmitMode(job.SubmitMode); err != nil {
 			return fmt.Errorf("job %d (%s): Invalid submit mode: %w", i+1, job.JobName, err)
@@ -750,7 +750,7 @@ func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []mod
 		cfg.JobWorkers = f.jobWorkers
 	}
 
-	if err := validateWorkerCounts(cfg); err != nil {
+	if err := ValidateWorkerCounts(cfg); err != nil {
 		return nil, nil, err
 	}
 
@@ -759,7 +759,7 @@ func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []mod
 		return nil, nil, fmt.Errorf("failed to load jobs CSV: %w", err)
 	}
 
-	if err := validateSubmitModes(jobs); err != nil {
+	if err := ValidateSubmitModes(jobs); err != nil {
 		return nil, nil, err
 	}
 
@@ -1089,7 +1089,7 @@ Example:
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			if err := validateWorkerCounts(cfg); err != nil {
+			if err := ValidateWorkerCounts(cfg); err != nil {
 				return err
 			}
 
@@ -1102,7 +1102,7 @@ Example:
 
 			fmt.Printf("Loaded %d job(s) from %s\n\n", len(jobs), jobsCSV)
 
-			if err := validateSubmitModes(jobs); err != nil {
+			if err := ValidateSubmitModes(jobs); err != nil {
 				return err
 			}
 

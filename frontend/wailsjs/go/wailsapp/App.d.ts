@@ -59,7 +59,6 @@ export function ListRemoteLegacyWithFilters(arg1:string,arg2:number,arg3:string,
 export function ListRemoteTrash(arg1:string,arg2:number):Promise<wailsapp.FolderContentsDTO>;
 export function ListSavedTemplates():Promise<Array<wailsapp.TemplateInfoDTO>>;
 export function LoadConfigFromPath(arg1:string):Promise<void>;
-export function LoadJobFromJSON(arg1:string):Promise<wailsapp.JobSpecDTO>;
 export function LoadJobFromSGE(arg1:string):Promise<wailsapp.JobSpecDTO>;
 export function LoadJobsFromCSV(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>;
 export function LoadJobsFromJSON(arg1:string):Promise<Array<wailsapp.JobSpecDTO>>;

@@ -334,7 +334,6 @@ interface JobStore {
   // Actions - File Operations
   loadJobsFromCSV: (path: string) => Promise<void>
   saveJobsToCSV: (path: string) => Promise<void>
-  loadJobFromJSON: (path: string) => Promise<JobSpec | null>
   saveJobToJSON: (path: string, job: JobSpec) => Promise<void>
   loadJobFromSGE: (path: string) => Promise<JobSpec | null>
   saveJobToSGE: (path: string, job: JobSpec) => Promise<void>
@@ -952,15 +951,6 @@ export const useJobStore = create<JobStore>((set, get) => ({
     }
 
     await App.SaveJobsToCSV(path, scannedJobs)
-  },
-
-  loadJobFromJSON: async (path: string) => {
-    try {
-      return normalizeJobSpec(await App.LoadJobFromJSON(path))
-    } catch (error) {
-      console.error('Failed to load job from JSON:', error)
-      return null
-    }
   },
 
   saveJobToJSON: async (path: string, job: JobSpec) => {

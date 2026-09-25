@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"golang.org/x/sys/windows"
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
@@ -899,40 +898,4 @@ func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
 
 	a.logInfo("Service", "UAC approved, install-and-start command executed")
 	return ElevatedServiceResultDTO{Success: true}
-}
-
-// matchesWindowsUsername compares usernames handling Windows format differences.
-// user.Current().Username returns "DOMAIN\user", os.Getenv("USERNAME") returns "user".
-// Also handles user@domain (UPN) format for domain-joined machines.
-func matchesWindowsUsername(ipcUsername, guiUsername string) bool {
-	if strings.EqualFold(ipcUsername, guiUsername) {
-		return true
-	}
-	// Handle DOMAIN\user format
-	if parts := strings.SplitN(ipcUsername, `\`, 2); len(parts) == 2 {
-		if strings.EqualFold(parts[1], guiUsername) {
-			return true
-		}
-	}
-	// Handle user@domain (UPN) format
-	if parts := strings.SplitN(ipcUsername, "@", 2); len(parts) == 2 {
-		if strings.EqualFold(parts[0], guiUsername) {
-			return true
-		}
-	}
-	return false
-}
-
-// getCurrentUserSID returns the SID of the current process owner.
-func getCurrentUserSID() string {
-	token, err := windows.OpenCurrentProcessToken()
-	if err != nil {
-		return ""
-	}
-	defer token.Close()
-	user, err := token.GetTokenUser()
-	if err != nil {
-		return ""
-	}
-	return user.User.Sid.String()
 }

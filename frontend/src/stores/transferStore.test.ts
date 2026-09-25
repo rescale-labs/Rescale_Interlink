@@ -315,9 +315,31 @@ describe('transferStore enumeration reconciliation', () => {
       ],
     })
 
-    useTransferStore.getState().clearCompletedTransfers()
+    await useTransferStore.getState().clearCompletedTransfers()
 
     expect(App.ClearCompletedTransfers).toHaveBeenCalled()
     expect(useTransferStore.getState().enumerations.map(e => e.id)).toEqual(['scanning'])
+  })
+
+  it('Clear Completed refetches only once the backend has cleared', async () => {
+    let cleared!: () => void
+    vi.mocked(App.ClearCompletedTransfers).mockReturnValueOnce(new Promise<void>((r) => { cleared = r }))
+
+    const clearing = useTransferStore.getState().clearCompletedTransfers()
+    await settle()
+    expect(App.GetTransferBatches).not.toHaveBeenCalled()
+
+    cleared()
+    await clearing
+    expect(App.GetTransferBatches).toHaveBeenCalled()
+  })
+
+  it('Clear Completed that the backend refuses keeps the rows and rejects nothing', async () => {
+    useTransferStore.setState({ enumerations: [enumeration({ id: 'boom', error: 'permission denied' })] })
+    vi.mocked(App.ClearCompletedTransfers).mockRejectedValueOnce(new Error('FAKE clear refused'))
+
+    await useTransferStore.getState().clearCompletedTransfers()
+
+    expect(useTransferStore.getState().enumerations.map(e => e.id)).toEqual(['boom'])
   })
 })

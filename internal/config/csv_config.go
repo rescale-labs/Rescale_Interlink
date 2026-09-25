@@ -680,6 +680,12 @@ func GetDefaultTokenPath() string {
 	return newPath
 }
 
+// tokenModeMeaningful is false on Windows, where Go reports every writable file
+// as 0666: who can read a file there is up to its ACL, so the mode check would
+// warn on every read, with Unix advice. A variable so a test can stand in for
+// Windows.
+var tokenModeMeaningful = runtime.GOOS != "windows"
+
 // ReadTokenFile reads an API token from a file
 // The file should contain only the API token (whitespace is trimmed)
 // Returns empty string if file cannot be read
@@ -694,7 +700,7 @@ func ReadTokenFile(path string) (string, error) {
 	// On Unix systems, warn if permissions are too open
 	// Token files should be readable only by owner (0600 or stricter)
 	mode := info.Mode().Perm()
-	if mode&0077 != 0 {
+	if tokenModeMeaningful && mode&0077 != 0 {
 		// File is readable by group or others - security warning
 		fmt.Fprintf(os.Stderr, "Warning: Token file %s has insecure permissions %04o. Consider using 'chmod 600 %s'\n", path, mode, path)
 	}

@@ -625,6 +625,35 @@ export function SetupTab() {
     return '';
   };
 
+  // After a service command has run, polls the service every 500 ms, for up to
+  // 10 s, until settled(status), and reports how it ended. A status error ends
+  // the wait, and is reported as a failed check: the command itself ran.
+  const waitForService = async (
+    command: string,
+    settled: (status: wailsapp.ServiceStatusDTO) => boolean,
+    done: string,
+    pending: string,
+  ) => {
+    try {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const status = await GetServiceStatus();
+        setServiceStatus(status);
+        if (settled(status)) {
+          setStatusMessage(done);
+          setIsServiceLoading(false);
+          // The daemon status now reports the service's mode
+          await refreshDaemonStatus();
+          return;
+        }
+      }
+      setStatusMessage(pending);
+    } catch (err) {
+      setStatusMessage(`${command} command completed, but the service status could not be checked: ${err}`);
+    }
+    setIsServiceLoading(false);
+  };
+
   const handleStartServiceElevated = async () => {
     try {
       setIsServiceLoading(true);
@@ -634,25 +663,8 @@ export function SetupTab() {
       const result = await StartServiceElevated();
       if (result.success) {
         setStatusMessage('Service start command executed. Waiting for service to start...');
-        // Poll for status change
-        let attempts = 0;
-        const maxAttempts = 20; // 10 seconds at 500ms intervals
-        const pollInterval = setInterval(async () => {
-          attempts++;
-          const status = await GetServiceStatus();
-          setServiceStatus(status);
-          if (status.running) {
-            clearInterval(pollInterval);
-            setStatusMessage('Windows Service started successfully');
-            setIsServiceLoading(false);
-            // Also refresh daemon status as it will now report Windows Service mode
-            await refreshDaemonStatus();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-            setStatusMessage('Service may still be starting. Check status in a moment.');
-            setIsServiceLoading(false);
-          }
-        }, 500);
+        await waitForService('Start', (status) => status.running,
+          'Windows Service started successfully', 'Service may still be starting. Check status in a moment.');
       } else {
         setStatusMessage(`Failed to start service: ${result.error}`);
         setIsServiceLoading(false);
@@ -672,24 +684,8 @@ export function SetupTab() {
       const result = await InstallAndStartServiceElevated();
       if (result.success) {
         setStatusMessage('Install & start command executed. Waiting for service...');
-        // Poll for status change
-        let attempts = 0;
-        const maxAttempts = 20;
-        const pollInterval = setInterval(async () => {
-          attempts++;
-          const status = await GetServiceStatus();
-          setServiceStatus(status);
-          if (status.running) {
-            clearInterval(pollInterval);
-            setStatusMessage('Windows Service installed and started successfully');
-            setIsServiceLoading(false);
-            await refreshDaemonStatus();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-            setStatusMessage('Service may still be starting. Check status in a moment.');
-            setIsServiceLoading(false);
-          }
-        }, 500);
+        await waitForService('Install and start', (status) => status.running,
+          'Windows Service installed and started successfully', 'Service may still be starting. Check status in a moment.');
       } else {
         setStatusMessage(`Failed to install and start service: ${result.error}`);
         setIsServiceLoading(false);
@@ -709,25 +705,8 @@ export function SetupTab() {
       const result = await StopServiceElevated();
       if (result.success) {
         setStatusMessage('Service stop command executed. Waiting for service to stop...');
-        // Poll for status change
-        let attempts = 0;
-        const maxAttempts = 20; // 10 seconds at 500ms intervals
-        const pollInterval = setInterval(async () => {
-          attempts++;
-          const status = await GetServiceStatus();
-          setServiceStatus(status);
-          if (!status.running) {
-            clearInterval(pollInterval);
-            setStatusMessage('Windows Service stopped successfully');
-            setIsServiceLoading(false);
-            // Also refresh daemon status
-            await refreshDaemonStatus();
-          } else if (attempts >= maxAttempts) {
-            clearInterval(pollInterval);
-            setStatusMessage('Service may still be stopping. Check status in a moment.');
-            setIsServiceLoading(false);
-          }
-        }, 500);
+        await waitForService('Stop', (status) => !status.running,
+          'Windows Service stopped successfully', 'Service may still be stopping. Check status in a moment.');
       } else {
         setStatusMessage(`Failed to stop service: ${result.error}`);
         setIsServiceLoading(false);

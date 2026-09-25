@@ -637,3 +637,45 @@ func TestWriteTokenFile_RepairsLoosePermissions(t *testing.T) {
 		t.Errorf("token file perms = %o, want 0600", perm)
 	}
 }
+
+// TestReadTokenFile_ModeWarning covers the permission warning: it is given for a
+// group- or world-readable token file where a mode means something, and never
+// on Windows, where Go reports every writable file as 0666 whatever its ACL.
+func TestReadTokenFile_ModeWarning(t *testing.T) {
+	orig := tokenModeMeaningful
+	t.Cleanup(func() { tokenModeMeaningful = orig })
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte("FAKE-TOKEN\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, meaningful := range []bool{true, false} {
+		tokenModeMeaningful = meaningful
+		warned := captureStderr(t, func() {
+			if _, err := ReadTokenFile(path); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if got := strings.Contains(warned, "insecure permissions"); got != meaningful {
+			t.Errorf("with the mode meaningful=%v, warned %q", meaningful, warned)
+		}
+	}
+}
+
+// captureStderr returns what f writes to os.Stderr.
+func captureStderr(t *testing.T, f func()) string {
+	t.Helper()
+	file, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	defer func(orig *os.File) { os.Stderr = orig }(os.Stderr)
+	os.Stderr = file
+	f()
+	said, _ := os.ReadFile(file.Name())
+	return string(said)
+}

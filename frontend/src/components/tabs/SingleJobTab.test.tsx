@@ -6,6 +6,8 @@ import { useSingleJobStore } from '../../stores/singleJobStore'
 import type { JobRow } from '../../types/jobs'
 import type { RunState } from '../../types/run'
 import { computeStageStats } from '../../utils/stageStats'
+import * as App from '../../../wailsjs/go/wailsapp/App'
+import type { wailsapp } from '../../../wailsjs/go/models'
 
 afterEach(() => {
   cleanup()
@@ -130,5 +132,25 @@ describe('SingleJobTab with an unconfirmed creation', () => {
 
     expect(screen.getByText(/Please wait/)).toBeInTheDocument()
     expect(screen.queryByText(/could not be confirmed as created/)).toBeNull()
+  })
+})
+
+// A jobs-list JSON loads its first job as the template, as the CSV loader and
+// PUR do, and says so when the list had others.
+describe('SingleJobTab loading job settings from JSON', () => {
+  it.each([
+    ['a jobs list', ['Sim_A', 'Sim_B'], 'Loaded the first of 2 jobs as the template.'],
+    ['a single job', ['Sim_A'], null],
+  ])('takes the first job of %s', async (_, names, notice) => {
+    vi.mocked(App.SelectFile).mockResolvedValueOnce('/fake/jobs.json')
+    vi.mocked(App.LoadJobsFromJSON).mockResolvedValueOnce(names.map((jobName) => ({ jobName })) as wailsapp.JobSpecDTO[])
+
+    render(<SingleJobTab />)
+    fireEvent.click(screen.getByRole('button', { name: /Load Existing Job Settings/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'JSON File' }))
+
+    await vi.waitFor(() => expect(useSingleJobStore.getState().job?.jobName).toBe('Sim_A'))
+    expect(useSingleJobStore.getState().state).toBe('jobConfigured')
+    expect(screen.queryByText(/Loaded the first of/)?.textContent ?? null).toBe(notice)
   })
 })

@@ -3,7 +3,6 @@ package coordinator
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -12,9 +11,8 @@ import (
 	"github.com/rescale/rescale-int/internal/ratelimit"
 )
 
-// ErrCoordinatorUnreachable is returned when the coordinator cannot be reached.
-// This is the ONLY error that triggers fallback to local rate limiting.
-var ErrCoordinatorUnreachable = errors.New("coordinator unreachable")
+// ErrCoordinatorUnreachable is ratelimit.ErrCoordinatorUnreachable.
+var ErrCoordinatorUnreachable = ratelimit.ErrCoordinatorUnreachable
 
 // Client communicates with the coordinator server.
 type Client struct {

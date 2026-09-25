@@ -1,5 +1,6 @@
 // Job stats summary bar for the PUR tab's run view.
 import type { JobRow } from '../../types/jobs'
+import { isFailedRow } from '../../stores/runStore'
 
 export function StatsBar({ jobs }: { jobs: JobRow[] }) {
   const stats = jobs.reduce(
@@ -7,7 +8,7 @@ export function StatsBar({ jobs }: { jobs: JobRow[] }) {
       acc.total++
       if (job.submitStatus === 'completed' || job.submitStatus === 'success' || job.submitStatus === 'skipped') {
         acc.completed++
-      } else if (job.submitStatus === 'failed' || job.tarStatus === 'failed' || job.uploadStatus === 'failed') {
+      } else if (isFailedRow(job)) {
         acc.failed++
       } else if (
         job.tarStatus === 'running' || job.tarStatus === 'in_progress' ||

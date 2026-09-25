@@ -137,6 +137,11 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 		wailsLogger.Warn().Err(err).Str("proxy_mode", cfg.ProxyMode).Msg("UpdateConfig: unsupported proxy mode")
 		return err
 	}
+	if err := cli.ValidateWorkerCounts(&config.Config{
+		TarWorkers: cfg.TarWorkers, UploadWorkers: cfg.UploadWorkers, JobWorkers: cfg.JobWorkers,
+	}); err != nil {
+		return err
+	}
 
 	// The cached catalogs belong to the account the old key named, so a new key
 	// has to invalidate them. Test Connection also clears them, but it is

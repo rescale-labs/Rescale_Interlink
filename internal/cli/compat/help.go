@@ -46,7 +46,7 @@ func argparseUsage(cmd *cobra.Command) string {
 		writeFlagSynopsis(&b, cmd.LocalFlags(), false)
 		// Include -p in synopsis if inherited
 		if f := cmd.InheritedFlags().Lookup("api-token"); f != nil {
-			b.WriteString(" [-p API-TOKEN]")
+			b.WriteString(" [-p API_TOKEN]")
 		}
 		b.WriteString("\n")
 	}
@@ -183,7 +183,7 @@ func flagMetavar(f *pflag.Flag) string {
 	// no backtick-quoted override. Derive from the flag name instead.
 	switch name {
 	case "string", "int", "float64", "duration", "strings", "":
-		return strings.ToUpper(strings.ReplaceAll(f.Name, "-", "-"))
+		return strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
 	}
 	return strings.ToUpper(name)
 }

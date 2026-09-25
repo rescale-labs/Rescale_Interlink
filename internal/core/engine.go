@@ -51,6 +51,10 @@ type RunOptions struct {
 	// FileTags are applied to every file the batch uploads. Best-effort:
 	// tagging failures are logged, never fatal.
 	FileTags []string
+
+	// Config is the copy of the configuration the caller checked before the run
+	// started; nil means the engine's current one.
+	Config *config.Config
 }
 
 // syncUploaderAdapter wraps TransferService to implement pipeline.SyncUploader.
@@ -447,21 +451,17 @@ func (e *Engine) ScanToSpecs(template models.JobSpec, opts ScanOptions) ([]model
 	return jobs, nil
 }
 
-// RunFromSpecs executes the pipeline from an in-memory job list.
-// This is the primary GUI entry point for CSV-less operation.
-func (e *Engine) RunFromSpecs(ctx context.Context, jobs []models.JobSpec, stateFile string) error {
-	return e.RunFromSpecsWithOptions(ctx, jobs, stateFile, RunOptions{})
-}
-
 // RunFromSpecsWithOptions executes the pipeline from an in-memory job list with
 // additional PUR options (extra input files, decompress flag, tar cleanup).
 func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobSpec, stateFile string, opts RunOptions) error {
-	// Check if API key is configured before starting pipeline
 	e.mu.RLock()
-	hasAPIKey := e.config.APIKey != ""
+	cfg := opts.Config
+	if cfg == nil {
+		cfg = e.config
+	}
 	e.mu.RUnlock()
 
-	if !hasAPIKey {
+	if cfg.APIKey == "" {
 		return fmt.Errorf("API key not configured - please enter your API key in the Setup tab and click 'Apply Changes' before running jobs")
 	}
 
@@ -508,7 +508,7 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	}
 
 	// Create pipeline directly from JobSpecs with shared state manager and extra input files
-	pip, err := pipeline.NewPipeline(e.config, e.apiClient, jobs, pipeline.PipelineOptions{
+	pip, err := pipeline.NewPipeline(cfg, e.apiClient, jobs, pipeline.PipelineOptions{
 		// StateFile guards the window opened by the unlocked folder resolve
 		// above: a concurrent ResetRun can nil e.state before the relock, and
 		// the pipeline must not silently fall back to a pathless manager.
@@ -707,7 +707,7 @@ func (e *Engine) GetState() *state.Manager {
 // EnsureSingleJobState idempotently creates the single-job state row at
 // index 1. Callers use this before driving upload progress outside the
 // pipeline loop (e.g. Single Job localFiles mode, where files are uploaded
-// via TransferService before RunFromSpecs is invoked). The pipeline
+// via TransferService before RunFromSpecsWithOptions is invoked). The pipeline
 // feeder's state==nil check will see the existing row and skip its own
 // InitializeState call.
 func (e *Engine) EnsureSingleJobState(jobName string) {
