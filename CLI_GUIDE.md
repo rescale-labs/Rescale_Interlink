@@ -1711,7 +1711,7 @@ The daemon automatically loads settings from the config file. CLI flags override
 
 **Flags:**
 - `-d, --download-dir string` - Directory to download job outputs to (default: value from `daemon.conf` `download_folder`, falling back to the platform default at `~/Downloads/rescale-jobs` on Unix or `%USERPROFILE%\Downloads\rescale-jobs` on Windows)
-- `--poll-interval string` - How often to check for completed jobs, as a Go duration (default "5m"). Must be between 30 seconds and 24 hours; anything outside that fails with `poll interval must be at least 30 seconds` / `at most 24 hours`
+- `--poll-interval string` - How often to check for completed jobs, as a Go duration (default "5m"). Must be between 30 seconds and 24 hours; anything outside that fails with `poll interval must be at least 30 seconds` / `at most 24 hours`. Each wait is longer by a random amount of up to a tenth of the interval, 30 seconds at most, so clients started together do not poll in step
 - `--name-prefix string` - Only download jobs with names starting with this prefix
 - `--name-contains string` - Only download jobs with names containing this string
 - `--exclude stringArray` - Exclude jobs with names starting with these prefixes
@@ -1828,7 +1828,7 @@ auto_download_tag = autodownload
 
 # Note: Mode (Enabled/Conditional/Disabled) is set per-job via the
 # 'Auto Download' custom field in Rescale workspace, not here.
-# Started tag (hardcoded, cross-client lock): autodownload:started
+# Started tag (hardcoded, cross-client lock): autodownload:started:<client>:<time>
 # Downloaded tag (hardcoded): autodownload:done
 
 [notifications]
@@ -2135,12 +2135,14 @@ rescale-int daemon status [flags]
   key, a dead network, or proxy trouble is named here rather than showing only a
   last-scan timestamp that stops advancing. The error is cleared by the next scan that
   completes
-- Per-user detail (download folder, jobs downloaded) where the daemon reports it
+- Per-user detail (download folder, jobs downloaded, jobs the last scan left to other
+  clients downloading them) where the daemon reports it
 
 **State-file view** (no daemon answering):
 - Whether a daemon process was found at all, and whether it is likely missing `--ipc`
 - Last poll time
-- Number of downloaded jobs and failed downloads
+- Number of downloaded jobs and failed downloads, and how many jobs the last poll
+  left to other clients downloading them
 - Recent download history, and failed downloads with their error text
 
 "Whether a daemon process was found" is decided by the PID file, which only
@@ -2216,6 +2218,12 @@ rescale-int daemon retry --all
 # Retry specific job
 rescale-int daemon retry --job-id XxYyZz
 ```
+
+When no daemon is running, `daemon retry` also takes off the
+`autodownload:started:<client>:<time>` tags this client left on the jobs named,
+or with `--all` on every job, so other clients may download them; it names each
+job whose tag it took off. A running daemon takes its own off at every poll. A job
+whose `autodownload:done` tag is still to be applied keeps its started tag.
 
 **Stop the daemon before running this, and check that it has actually stopped.**
 `daemon retry` edits the state file on disk. A running daemon read that file once

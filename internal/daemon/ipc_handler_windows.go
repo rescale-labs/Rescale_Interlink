@@ -103,7 +103,7 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 
 	var lastPollPtr *time.Time
 	downloadFolder := ""
-	jobsDownloaded := 0
+	jobsDownloaded, heldElsewhere := 0, 0
 
 	if h.daemon != nil {
 		lastPoll := h.daemon.GetLastPollTime()
@@ -114,6 +114,7 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 			downloadFolder = h.daemon.cfg.DownloadDir
 		}
 		jobsDownloaded = h.daemon.GetDownloadedCount()
+		heldElsewhere = h.daemon.state.GetHeldElsewhere()
 	}
 
 	// The current user's SID, which the GUI and tray match their own against.
@@ -124,12 +125,13 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 
 	return []ipc.UserStatus{
 		{
-			Username:       username,
-			SID:            sid,
-			State:          state,
-			DownloadFolder: downloadFolder,
-			LastScanTime:   lastPollPtr,
-			JobsDownloaded: jobsDownloaded,
+			Username:          username,
+			SID:               sid,
+			State:             state,
+			DownloadFolder:    downloadFolder,
+			LastScanTime:      lastPollPtr,
+			JobsDownloaded:    jobsDownloaded,
+			JobsHeldElsewhere: heldElsewhere,
 		},
 	}
 }

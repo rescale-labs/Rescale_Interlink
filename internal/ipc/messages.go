@@ -142,6 +142,10 @@ type UserStatus struct {
 	// JobsDownloaded is the total count of jobs downloaded for this user
 	JobsDownloaded int `json:"jobs_downloaded"`
 
+	// JobsHeldElsewhere is how many jobs the last scan left to other clients
+	// downloading them.
+	JobsHeldElsewhere int `json:"jobs_held_elsewhere,omitempty"`
+
 	// LastError is the most recent error for this user (if any), as canonical
 	// English text (see CanonicalText in errors.go).
 	LastError string `json:"last_error,omitempty"`

@@ -2,12 +2,14 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -106,14 +108,15 @@ const (
 	// re-download after tag removal).
 	ReasonHasDownloadedTag SkipReasonCode = "has_downloaded_tag"
 
-	// ReasonHasStartedTag — job carries the "started" tag set by another
-	// client that is currently downloading it. We back off so two clients
-	// polling the same workspace folder do not download the same job. Silent.
-	// It clears when the other client applies the done tag or releases the
-	// started tag; a tag that client never releases stays until removed. The
-	// client that set the tag itself is allowed through (local-state
-	// override) so it can resume after a restart.
+	// ReasonHasStartedTag — another client's started tag holds the job: that
+	// client is downloading it (see Daemon.claim). Logged, with the tag and
+	// until when it holds the job, since a client that never finishes holds
+	// it for all of claimLease.
 	ReasonHasStartedTag SkipReasonCode = "has_started_tag"
+
+	// ReasonClaimFailed — putting this client's started tag on the job, or
+	// reading the job's tags back after, failed. Logged.
+	ReasonClaimFailed SkipReasonCode = "claim_failed"
 
 	// ReasonConditionalMissingTag — "Auto Download" is Conditional but the
 	// job lacks the configured auto-download tag.
@@ -161,7 +164,6 @@ func (c SkipReasonCode) IsSilent() bool {
 		ReasonFieldCheckAPIError,
 		ReasonInRetryBackoff,
 		ReasonPendingTagApply,
-		ReasonHasStartedTag,
 		ReasonHasDownloadedTag:
 		return true
 	default:
@@ -241,14 +243,14 @@ func (m *Monitor) SetEligibility(cfg *EligibilityConfig) {
 // the Rescale web UI triggers a re-download on the next poll — spec §7.6.
 // Field lookup failures are silent (workspaces without the Auto Download
 // field error here for every job, so logging each would be noise).
-func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligibilityResult {
+func (m *Monitor) CheckEligibility(ctx context.Context, job *CompletedJob) CheckEligibilityResult {
 	if m.eligibility == nil {
 		return CheckEligibilityResult{EligibleForDownload: true, Detail: "eligibility checking disabled"}
 	}
+	jobID := job.ID
 
 	// Step 1: the job's tags, fetched once for every tag check below. The done
-	// tag is authoritative over local state (Plan 3 F9); the tag earlier
-	// versions applied counts as done, so their jobs are not downloaded again.
+	// tag is authoritative over local state (Plan 3 F9).
 	tags, err := m.apiClient.GetJobTags(ctx, jobID)
 	if err != nil {
 		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check job tags")
@@ -258,25 +260,22 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 			Detail: detail,
 		}
 	}
-	for _, done := range []string{config.DownloadedTag, config.LegacyDownloadedTag} {
-		if slices.Contains(tags, done) {
-			detail := fmt.Sprintf("already has '%s' tag", done)
-			return CheckEligibilityResult{
-				Reason: SkipReason{Code: ReasonHasDownloadedTag, Detail: detail},
-				Detail: detail,
-			}
+	if done := doneTag(tags); done != "" {
+		detail := fmt.Sprintf("already has '%s' tag", done)
+		return CheckEligibilityResult{
+			Reason: SkipReason{Code: ReasonHasDownloadedTag, Detail: detail},
+			Detail: detail,
 		}
 	}
 
-	// Step 1b: started tag is a cross-client lock. If another client set it,
-	// back off. If we set it ourselves (tracked in local state), fall through
-	// so a restarted client can resume its own in-flight job rather than
-	// deadlocking on its own lock.
-	if slices.Contains(tags, config.StartedTag) && !m.state.IsStartedByUs(jobID) {
-		detail := fmt.Sprintf("another client is downloading (has '%s' tag)", config.StartedTag)
-		return CheckEligibilityResult{
-			Reason: SkipReason{Code: ReasonHasStartedTag, Detail: detail},
-			Detail: detail,
+	// Step 1b: another client's started tag holds the job while that client
+	// downloads it. This client's own holds nothing: it is this client's to
+	// take off.
+	self := m.state.ClientID()
+	for _, c := range startedClaims(tags, job.CompletedAt) {
+		if c.client != self && c.holds() {
+			reason := heldReason(c)
+			return CheckEligibilityResult{Reason: reason, Detail: reason.Detail}
 		}
 	}
 
@@ -346,6 +345,71 @@ func (m *Monitor) CheckEligibility(ctx context.Context, jobID string) CheckEligi
 		Reason: SkipReason{Code: ReasonAutoDownloadUnrecognized, Detail: detail},
 		Detail: detail,
 	}
+}
+
+// doneTag returns the tag among tags that says a client has downloaded the
+// job, or "". The tag earlier versions applied counts, so their jobs are not
+// downloaded again.
+func doneTag(tags []string) string {
+	for _, done := range []string{config.DownloadedTag, config.LegacyDownloadedTag} {
+		if slices.Contains(tags, done) {
+			return done
+		}
+	}
+	return ""
+}
+
+// startedTag is the started tag the client puts on a job at at:
+// config.StartedTag, then the client's name and the time in milliseconds.
+func startedTag(client string, at time.Time) string {
+	return fmt.Sprintf("%s:%s:%d", config.StartedTag, client, at.UnixMilli())
+}
+
+// startedClaim is a started tag on a job: which client put it on, and when.
+type startedClaim struct {
+	tag, client string
+	at          time.Time
+}
+
+// startedClaims returns the started tags among tags, earliest first, ties
+// going to the lesser client name so every client orders them alike. The bare
+// tag earlier versions put on names neither client nor time; it cannot
+// predate the job's completion, so it takes that time, unknown when that is.
+func startedClaims(tags []string, completedAt time.Time) []startedClaim {
+	var claims []startedClaim
+	for _, tag := range tags {
+		c := startedClaim{tag: tag, at: completedAt}
+		if rest, ok := strings.CutPrefix(tag, config.StartedTag+":"); ok {
+			client, ms, _ := strings.Cut(rest, ":")
+			n, err := strconv.ParseInt(ms, 10, 64)
+			if client == "" || err != nil {
+				continue
+			}
+			c.client, c.at = client, time.UnixMilli(n)
+		} else if tag != config.StartedTag {
+			continue
+		}
+		claims = append(claims, c)
+	}
+	slices.SortFunc(claims, func(a, b startedClaim) int {
+		return cmp.Or(a.at.Compare(b.at), strings.Compare(a.client, b.client))
+	})
+	return claims
+}
+
+// holds reports whether the tag holds its job now: for claimLease from its
+// time. One whose time is unknown holds nothing, nor does one stamped more
+// than claimAhead ahead, which no clock in step makes and which would hold
+// the job past its lease.
+func (c startedClaim) holds() bool {
+	age := time.Since(c.at)
+	return !c.at.IsZero() && age < claimLease && age > -claimAhead
+}
+
+// heldReason says why a job another client's started tag holds is skipped.
+func heldReason(c startedClaim) SkipReason {
+	return SkipReason{Code: ReasonHasStartedTag, Detail: fmt.Sprintf("another client is downloading it: tag '%s', which holds it until %s",
+		c.tag, c.at.Add(claimLease).Format(time.RFC3339))}
 }
 
 // GetJobDownloadPath returns the download path for a job.

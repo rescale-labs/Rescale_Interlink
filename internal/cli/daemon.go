@@ -646,6 +646,7 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 						fmt.Printf("  %s: %s\n", user.Username, user.State)
 						fmt.Printf("    Download Folder: %s\n", user.DownloadFolder)
 						fmt.Printf("    Jobs Downloaded: %d\n", user.JobsDownloaded)
+						fmt.Printf("    Jobs Other Clients Are Downloading (last scan): %d\n", user.JobsHeldElsewhere)
 					}
 				}
 
@@ -697,6 +698,7 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 
 			fmt.Printf("Downloaded Jobs: %d\n", state.GetDownloadedCount())
 			fmt.Printf("Failed Jobs: %d\n", state.GetFailedCount())
+			fmt.Printf("Jobs Other Clients Are Downloading (last poll): %d\n", state.GetHeldElsewhere())
 
 			// Show recent downloads
 			recent := state.GetRecentDownloads(5)
@@ -935,6 +937,12 @@ This clears the failed status so the daemon will attempt to download
 the job again during its next poll, whether it is running now or
 starts later.
 
+When no daemon is running, it also takes off the started tags this
+client left on the jobs named, or with --all on every job, so other
+clients may download them. A running daemon takes its own off at every
+poll. A job whose downloaded tag is still to be applied keeps its
+started tag.
+
 Examples:
   # Retry all failed jobs
   rescale-int daemon retry --all
@@ -952,6 +960,9 @@ Examples:
 			failed, err := daemon.NewState(stateFile).Retry(jobIDs...)
 			if err != nil {
 				return fmt.Errorf("failed to save state: %w", err)
+			}
+			if daemon.IsDaemonRunning() == 0 {
+				removeStartedTags(stateFile, jobIDs)
 			}
 
 			if retryAll {
@@ -985,6 +996,31 @@ Examples:
 	cmd.Flags().StringArrayVarP(&jobIDs, "job-id", "j", nil, "Job ID to retry (can be specified multiple times)")
 
 	return cmd
+}
+
+// removeStartedTags takes the started tags this client left on the jobs named,
+// or on every job when none is, off, saying which. One it cannot take off is
+// reported, not fatal: the daemon tries again when it next polls.
+func removeStartedTags(stateFile string, jobIDs []string) {
+	var client *api.Client
+	removed, err := daemon.NewState(stateFile).RemoveStarted(func(jobID, tag string) error {
+		if client == nil {
+			c, err := getAPIClientFn()
+			if err != nil {
+				return err
+			}
+			client = c
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return client.DeleteJobTag(ctx, jobID, tag)
+	}, jobIDs...)
+	for _, id := range removed {
+		fmt.Printf("Took this client's started tag off job %s.\n", id)
+	}
+	if err != nil {
+		fmt.Printf("%v; the daemon tries again when it next polls.\n", err)
+	}
 }
 
 // newDaemonConfigCmd creates the 'daemon config' command group.
@@ -1072,7 +1108,7 @@ Shows all settings from daemon.conf, or defaults if the file doesn't exist.`,
 			fmt.Println()
 			fmt.Println("# Note: Mode (Enabled/Conditional/Disabled) is set per-job via the")
 			fmt.Println("# 'Auto Download' custom field in Rescale workspace, not here.")
-			fmt.Printf("# Started tag (hardcoded, cross-client lock): %s\n", config.StartedTag)
+			fmt.Printf("# Started tag (hardcoded, cross-client lock): %s:<client>:<time>\n", config.StartedTag)
 			fmt.Printf("# Downloaded tag (hardcoded): %s\n", config.DownloadedTag)
 			fmt.Println()
 

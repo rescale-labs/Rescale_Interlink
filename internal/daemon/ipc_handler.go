@@ -99,11 +99,12 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 
 	return []ipc.UserStatus{
 		{
-			Username:       username,
-			State:          state,
-			DownloadFolder: h.daemon.cfg.DownloadDir,
-			LastScanTime:   lastPollPtr,
-			JobsDownloaded: h.daemon.GetDownloadedCount(),
+			Username:          username,
+			State:             state,
+			DownloadFolder:    h.daemon.cfg.DownloadDir,
+			LastScanTime:      lastPollPtr,
+			JobsDownloaded:    h.daemon.GetDownloadedCount(),
+			JobsHeldElsewhere: h.daemon.state.GetHeldElsewhere(),
 		},
 	}
 }

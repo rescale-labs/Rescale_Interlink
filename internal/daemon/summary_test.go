@@ -251,7 +251,7 @@ func TestPersistPollProgress(t *testing.T) {
 	d.state.MarkDownloaded("job1", "Job One", "/out", 1, 10)
 
 	before := time.Now()
-	d.persistPollProgress()
+	d.persistPollProgress(&ScanSummary{})
 
 	if last := d.state.GetLastPoll(); last.Before(before) {
 		t.Errorf("LastPoll = %v, want at or after %v", last, before)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -304,7 +305,7 @@ func TestState_LastPoll(t *testing.T) {
 	}
 
 	// Update
-	state.UpdateLastPoll()
+	state.UpdateLastPoll(0)
 
 	lastPoll := state.GetLastPoll()
 	if lastPoll.IsZero() {
@@ -669,30 +670,36 @@ func TestState_PendingTagApply(t *testing.T) {
 	}
 }
 
-// A job this client has put the 'started' tag on is in flight, not downloaded:
-// it is not counted or listed as a download. Its ownership survives a prune
-// and a restart, so the client can still tell its own tag from another
-// client's, until ClearStarted forgets it or it ages out of the retention
-// window, beyond which no scan selects the job.
-func TestState_StartedByUs(t *testing.T) {
+// A job this client has put its started tag on is in flight, not downloaded:
+// it is not counted or listed as a download. The tag, named for this client and
+// the time, survives a prune and a restart, so the client can still take it
+// off, until ClearStarted forgets it or it ages out of the retention window,
+// beyond which no scan selects the job. A job still owed its done tag keeps its
+// started tag until then.
+func TestState_StartedTags(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "state.json")
 	s := NewState(stateFile)
 	s.SetRetention(37 * 24 * time.Hour)
 
-	if s.IsStartedByUs("job1") {
-		t.Error("IsStartedByUs(job1) = true before MarkStarted, want false")
+	if _, ok := s.StartedTag("job1"); ok {
+		t.Error("job1 has a started tag before MarkStarted")
 	}
-	s.MarkStarted("job1")
-	s.MarkStarted("old")
-	s.Started["old"] = time.Now().Add(-100 * 24 * time.Hour)
+	at := time.Now()
+	tag := s.MarkStarted("job1", at)
+	if want := fmt.Sprintf("%s:%s:%d", config.StartedTag, s.ClientID(), at.UnixMilli()); tag != want || len(s.ClientID()) != 8 {
+		t.Errorf("MarkStarted = %q, want %q, with an 8-character client name", tag, want)
+	}
+	s.MarkStarted("old", time.Now().Add(-100*24*time.Hour))
+	s.MarkStarted("pending", at)
+	s.MarkDownloaded("pending", "Pending", "/out", 1, 1)
+	s.MarkPendingTagApply("pending")
 	if err := s.Save(); err != nil { // prunes
 		t.Fatalf("Save: %v", err)
 	}
-	if !s.IsStartedByUs("job1") || s.IsStartedByUs("old") {
-		t.Errorf("after a prune IsStartedByUs = %v for job1, %v for a job past retention; want true, false",
-			s.IsStartedByUs("job1"), s.IsStartedByUs("old"))
+	if _, ok := s.StartedTag("old"); ok {
+		t.Error("a started tag past retention survived a prune")
 	}
-	if n, recent := s.GetDownloadedCount(), s.GetRecentDownloads(0); n != 0 || len(recent) != 0 {
+	if n, recent := s.GetDownloadedCount(), s.GetRecentDownloads(0); n != 1 || len(recent) != 1 {
 		t.Errorf("an in-flight job counts as downloaded: count %d, recent %v", n, recent)
 	}
 
@@ -700,18 +707,49 @@ func TestState_StartedByUs(t *testing.T) {
 	if err := reloaded.Load(); err != nil {
 		t.Fatalf("Load after save: %v", err)
 	}
-	if !reloaded.IsStartedByUs("job1") {
-		t.Error("IsStartedByUs(job1) = false after a restart, want true")
+	if got, ok := reloaded.StartedTag("job1"); !ok || got != tag {
+		t.Errorf("after a restart job1's started tag is %q (%v), want %q", got, ok, tag)
 	}
-	if n := reloaded.GetDownloadedCount(); n != 0 {
-		t.Errorf("after a restart an in-flight job counts as downloaded: %d", n)
+	if got := reloaded.StartedToRemove(); !slices.Equal(got, []string{"job1"}) {
+		t.Errorf("StartedToRemove = %v, want job1 alone", got)
 	}
 
 	reloaded.ClearStarted("job1")
-	if reloaded.IsStartedByUs("job1") {
-		t.Error("IsStartedByUs(job1) = true after ClearStarted, want false")
+	if _, ok := reloaded.StartedTag("job1"); ok {
+		t.Error("job1 has a started tag after ClearStarted")
 	}
-	if reloaded.IsStartedByUs("unknown") {
-		t.Error("IsStartedByUs(unknown) = true, want false")
+}
+
+// 'daemon retry' forgets the tags it took off in the state file as it is by
+// then, not as it read it: what a daemon started meanwhile wrote there stays.
+func TestRemoveStarted_KeepsWhatADaemonWroteMeanwhile(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "state.json")
+	s := NewState(stateFile)
+	s.MarkStarted("held1", time.Now())
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var claimed string
+	removed, err := NewState(stateFile).RemoveStarted(func(jobID, tag string) error {
+		d := NewState(stateFile) // a daemon starting while the tag comes off
+		if err := d.Load(); err != nil {
+			return err
+		}
+		d.MarkDownloaded("new1", "New", "/out", 1, 1)
+		claimed = d.MarkStarted("claimed1", time.Now())
+		return d.Save()
+	})
+	if err != nil || !slices.Equal(removed, []string{"held1"}) {
+		t.Fatalf("RemoveStarted = %v, %v; want held1", removed, err)
+	}
+	saved := NewState(stateFile)
+	if err := saved.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := saved.StartedTag("held1"); ok {
+		t.Error("the state file still holds the tag taken off")
+	}
+	if tag, ok := saved.StartedTag("claimed1"); !ok || tag != claimed || saved.GetDownloadedCount() != 1 {
+		t.Errorf("what the daemon wrote was lost: claimed1 %q (%v), %d downloaded", tag, ok, saved.GetDownloadedCount())
 	}
 }

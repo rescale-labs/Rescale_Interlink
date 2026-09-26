@@ -2,7 +2,10 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,12 +45,21 @@ type State struct {
 	// Downloaded jobs keyed by job ID
 	Downloaded map[string]*DownloadedJob `json:"downloaded"`
 
-	// Started holds the jobs this client has put the 'started' tag on, keyed
-	// by job ID, with when. A job is in flight here, not downloaded, so it is
-	// kept apart from Downloaded and never counted as a download. Persisted
-	// so that after a restart the tag is still recognized as this client's,
-	// and pruned with the finished entries.
+	// Started holds the jobs this client has put its started tag on, keyed by
+	// job ID, with when; with Client, that names the tag. A job is in flight
+	// here, not downloaded, so it is kept apart from Downloaded and never
+	// counted as a download. Persisted so that a tag an attempt left on, by
+	// crashing or failing to take it off, still comes off later; pruned with
+	// the finished entries.
 	Started map[string]time.Time `json:"started,omitempty"`
+
+	// Client names this client in its started tags. It is random, made once,
+	// so it names no person or machine.
+	Client string `json:"client_id,omitempty"`
+
+	// HeldElsewhere is how many jobs the last poll left to other clients
+	// downloading them.
+	HeldElsewhere int `json:"held_elsewhere,omitempty"`
 
 	// Version for state file format migration
 	Version string `json:"version"`
@@ -139,7 +151,7 @@ func (s *State) load(locked bool) error {
 		// Fully reinitialize — Unmarshal may have left partial state
 		s.Version = stateVersion
 		s.Downloaded = make(map[string]*DownloadedJob)
-		s.Started = nil
+		s.Started, s.Client, s.HeldElsewhere = nil, "", 0
 		s.LastPoll = time.Time{}
 		return nil
 	}
@@ -411,33 +423,113 @@ func (s *State) PendingTagApplyJobs() []string {
 	return ids
 }
 
-// MarkStarted records that this client is putting the 'started' tag on the
-// job, so a restart mid-download can tell its own tag from another client's
-// (IsStartedByUs).
-func (s *State) MarkStarted(jobID string) {
+// MarkStarted records that this client is putting its started tag, made at
+// at, on the job, and returns the tag.
+func (s *State) MarkStarted(jobID string, at time.Time) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.Started == nil {
 		s.Started = make(map[string]time.Time)
 	}
-	s.Started[jobID] = time.Now()
+	s.Started[jobID] = at
+	return startedTag(s.clientID(), at)
 }
 
-// ClearStarted forgets the job's 'started' tag once it has been removed.
+// ClearStarted forgets the job's started tag once it has been taken off.
 func (s *State) ClearStarted(jobID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.Started, jobID)
 }
 
-// IsStartedByUs reports whether this client put the 'started' tag on the job.
-// Used by eligibility to let a client resume its own in-flight job rather than
-// treating its own tag as another client's.
-func (s *State) IsStartedByUs(jobID string) bool {
+// StartedTag returns the started tag this client put on the job, if it has
+// one there.
+func (s *State) StartedTag(jobID string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.Started[jobID]
+	if !ok {
+		return "", false
+	}
+	return startedTag(s.clientID(), at), true
+}
+
+// ClientID returns the name this client's started tags carry.
+func (s *State) ClientID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.clientID()
+}
+
+// clientID is ClientID for a caller holding s.mu. The name is made the first
+// time it is asked for.
+func (s *State) clientID() string {
+	if s.Client == "" {
+		b := make([]byte, 4)
+		_, _ = rand.Read(b) // never fails
+		s.Client = hex.EncodeToString(b)
+	}
+	return s.Client
+}
+
+// StartedToRemove returns the jobs whose started tag this client is to take
+// off: every one it has a tag on but those still owed their done tag, which
+// the tag holds until then.
+func (s *State) StartedToRemove() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.Started[jobID]
-	return ok
+	var ids []string
+	for id := range s.Started {
+		if job := s.Downloaded[id]; job == nil || !job.PendingTagApply {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+// RemoveStarted takes this client's started tags off the jobs named, or off
+// every job when none is, with remove, stopping at the first that fails, and
+// forgets each one taken off. For 'daemon retry' while no daemon runs: a
+// running daemon takes its own off at every poll.
+func (s *State) RemoveStarted(remove func(jobID, tag string) error, jobIDs ...string) ([]string, error) {
+	if err := s.Load(); err != nil {
+		return nil, err
+	}
+	var removed []string
+	tags := map[string]string{}
+	var err error
+	for _, id := range s.StartedToRemove() {
+		if len(jobIDs) > 0 && !slices.Contains(jobIDs, id) {
+			continue
+		}
+		tag, _ := s.StartedTag(id)
+		if err = remove(id, tag); err != nil {
+			err = fmt.Errorf("could not take the started tag %s off job %s: %w", tag, id, err)
+			break
+		}
+		removed, tags[id] = append(removed, id), tag
+	}
+	if len(removed) == 0 {
+		return nil, err
+	}
+	// Forgotten in the file as it is now, under its lock, as Retry does: a
+	// daemon may have started and written it meanwhile, even claimed a job anew.
+	unlock, lockErr := s.lock()
+	if lockErr != nil {
+		return removed, errors.Join(err, lockErr)
+	}
+	defer unlock()
+	now := NewState(s.filePath)
+	if loadErr := now.load(true); loadErr != nil {
+		return removed, errors.Join(err, loadErr)
+	}
+	for id, tag := range tags {
+		if t, ok := now.StartedTag(id); ok && t == tag {
+			now.ClearStarted(id)
+		}
+	}
+	return removed, errors.Join(err, now.write())
 }
 
 // timeNow stamps failed attempts. A variable so a test can stop it, as Windows'
@@ -524,11 +616,13 @@ func (s *State) ClearFailed(jobID string) {
 	}
 }
 
-// UpdateLastPoll records the last successful poll time.
-func (s *State) UpdateLastPoll() {
+// UpdateLastPoll records the last successful poll time, and how many jobs
+// the poll left to other clients downloading them.
+func (s *State) UpdateLastPoll(heldElsewhere int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastPoll = time.Now()
+	s.HeldElsewhere = heldElsewhere
 }
 
 // GetLastPoll returns the last successful poll time.
@@ -536,6 +630,13 @@ func (s *State) GetLastPoll() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.LastPoll
+}
+
+// GetHeldElsewhere returns how many jobs the last poll left to other clients.
+func (s *State) GetHeldElsewhere() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.HeldElsewhere
 }
 
 // GetDownloadedCount returns the number of successfully downloaded jobs.

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,8 +65,24 @@ type Config struct {
 
 // scanBudget bounds one poll's scan phase: listing jobs and checking their
 // eligibility. It must exceed the HTTP client timeout (300s) so a slow call can
-// still be retried. Downloads are not covered by it — see poll().
-const scanBudget = 10 * time.Minute
+// still be retried. Downloads are not covered by it — see poll(). A variable
+// so a test can shorten it.
+var scanBudget = 10 * time.Minute
+
+// claimLease is how long a started tag holds a job. Past it any client may
+// take the job over, so a client that crashed or was removed holds none for
+// ever. A day is longer than one job's download is expected to take, and
+// leaves the job well inside the default lookback.
+const claimLease = 24 * time.Hour
+
+// claimAhead is how far ahead of this client's clock a started tag's time may
+// be and still hold its job.
+const claimAhead = 10 * time.Minute
+
+// claimSettle bounds how long putting a started tag on may take, and how far
+// apart two clients' clocks may be, for their claims to be ordered right; see
+// claim. A variable so a test can shorten it.
+var claimSettle = 2 * time.Second
 
 // stateRetentionBufferDays extends state retention past the lookback window by
 // the same margin FindCompletedJobs uses for its creation-date pre-filter, so an
@@ -468,12 +486,22 @@ func (d *Daemon) Stop() {
 	d.logger.Info().Msg("Daemon stopped")
 }
 
+// pollDelay is the wait before the next poll: the interval, plus up to a tenth
+// of it, 30 s at most, at random. Clients started together so drift apart,
+// rather than claiming the same jobs at the same moment poll after poll.
+func pollDelay(interval time.Duration) time.Duration {
+	if spread := min(interval/10, 30*time.Second); spread > 0 {
+		return interval + rand.N(spread)
+	}
+	return interval
+}
+
 // pollLoop runs the periodic polling.
 func (d *Daemon) pollLoop(ctx context.Context) {
 	defer d.wg.Done()
 
-	ticker := time.NewTicker(d.cfg.PollInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(pollDelay(d.cfg.PollInterval))
+	defer timer.Stop()
 
 	for {
 		select {
@@ -483,7 +511,8 @@ func (d *Daemon) pollLoop(ctx context.Context) {
 		case <-d.stopChan:
 			d.logger.Info().Msg("Poll loop stopped")
 			return
-		case <-ticker.C:
+		case <-timer.C:
+			timer.Reset(pollDelay(d.cfg.PollInterval))
 			if d.paused.Load() {
 				d.logger.Debug().Msg("Daemon paused, skipping scheduled poll")
 				continue
@@ -535,6 +564,11 @@ func (d *Daemon) poll(ctx context.Context) {
 				Str("job_id", jobID).
 				Str("tag", config.DownloadedTag).
 				Msg("Applied downloaded tag on retry")
+		}
+		// A started tag an ended attempt left on, by crashing or failing to
+		// take it off, comes off now: no job downloads between polls.
+		for _, jobID := range d.state.StartedToRemove() {
+			d.releaseStarted(jobID)
 		}
 	}
 
@@ -591,8 +625,10 @@ func (d *Daemon) poll(ctx context.Context) {
 	// Check eligibility and download each job. Extend the summary with per-job
 	// eligibility skips and download outcomes as we go.
 	//
-	// totalDownloadTime accumulates the time spent inside downloadJob so the
-	// budget check below can subtract it. Transferring a large file is allowed
+	// totalDownloadTime accumulates the time spent claiming jobs and inside
+	// downloadJob so the budget check below can subtract it: a claim waits
+	// seconds for other clients' claims to show, which a backlog of jobs would
+	// otherwise add up past the budget. Transferring a large file is allowed
 	// to take longer than the entire budget; charging that to the scan turned a
 	// poll that worked perfectly into a standing "scan failed" error, which is
 	// exactly the false alarm that makes a real one easy to ignore.
@@ -627,7 +663,7 @@ func (d *Daemon) poll(ctx context.Context) {
 			// This poll did real work — jobs were checked and possibly
 			// downloaded — so its progress is persisted and its timestamp
 			// advances. The recorded error is what says it was cut short.
-			d.persistPollProgress()
+			d.persistPollProgress(summary)
 			return
 		}
 
@@ -638,15 +674,25 @@ func (d *Daemon) poll(ctx context.Context) {
 			// deadline, and an eligibility check must not inherit a context that
 			// is already dead and fail every job after it.
 			eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
-			eligResult := d.monitor.CheckEligibility(eligCtx, job.ID)
+			eligResult := d.monitor.CheckEligibility(eligCtx, job)
 			eligCancel()
 
 			summary.EligibilityChecked++
 
-			if !eligResult.EligibleForDownload {
-				summary.AddSkip(eligResult.Reason.Code)
-				if !eligResult.Reason.Code.IsSilent() {
-					d.logger.Info().Msgf("SKIP: %s [%s] - %s", job.Name, job.ID, eligResult.Detail)
+			// An eligible job is claimed from other clients before anything
+			// is written for it.
+			reason, eligible := eligResult.Reason, eligResult.EligibleForDownload
+			if eligible {
+				claimStart := time.Now()
+				reason, eligible = d.claim(ctx, job)
+				totalDownloadTime += time.Since(claimStart)
+			}
+			if !eligible {
+				if reason.Code != ReasonNone {
+					summary.AddSkip(reason.Code)
+				}
+				if !reason.Code.IsSilent() {
+					d.logger.Info().Msgf("SKIP: %s [%s] - %s", job.Name, job.ID, reason.Detail)
 				}
 				continue
 			}
@@ -685,7 +731,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	} else {
 		d.clearScanError()
 	}
-	d.persistPollProgress()
+	d.persistPollProgress(summary)
 }
 
 // scanBudgetExceeded reports whether a poll's scan work alone has outrun its
@@ -703,10 +749,11 @@ func scanBudgetExceeded(elapsed, downloadTime, budget time.Duration) bool {
 	return scanTime > budget
 }
 
-// persistPollProgress stamps the poll time and writes state to disk. Called by
-// every poll that ran to completion or did partial work before being cut short.
-func (d *Daemon) persistPollProgress() {
-	d.state.UpdateLastPoll()
+// persistPollProgress stamps the poll time, with how many jobs the poll left to
+// other clients, and writes state to disk. Called by every poll that ran to
+// completion or did partial work before being cut short.
+func (d *Daemon) persistPollProgress(s *ScanSummary) {
+	d.state.UpdateLastPoll(s.SkipBuckets[ReasonHasStartedTag])
 	if err := d.state.Save(); err != nil {
 		d.logger.Error().Err(err).Msg("Failed to save state after poll")
 	}
@@ -840,6 +887,7 @@ var scanSummaryReasonOrder = []SkipReasonCode{
 	ReasonFieldCheckAPIError,
 	ReasonHasDownloadedTag,
 	ReasonHasStartedTag,
+	ReasonClaimFailed,
 	ReasonConditionalMissingTag,
 	ReasonDownloadedTagCheckAPIError,
 	ReasonOutsideLookbackWindow,
@@ -1025,11 +1073,6 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Str("job_id", job.ID).
 		Int("file_count", len(files)).
 		Msg("Downloading job files")
-
-	// Claim the cross-client lock now that we know there are files to fetch.
-	// Released on every failure and stop path (markFailed); removed once the
-	// done tag is on (applyDownloadedTag).
-	d.markStarted(ctx, job)
 
 	// The batch ID is unique per attempt so this attempt's stats cannot inherit
 	// an earlier one's failures. The label carries the attempt number instead of
@@ -1342,53 +1385,124 @@ func (d *Daemon) applyDownloadedTag(ctx context.Context, job *CompletedJob) {
 	d.releaseStarted(job.ID)
 }
 
-// markStarted puts the cross-client 'started' tag on the job, having recorded
-// and saved that this client holds it, so a restart mid-download still knows
-// the tag as its own and resumes the job. Best-effort: a failed tag call is
-// logged but does not stop the download; the worst case is another client
-// also picking up the job.
-func (d *Daemon) markStarted(ctx context.Context, job *CompletedJob) {
-	if d.cfg.Eligibility == nil {
-		return
+// claim puts this client's started tag, naming it and the time, on the job,
+// and reports whether this client is to download the job. If not, it takes the
+// tag off again and says why, unless the daemon is stopping.
+//
+// Two clients can find a job free at once, so each reads the job's tags back
+// once every claim made before its own has had time to show, and goes on only
+// if the job is not done and its own claim is the earliest there. A claim that
+// took longer than claimSettle to put on may have shown only after another
+// client's read, so it goes on only as the job's one claim. With clocks within
+// claimSettle of each other, at most one client goes on.
+func (d *Daemon) claim(ctx context.Context, job *CompletedJob) (SkipReason, bool) {
+	// One attempt never holds two tags: one left on the job comes off first.
+	if !d.releaseStarted(job.ID) {
+		return SkipReason{Code: ReasonClaimFailed, Detail: "could not take this client's earlier started tag off"}, false
 	}
-	d.state.MarkStarted(job.ID)
-	if err := d.state.Save(); err != nil {
-		d.logger.Error().Err(err).Msg("Failed to persist state")
+	// Saved before the tag goes on, so this client knows every tag it put on.
+	at := time.Now()
+	var tag string
+	if err := d.state.update(func() { tag = d.state.MarkStarted(job.ID, at) }); err != nil {
+		d.state.ClearStarted(job.ID)
+		return SkipReason{Code: ReasonClaimFailed, Detail: fmt.Sprintf("could not record the claim: %v", err)}, false
 	}
-	if err := d.apiClient.AddJobTag(ctx, job.ID, config.StartedTag); err != nil {
-		d.logger.Warn().
-			Err(err).
-			Str("job_id", job.ID).
-			Str("tag", config.StartedTag).
-			Msg("Failed to apply started lock tag (download proceeds; another client may also pick up the job)")
+	leave := func(reason SkipReason) (SkipReason, bool) {
+		d.releaseStarted(job.ID)
+		if ctx.Err() != nil {
+			return SkipReason{}, false // a stop is not a skip
+		}
+		return reason, false
+	}
+	failed := func(err error) (SkipReason, bool) {
+		return leave(SkipReason{Code: ReasonClaimFailed, Detail: fmt.Sprintf("could not claim the job: %v", err)})
+	}
+
+	if err := d.apiClient.AddJobTag(ctx, job.ID, tag); err != nil {
+		return failed(err)
+	}
+	slow := time.Since(at) > claimSettle
+	select {
+	case <-time.After(time.Until(at.Add(2 * claimSettle))):
+	case <-ctx.Done():
+		return leave(SkipReason{})
+	}
+	tags, err := d.apiClient.GetJobTags(ctx, job.ID)
+	if err != nil {
+		return failed(err)
+	}
+	if done := doneTag(tags); done != "" {
+		return leave(SkipReason{Code: ReasonHasDownloadedTag, Detail: fmt.Sprintf("already has '%s' tag", done)})
+	}
+	// This client's other tags hold nothing for it, nor do expired ones: both
+	// come off, as nothing else would take them off.
+	self := d.state.ClientID()
+	var live, stale []startedClaim
+	for _, c := range startedClaims(tags, job.CompletedAt) {
+		switch {
+		case c.tag == tag || c.client != self && c.holds():
+			live = append(live, c)
+		case !c.at.IsZero():
+			stale = append(stale, c)
+		}
+	}
+	d.removeStale(ctx, job.ID, stale)
+	switch i := slices.IndexFunc(live, func(c startedClaim) bool { return c.tag == tag }); {
+	case i < 0:
+		return failed(errors.New("its started tag did not show on the job"))
+	case i > 0:
+		return leave(heldReason(live[0]))
+	case slow && len(live) > 1:
+		return leave(heldReason(live[1]))
+	}
+	d.logger.Debug().Str("job_id", job.ID).Str("tag", tag).Msg("Claimed job")
+	return SkipReason{}, true
+}
+
+// removeStale takes started tags that hold nothing off the job, best-effort,
+// with one line naming those it took off.
+func (d *Daemon) removeStale(ctx context.Context, jobID string, stale []startedClaim) {
+	var removed []string
+	for _, c := range stale {
+		if err := d.apiClient.DeleteJobTag(ctx, jobID, c.tag); err != nil {
+			d.logger.Debug().Err(err).Str("job_id", jobID).Str("tag", c.tag).Msg("Failed to take stale started tag off")
+			continue
+		}
+		removed = append(removed, c.tag)
+	}
+	if len(removed) > 0 {
+		d.logger.Info().Str("job_id", jobID).Strs("tags", removed).Msg("Took started tags that hold nothing off the job")
 	}
 }
 
-// releaseStarted removes the 'started' tag this client put on the job, and
-// forgets the job once the tag is gone, saving that at once; a tag it did not
-// put there is left alone. A removal that fails leaves the job this client's,
-// so it can still resume the job itself, but nothing retries the removal on
-// its own: other clients skip the job until the tag is removed. The call gets
-// a context of its own, so the tag is released even while the daemon stops,
-// and 4 s, inside the 5 s 'daemon run' gives a stopping daemon, so a stop does
-// not cut it off between the removal and the save.
-func (d *Daemon) releaseStarted(jobID string) {
-	if !d.state.IsStartedByUs(jobID) {
-		return
+// releaseStarted takes this client's started tag off the job and forgets it,
+// saving that at once, and reports whether the job is left without one. A
+// removal that fails keeps the tag this client's, and the next poll tries
+// again, until the tag's lease is over: it holds nothing then, and a removal
+// that still fails, as every one does once the job is deleted, would be tried
+// for weeks. The call gets a context of its own, so the tag comes off even
+// while the daemon stops, and 4 s, inside the 5 s 'daemon run' gives a
+// stopping daemon, so a stop does not cut it off between the removal and the
+// save.
+func (d *Daemon) releaseStarted(jobID string) bool {
+	tag, ok := d.state.StartedTag(jobID)
+	if !ok {
+		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	if err := d.apiClient.DeleteJobTag(ctx, jobID, config.StartedTag); err != nil {
-		d.logger.Warn().
-			Err(err).
-			Str("job_id", jobID).
-			Str("tag", config.StartedTag).
-			Msg("Failed to release started lock tag (job may stay locked until manually cleared)")
-		return
+	if err := d.apiClient.DeleteJobTag(ctx, jobID, tag); err != nil {
+		log := d.logger.Warn().Err(err).Str("job_id", jobID).Str("tag", tag)
+		if c := startedClaims([]string{tag}, time.Time{}); len(c) == 1 && c[0].holds() {
+			log.Msg("Failed to take started tag off (will retry at the next poll)")
+			return false
+		}
+		log.Msg("Gave up taking started tag off: its lease is over, so it holds nothing")
 	}
 	if err := d.state.update(func() { d.state.ClearStarted(jobID) }); err != nil {
 		d.logger.Error().Err(err).Msg("Failed to persist state")
 	}
+	return true
 }
 
 // mirrorDir returns the folder under downloadDir that mirrors a job's

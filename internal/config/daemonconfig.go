@@ -30,10 +30,11 @@ const (
 	// AutoDownloadValueDisabled means never auto-download this job.
 	AutoDownloadValueDisabled = "Disabled"
 
-	// StartedTag is added to a job when a client begins downloading it. It
-	// acts as a cross-client lock so other clients polling the same workspace
-	// folder do not start a duplicate download. Removed on completion (replaced
-	// by DownloadedTag) or on error (so the job becomes retryable again).
+	// StartedTag begins the tag a client adds to a job as it starts
+	// downloading it, "autodownload:started:<client>:<time>", so other clients
+	// polling the same workspace folder leave the job to it for a while. Removed
+	// once DownloadedTag is on, or when the attempt ends otherwise. Earlier
+	// versions added StartedTag alone.
 	StartedTag = "autodownload:started"
 
 	// DownloadedTag is added to jobs after successful download to prevent

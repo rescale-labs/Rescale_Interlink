@@ -540,7 +540,7 @@ func TestMonitorEligibilityConfig(t *testing.T) {
 func TestCheckEligibility_NilConfig(t *testing.T) {
 	m := &Monitor{eligibility: nil}
 
-	result := m.CheckEligibility(nil, "test-job-id")
+	result := m.CheckEligibility(nil, &CompletedJob{ID: "test-job-id"})
 
 	if !result.EligibleForDownload {
 		t.Errorf("expected EligibleForDownload=true for nil eligibility config, got false")
@@ -573,7 +573,8 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 		// retry state.
 		ReasonHasDownloadedTag:           true,
 		ReasonPendingTagApply:            true,
-		ReasonHasStartedTag:              true,
+		ReasonHasStartedTag:              false,
+		ReasonClaimFailed:                false,
 		ReasonConditionalMissingTag:      false,
 		ReasonDownloadedTagCheckAPIError: false,
 		ReasonCompletionTimeAPIError:     false,

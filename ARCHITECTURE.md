@@ -724,14 +724,32 @@ Each candidate then passes the same per-job eligibility gate (the "Auto
 Download" custom field + tags). Because workspace folders can be polled by
 several clients at once, eligibility also honors two coordination tags: a job
 carrying `autodownload:done` (or `autoDownloaded:true`, which earlier versions
-applied) is treated as already downloaded, and one carrying
-`autodownload:started` (set by another client) is skipped as in-progress. The
-downloading client sets `autodownload:started` before fetching files, removes it
+applied) is treated as already downloaded, and one carrying another client's
+live `autodownload:started:<client>:<time>` tag is skipped as in progress, with a
+logged reason (`has_started_tag`) that `daemon status` counts. An eligible job is
+then claimed (`Daemon.claim`): the client records its tag in the state file,
+applies it, and reads the job's tags back once twice `claimSettle` (2 s) has
+passed since the tag's time. It downloads only if the job is not done and its
+tag is the earliest live one, ties going to the lesser client name; if applying
+the tag took longer than `claimSettle`, only if its tag is the only one. With
+clocks within `claimSettle` of each other, at most one client downloads a job.
+The client name is random, made once and kept in the state file, apart from the
+downloaded jobs; a claim the state file cannot record is not made, and this
+client's own other tags on the job hold nothing for it. A tag holds its job for
+`claimLease` (24 h), after which any client may take the job over; one stamped
+more than `claimAhead` (10 min) in the future holds nothing, and a bare
+`autodownload:started`, which earlier builds applied, counts from the job's
+completion. The claiming client takes off the tags that hold nothing, its own
+included, best-effort. Each poll waits the interval plus a random part of up to
+a tenth of it (30 s at most), so clients started together drift apart. The
+client removes its tag
 when the attempt fails or the daemon stops (so the job is retryable by any
-client), and replaces it with `autodownload:done` on success. A client tracks
-its own `started` jobs in local state, apart from its downloaded jobs, so it can
-resume them after a restart rather than treating its own lock as another
-client's. When downloading, the job's relative folder
+client), and replaces it with `autodownload:done` on success. A removal that
+fails is retried in the next poll's tag-retry pass, which also removes a tag a
+crash left, until the tag's lease is over, when it is forgotten with one log
+line; `daemon retry` removes this client's tags while no daemon runs;
+a job still owed its `autodownload:done` tag keeps its `started` tag until then.
+When downloading, the job's relative folder
 path is mirrored under the download folder (e.g. `Shared/ExampleFolder/Subfolder`
 → `<download>/ExampleFolder/Subfolder/<job dir>`), unless
 `flatten_folder_structure` is set, in which case all jobs download into the root.

@@ -310,18 +310,29 @@ When several clients poll the same workspace shared folders, they could each
 start downloading the same job. Auto-download now uses two job tags to
 coordinate:
 
-- `autodownload:started` is applied when a client begins downloading a job. It
-  acts as a cross-client lock — other clients skip a job that is already
-  `started` by someone else. A client recognizes its own lock (tracked in local
-  state) so it can resume its own in-flight job after a restart.
+- `autodownload:started:<client>:<time>` is applied when a client begins
+  downloading a job. It names the client, by a random name made once per
+  installation, and the time. Two clients that reach a job together both apply
+  theirs; each reads the job's tags back a few seconds later, and only the
+  client whose tag is the earliest downloads the job. This relies on the
+  computers' clocks agreeing to within a couple of seconds, which automatic
+  time synchronization normally ensures. Other clients skip the job, logging
+  which tag holds it and until when, and `daemon status` counts such jobs. A
+  tag holds its job for 24 hours at most, so a client that crashed or was
+  removed does not hold a job for ever; the client that then takes the job
+  over removes the old tag. Each poll interval also varies at random by up to
+  a tenth, 30 seconds at most, so clients started together fall out of step.
 - `autodownload:done` is applied on successful completion (and the `started`
   tag is removed). Eligibility treats a `done` job as already downloaded.
 
-When a download fails, or the daemon stops during one, the `started` tag is
-removed so the job becomes retryable by any client. The tag added after a
-successful download was renamed from `autoDownloaded:true` to
-`autodownload:done`; a job carrying the old tag still counts as downloaded, so
-upgrading does not download those jobs again.
+When a download fails, or the daemon stops during one, the client removes its
+`started` tag so the job becomes retryable by any client. A removal that fails
+is tried again at the next poll, and `daemon retry` removes this client's tags
+while no daemon is running. The tag added after a successful download was
+renamed from `autoDownloaded:true` to `autodownload:done`; a job carrying the
+old tag still counts as downloaded, so upgrading does not download those jobs
+again. A bare `autodownload:started` tag, applied by earlier builds, holds its
+job for 24 hours from the job's completion.
 
 ### Auto-download can now include jobs in workspace shared folders
 
