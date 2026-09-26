@@ -15,6 +15,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/progress"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 	"github.com/rescale/rescale-int/internal/transfer/scan"
@@ -36,16 +37,35 @@ type DownloadResult struct {
 // it replaces, as variables so that a test can answer them and make the removal
 // fail on any system.
 var (
-	askFolderDownloadMode = func() (FolderDownloadMode, error) {
-		if !IsTerminal() {
-			return FolderDownloadModePrompt, fmt.Errorf("conflict handling mode required in non-interactive mode: use --skip, --overwrite, or --merge")
+	// askFolderDownloadMode asks at a terminal. Without one, only a download
+	// into a folder that holds something needs a mode: a new or empty one has
+	// nothing to conflict with.
+	askFolderDownloadMode = func(dest string) (FolderDownloadMode, error) {
+		switch {
+		case IsTerminal():
+			return promptFolderDownloadMode()
+		case !holdsEntries(dest):
+			return FolderDownloadModeMerge, nil
 		}
-		return promptFolderDownloadMode()
+		return FolderDownloadModePrompt, reporting.UsageError(fmt.Errorf(
+			"conflict handling mode required in non-interactive mode: %s is not empty; use --skip, --overwrite, or --merge", dest))
 	}
 	promptFolderDownloadConflictFn = promptFolderDownloadConflict
 	promptDownloadConflictFn       = promptDownloadConflict
 	removeFile                     = os.Remove
 )
+
+// holdsEntries reports whether dir holds anything, or cannot be read as a
+// folder (a file there is a conflict too).
+func holdsEntries(dir string) bool {
+	f, err := os.Open(dir)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	return len(names) > 0 || err != io.EOF
+}
 
 // replaceStep runs when a worker has decided to replace an existing file,
 // before it checks that the download is still going. Only a test sets it.
@@ -94,6 +114,7 @@ func DownloadFolderRecursive(
 		Msg("Starting recursive folder download")
 
 	// Determine conflict handling mode
+	var refusal error // why the download itself would not start, for a dry run to say
 	var initialFileMode DownloadConflictAction
 	var initialFolderMode FolderDownloadConflictAction
 
@@ -111,10 +132,11 @@ func DownloadFolderRecursive(
 
 	if flagsSet == 0 {
 		// No flags specified - prompt user for mode selection
-		mode, err := askFolderDownloadMode()
-		if err != nil {
+		mode, err := askFolderDownloadMode(rootOutputDir)
+		if err != nil && !dryRun {
 			return nil, err
 		}
+		refusal = err // a dry run reports it instead
 		switch mode {
 		case FolderDownloadModeSkip:
 			skipAll = true
@@ -165,7 +187,7 @@ func DownloadFolderRecursive(
 
 	// DRY-RUN MODE: Show what would happen without downloading
 	if dryRun {
-		return performDryRunAnalysis(rootOutputDir, allFolders, allFiles, overwriteAll, skipAll, mergeAll)
+		return performDryRunAnalysis(rootOutputDir, allFolders, allFiles, overwriteAll, skipAll, mergeAll, refusal)
 	}
 
 	// Check if root output directory already exists
@@ -250,7 +272,7 @@ func DownloadFolderRecursive(
 	fmt.Println("\n📥 Downloading files...")
 	downloadUI := progress.NewDownloadUI(len(allFiles))
 
-	// Route this command's logs through the bars — see executeFileUpload for why.
+	// Route this command's logs through the bars — see UploadFilesWithIDs for why.
 	if downloadUI.IsTerminal() {
 		logger = logger.WithOutput(downloadUI.Writer())
 	}
@@ -482,6 +504,7 @@ func performDryRunAnalysis(
 	overwriteAll bool,
 	skipAll bool,
 	mergeAll bool,
+	refusal error,
 ) (*DownloadResult, error) {
 	result := &DownloadResult{
 		Errors: make([]DownloadError, 0),
@@ -597,6 +620,8 @@ func performDryRunAnalysis(
 		fmt.Println("MERGE (merge folders, skip existing files)")
 	} else if overwriteAll {
 		fmt.Println("OVERWRITE (merge folders, overwrite existing files)")
+	} else if refusal != nil {
+		fmt.Printf("NONE (the download would refuse: %v)\n", refusal)
 	} else {
 		fmt.Println("PROMPT (would ask for each conflict)")
 	}

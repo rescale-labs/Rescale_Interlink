@@ -14,6 +14,10 @@ import (
 	"github.com/rescale/rescale-int/internal/reporting"
 )
 
+// eventsEmit is runtime.EventsEmit, which a test replaces: outside a running
+// Wails app it ends the process.
+var eventsEmit = runtime.EventsEmit
+
 // EventBridge forwards events from internal EventBus to Wails runtime.
 type EventBridge struct {
 	ctx          context.Context
@@ -83,6 +87,20 @@ func (eb *EventBridge) Stop() {
 	eb.wg.Wait()
 	eb.eventBus.UnsubscribeAll(sub)
 
+	// The frontend is going away, but the log events still queued belong in
+	// interlink.log.
+	for drained := false; !drained; {
+		select {
+		case event, ok := <-sub:
+			if e, isLog := event.(*events.LogEvent); isLog {
+				writeLogEvent(e, logEventToDTO(e))
+			}
+			drained = !ok
+		default:
+			drained = true
+		}
+	}
+
 	wailsLogger.Debug().Msg("Event bridge stopped")
 }
 
@@ -109,19 +127,21 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		if eb.shouldThrottle(e.JobName) {
 			return
 		}
-		runtime.EventsEmit(eb.ctx, "interlink:progress", progressEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:progress", progressEventToDTO(e))
 
 	case *events.LogEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:log", logEventToDTO(e))
+		dto := logEventToDTO(e)
+		writeLogEvent(e, dto)
+		eventsEmit(eb.ctx, "interlink:log", dto)
 
 	case *events.StateChangeEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:state_change", stateChangeEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:state_change", stateChangeEventToDTO(e))
 
 	case *events.ErrorEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:error", errorEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:error", errorEventToDTO(e))
 
 	case *events.CompleteEvent:
-		runtime.EventsEmit(eb.ctx, "interlink:complete", completeEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:complete", completeEventToDTO(e))
 
 	case *events.TransferEvent:
 		// Only throttle PROGRESS events — never throttle terminal states
@@ -132,27 +152,27 @@ func (eb *EventBridge) forwardEvent(event events.Event) {
 		if !isTerminalState && eb.shouldThrottle(e.TaskID) {
 			return
 		}
-		runtime.EventsEmit(eb.ctx, "interlink:transfer", transferEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:transfer", transferEventToDTO(e))
 
 	case *events.EnumerationEvent:
 		// Don't throttle these - they're infrequent and important for UX
-		runtime.EventsEmit(eb.ctx, "interlink:enumeration", enumerationEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:enumeration", enumerationEventToDTO(e))
 
 	case *events.ScanProgressEvent:
 		// Don't throttle - these are infrequent and important for UX
-		runtime.EventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:scan_progress", scanProgressEventToDTO(e))
 
 	case *events.BatchProgressEvent:
 		// No throttling needed — ticker already limits to 1/sec per batch
-		runtime.EventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:batch_progress", batchProgressEventToDTO(e))
 
 	case *events.ConfigChangedEvent:
 		// Forward credential changes so file browser can invalidate cache
-		runtime.EventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:config_changed", configChangedEventToDTO(e))
 
 	case *events.ReportableErrorEvent:
 		// Reportable error events for safe error reporting — NOT throttled
-		runtime.EventsEmit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
+		eventsEmit(eb.ctx, "interlink:reportable_error", reportableErrorEventToDTO(e))
 	}
 }
 

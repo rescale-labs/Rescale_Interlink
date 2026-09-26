@@ -160,7 +160,7 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&folderID, "folder-id", "d", "", "Upload to specific folder (optional, default: root)")
-	cmd.Flags().IntVar(&maxConcurrent, "max-concurrent", constants.DefaultMaxConcurrent,
+	cmd.Flags().IntVarP(&maxConcurrent, "max-concurrent", "m", constants.DefaultMaxConcurrent,
 		fmt.Sprintf("Maximum concurrent file uploads (%d-%d)", constants.MinMaxConcurrent, constants.MaxMaxConcurrent))
 	cmd.Flags().BoolVar(&checkDuplicates, "check-duplicates", false, "Check for existing files before uploading")
 	cmd.Flags().BoolVar(&noCheckDuplicates, "no-check-duplicates", false, "Skip duplicate checking (fast, may create duplicates)")

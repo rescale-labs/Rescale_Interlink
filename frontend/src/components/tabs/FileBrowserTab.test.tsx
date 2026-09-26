@@ -196,3 +196,18 @@ describe('FileBrowserTab upload destination', () => {
     ])
   })
 })
+
+describe('FileBrowserTab remote empty state', () => {
+  it('calls an empty folder in My Library a folder, and only the empty top the library', () => {
+    const root = { id: 'lib-folder-123', name: 'My Library' }
+    seedStore({ currentFolderId: 'sub-1', breadcrumb: [root, { id: 'sub-1', name: 'runs' }] })
+    render(<FileBrowserTab />)
+    expect(screen.getByText('This folder is empty')).toBeTruthy()
+    expect(screen.queryByText('Your library is empty')).toBeNull()
+    cleanup()
+
+    seedStore({ currentFolderId: root.id, breadcrumb: [root] })
+    render(<FileBrowserTab />)
+    expect(screen.getByText('Your library is empty')).toBeTruthy()
+  })
+})

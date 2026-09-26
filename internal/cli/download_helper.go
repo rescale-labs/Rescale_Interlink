@@ -533,7 +533,7 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 	// Create DownloadUI for professional progress bars
 	downloadUI := progress.NewDownloadUI(len(items))
 
-	// Route this command's logs through the bars — see executeFileUpload for why.
+	// Route this command's logs through the bars — see UploadFilesWithIDs for why.
 	if downloadUI.IsTerminal() {
 		logger = logger.WithOutput(downloadUI.Writer())
 	}

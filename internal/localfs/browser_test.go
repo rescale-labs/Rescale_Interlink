@@ -406,7 +406,7 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			wantFiles: []string{"a/link_file.txt"},
 		},
 		{
-			// A broken symlink is silently skipped; real entries still arrive.
+			// A broken symlink is skipped; real entries still arrive.
 			name:        "broken_symlink",
 			tree:        func(t *testing.T) string { return mkTree(t, nil, []string{"file.txt"}) },
 			links:       [][2]string{{"/nonexistent/path/that/does/not/exist", "broken_link"}},

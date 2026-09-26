@@ -102,6 +102,9 @@ func TestClassifyErrorClass(t *testing.T) {
 
 		// Local filesystem refusals — the user's own machine, not a Rescale failure.
 		{"open /Users/x/Downloads/out/f.dat: permission denied", ClassLocalFS},
+		// Interlink's own refusal to write through a link or a special file.
+		{`refusing to download to "/tmp/out/f.dat": it is a symbolic link`, ClassLocalFS},
+		{`download failed: refusing to download to "/tmp/out/f.dat": it is not a regular file`, ClassLocalFS},
 		{"open /Volumes/gone/f.dat: no such file or directory", ClassLocalFS},
 		{"write /mnt/ro/f.dat: read-only file system", ClassLocalFS},
 		// fd exhaustion is usually our own leak — deliberately NOT LocalFS.

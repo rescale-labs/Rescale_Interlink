@@ -305,7 +305,7 @@ export function RemoteBrowser() {
           showFileId
           emptyMessage={
             mode === 'library'
-              ? 'Your library is empty'
+              ? canGoBack ? 'This folder is empty' : 'Your library is empty'
               : mode === 'jobs'
               ? 'No job files found'
               : mode === 'trash'

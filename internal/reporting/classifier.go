@@ -258,10 +258,12 @@ func classifyMessage(msg string, status int, response string) ErrorClass {
 	// Local filesystem refusals, in Unix wording and then Windows'. These come
 	// from the user's own machine — a directory macOS privacy protection guards,
 	// a path that disappeared mid-transfer, a read-only volume — so they are
-	// never a Rescale failure worth a report. Deliberately absent: "too many
+	// never a Rescale failure worth a report; nor is a download's refusal to
+	// write through a link or special file there. Deliberately absent: "too many
 	// open files" (fd exhaustion is usually our own descriptor leak) and I/O
 	// errors, which stay reportable.
 	case strings.Contains(lower, "permission denied") ||
+		strings.Contains(lower, "refusing to download to") ||
 		strings.Contains(lower, "operation not permitted") ||
 		strings.Contains(lower, "no such file or directory") ||
 		strings.Contains(lower, "read-only file system") ||

@@ -47,10 +47,9 @@ type OrchestratorCallbacks[T any] struct {
 	OnUnmappedFiles func(parentDir string, count int)
 
 	// OnSkippedEntry: called for each filesystem entry the walker chose to
-	// skip rather than upload — for example, Windows reparse-point junctions
-	// whose target identity could not be determined. Useful for surfacing
-	// "missing files" cases in the UI / log so users know why a folder
-	// upload didn't include certain children.
+	// skip rather than upload — a link it does not follow, or a Windows
+	// reparse-point junction — with entry.SkipReason saying why. Callers show
+	// it, so users know why a folder upload didn't include certain children.
 	OnSkippedEntry func(entry localfs.FileEntry)
 
 	// OnOrchestratorDone: called when Part C (orchestrator) exits,
@@ -146,11 +145,11 @@ func RunOrchestrator[T any](
 		defer skipDrainWG.Done()
 		for entry := range skippedChan {
 			if cfg.Logger != nil {
-				cfg.Logger.Warn().
+				cfg.Logger.Debug().
 					Str("path", entry.Path).
-					Bool("isSymlink", entry.IsSymlink).
+					Str("reason", entry.SkipReason).
 					Bool("isDir", entry.IsDir).
-					Msg("Skipped during folder upload (unrecognized reparse point or unidentifiable target)")
+					Msg("Skipped during folder upload")
 			}
 			if callbacks.OnSkippedEntry != nil {
 				callbacks.OnSkippedEntry(entry)

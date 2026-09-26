@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/events"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -92,6 +95,38 @@ func WriteToLogFile(level, stage, message string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
 	logLine := fmt.Sprintf("[%s] [%s] %s: %s\n", timestamp, level, stage, message)
 	fileLogger.Write([]byte(logLine))
+}
+
+// written holds, weakly, the log events App.log has already written to
+// interlink.log itself, synchronously, so the event bridge writes only the
+// others. An entry goes when the bridge meets its event, or when the event is
+// collected without reaching the bridge, which the event bus's drop of events
+// for a subscriber that falls behind can cause.
+var written sync.Map // weak.Pointer[events.LogEvent] -> struct{}
+
+// publishWritten publishes a log event whose message is already in interlink.log.
+func publishWritten(bus *events.EventBus, level events.LogLevel, message, stage string) {
+	ev := &events.LogEvent{
+		BaseEvent: events.BaseEvent{EventType: events.EventLog, Time: time.Now()},
+		Level:     level, Message: message, Stage: stage,
+	}
+	key := weak.Make(ev)
+	written.Store(key, struct{}{})
+	runtime.AddCleanup(ev, func(key weak.Pointer[events.LogEvent]) { written.Delete(key) }, key)
+	bus.Publish(ev)
+}
+
+// writeLogEvent writes a bus log event to interlink.log, as dto shows it in
+// the Activity tab (redacted), unless App.log already has.
+func writeLogEvent(ev *events.LogEvent, dto LogEventDTO) {
+	if _, done := written.LoadAndDelete(weak.Make(ev)); done {
+		return
+	}
+	message := dto.Message
+	if dto.Error != "" {
+		message += ": " + dto.Error
+	}
+	WriteToLogFile(dto.Level, dto.Stage, message)
 }
 
 // CloseFileLogger closes the file logger (call on shutdown).

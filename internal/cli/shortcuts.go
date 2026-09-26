@@ -16,55 +16,12 @@ func AddShortcuts(rootCmd *cobra.Command) {
 	rootCmd.AddCommand(newLsShortcut())
 }
 
-// newUploadShortcut creates the 'upload' shortcut command.
-// Shortcut for: files upload
+// newUploadShortcut is 'files upload' under a shorter name, so it takes the
+// same flags and handles duplicates the same way.
 func newUploadShortcut() *cobra.Command {
-	var folderID string
-	var maxConcurrent int
-	var preEncrypt bool
-
-	cmd := &cobra.Command{
-		Use:   "upload <file> [file...]",
-		Short: "Upload files (shortcut for 'files upload')",
-		Long: `Shortcut for uploading files to Rescale.
-
-Equivalent to: rescale-int files upload <files>
-
-By default, files are encrypted using streaming encryption (per-part, on-the-fly).
-Use --pre-encrypt for compatibility with older Rescale clients.
-
-Examples:
-  rescale-int upload input.txt data.csv
-  rescale-int upload model.tar.gz --folder-id abc123
-  rescale-int upload *.dat --folder-id abc123
-  rescale-int upload *.dat --max-concurrent 10
-  rescale-int upload large_file.tar.gz --pre-encrypt`,
-		Args: cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			logger := GetLogger()
-
-			// Validate maxConcurrent
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
-			}
-
-			// Get API client
-			apiClient, err := getAPIClient()
-			if err != nil {
-				return err
-			}
-
-			// Use shared helper function
-			return executeFileUpload(GetContext(), args, folderID, maxConcurrent, preEncrypt, apiClient, logger)
-		},
-	}
-
-	cmd.Flags().StringVarP(&folderID, "folder-id", "d", "", "Upload to specific folder (optional, default: root)")
-	cmd.Flags().IntVarP(&maxConcurrent, "max-concurrent", "m", constants.DefaultMaxConcurrent,
-		fmt.Sprintf("Maximum concurrent file uploads (%d-%d)", constants.MinMaxConcurrent, constants.MaxMaxConcurrent))
-	cmd.Flags().BoolVar(&preEncrypt, "pre-encrypt", false, "Use legacy pre-encryption (for compatibility with older Rescale clients)")
-
+	cmd := newFilesUploadCmd()
+	cmd.Short = "Upload files (shortcut for 'files upload')"
+	cmd.Long = "Shortcut for 'files upload', with the same flags.\n\n" + cmd.Long
 	return cmd
 }
 

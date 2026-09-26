@@ -80,13 +80,13 @@ func (fc *FolderCache) Invalidate(folderID string) {
 	delete(fc.cache, folderID)
 }
 
-// BuildDirectoryTree walks a local directory and returns lists of directories, files, and symlinks.
-// Returns string slices for backward compatibility with existing callers.
-func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string, []string, error) {
+// BuildDirectoryTree walks a local directory and returns its directories and
+// files, and the links it left out, each with its SkipReason.
+func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string, []localfs.FileEntry, error) {
 	// Use shared localfs.WalkCollect() for core directory walking
 	result, err := localfs.WalkCollect(rootPath, localfs.WalkOptions{
 		IncludeHidden:  includeHidden,
-		SkipHiddenDirs: true,  // Skip hidden directories entirely
+		SkipHiddenDirs: true, // Skip hidden directories entirely
 		FollowSymlinks: true,
 	})
 	if err != nil {
@@ -104,12 +104,7 @@ func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string
 		files[i] = entry.Path
 	}
 
-	symlinks := make([]string, len(result.Symlinks))
-	for i, entry := range result.Symlinks {
-		symlinks[i] = entry.Path
-	}
-
-	return directories, files, symlinks, nil
+	return directories, files, result.Symlinks, nil
 }
 
 // CheckFolderExists checks if a folder with the given name exists in the parent folder

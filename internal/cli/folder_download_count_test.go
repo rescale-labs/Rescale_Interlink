@@ -44,7 +44,7 @@ func TestDownloadFolderRecursive_CountsEveryFile(t *testing.T) {
 	})
 	refuse := func(string) error { return errors.New("FAKE removal refused") }
 	getAPIClientFn = func() (*api.Client, error) { return client, nil }
-	askFolderDownloadMode = func() (FolderDownloadMode, error) { return FolderDownloadModePrompt, nil }
+	askFolderDownloadMode = func(string) (FolderDownloadMode, error) { return FolderDownloadModePrompt, nil }
 	promptFolderDownloadConflictFn = func(string, string) (FolderDownloadConflictAction, error) { return FolderDownloadMergeOnce, nil }
 	// What an earlier run left: a.dat, c.dat, and b.dat beside a folder of that
 	// name, which it is saved as b.dat.file.
@@ -216,7 +216,7 @@ func TestDownloadFolderRecursive_CountsFolders(t *testing.T) {
 	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
 	origMode, origFolder := askFolderDownloadMode, promptFolderDownloadConflictFn
 	t.Cleanup(func() { askFolderDownloadMode, promptFolderDownloadConflictFn = origMode, origFolder })
-	askFolderDownloadMode = func() (FolderDownloadMode, error) { return FolderDownloadModePrompt, nil }
+	askFolderDownloadMode = func(string) (FolderDownloadMode, error) { return FolderDownloadModePrompt, nil }
 	promptFolderDownloadConflictFn = func(name, _ string) (FolderDownloadConflictAction, error) {
 		if name == "old3" {
 			return FolderDownloadSkipOnce, nil

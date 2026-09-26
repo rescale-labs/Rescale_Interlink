@@ -169,7 +169,7 @@ func (a *App) log(level string, stage string, message string) {
 	default:
 		logLevel = events.InfoLevel
 	}
-	a.engine.Events().PublishLog(logLevel, message, stage, "", nil)
+	publishWritten(a.engine.Events(), logLevel, message, stage)
 }
 
 // logDebug logs a debug-level message to terminal and Activity Log.

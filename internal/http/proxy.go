@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -259,6 +260,14 @@ func WarmupProxyConnection(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
+// warmupFailure is the warmup failure last logged. Every transfer worker warms
+// up at once, so a proxy that fails fails them all alike: that is logged once,
+// until a warmup succeeds.
+var (
+	warmupMu      sync.Mutex
+	warmupFailure string
+)
+
 // WarmupProxyIfNeeded calls WarmupProxyConnection if the proxy mode is "basic".
 // Safe to call unconditionally — returns immediately for non-basic proxy modes.
 // Errors are logged but non-fatal (warmup failure should not block transfers).
@@ -266,8 +275,16 @@ func WarmupProxyIfNeeded(ctx context.Context, cfg *config.Config) {
 	if cfg == nil || strings.ToLower(cfg.ProxyMode) != "basic" {
 		return
 	}
+	failure := ""
 	if err := WarmupProxyConnection(ctx, cfg); err != nil {
-		log.Printf("[PROXY] warmup warning (non-fatal): %v", err)
+		failure = err.Error()
+	}
+	warmupMu.Lock()
+	repeated := failure == warmupFailure
+	warmupFailure = failure
+	warmupMu.Unlock()
+	if failure != "" && !repeated {
+		log.Printf("[PROXY] warmup warning (non-fatal): %s", failure)
 	}
 }
 

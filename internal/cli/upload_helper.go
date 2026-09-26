@@ -90,22 +90,6 @@ func validateUploadPaths(filePaths []string, onNotFound func(path string)) error
 	return nil
 }
 
-// executeFileUpload - Common upload logic for both files upload and upload shortcut
-// Now uses the unified UploadFilesWithIDs for concurrent uploads
-func executeFileUpload(
-	ctx context.Context,
-	filePatterns []string,
-	folderID string,
-	maxConcurrent int,
-	preEncrypt bool,
-	apiClient *api.Client,
-	logger *logging.Logger,
-) error {
-	// Use the unified upload function which handles concurrency
-	_, err := UploadFilesWithIDs(ctx, filePatterns, folderID, maxConcurrent, preEncrypt, nil, apiClient, logger, false)
-	return err
-}
-
 // executeFileUploadWithDuplicateCheck handles file uploads with optional duplicate detection
 func executeFileUploadWithDuplicateCheck(
 	ctx context.Context,
@@ -371,6 +355,7 @@ func UploadFilesWithIDs(
 
 	// Create UploadUI for professional progress bars
 	uploadUI := progress.NewUploadUI(len(filePaths))
+	uploadUI.SetFolderPath("", "My Library") // no folder ID: the top of My Library
 
 	// With bars on screen, route this command's logs through them: mpb
 	// interleaves each line above the frame, where writing to the terminal

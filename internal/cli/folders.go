@@ -377,26 +377,17 @@ Examples:
 
 			var result *UploadResult
 			var foldersCreated int
-			var symlinks []string // populated by sequential path; pipelined path doesn't track symlinks
 
 			if sequential {
 				// Sequential mode: upfront scan, then create all folders, then upload all files
 				fmt.Println("Scanning local directory...")
 				logger.Info().Str("path", resolvedLocalPath).Bool("include_hidden", includeHidden).Msg("Scanning directory")
-				var directories, files []string
-				var err error
-				directories, files, symlinks, err = BuildDirectoryTree(resolvedLocalPath, includeHidden)
+				directories, files, symlinks, err := BuildDirectoryTree(resolvedLocalPath, includeHidden)
 				if err != nil {
 					return fmt.Errorf("failed to scan directory: %w", err)
 				}
-
-				// Notify about skipped symlinks
-				if len(symlinks) > 0 {
-					fmt.Printf("\nℹ️  Skipped %d symbolic link(s):\n", len(symlinks))
-					for _, link := range symlinks {
-						relPath, _ := filepath.Rel(resolvedLocalPath, link)
-						fmt.Printf("  - %s\n", relPath)
-					}
+				for _, link := range symlinks {
+					printSkippedLink(os.Stdout, resolvedLocalPath, link)
 				}
 
 				fmt.Printf("\n📊 Scan complete:\n")
@@ -431,7 +422,7 @@ Examples:
 				fmt.Println("\n📤 Uploading files...")
 				uploadUI := progress.NewUploadUI(len(files))
 				// Route logs through the bars while they are on screen — see
-				// executeFileUpload for why.
+				// UploadFilesWithIDs for why.
 				if uploadUI.IsTerminal() {
 					logger = logger.WithOutput(uploadUI.Writer())
 				}
@@ -461,6 +452,7 @@ Examples:
 					return err
 				}
 				result = uploadResult
+				result.SymlinksSkipped = len(symlinks)
 			} else {
 				fmt.Println("📂 Starting streaming pipelined upload...")
 
@@ -504,10 +496,6 @@ Examples:
 				}
 			}
 
-			// Save symlinks list to result
-			result.SymlinksSkipped = symlinks
-			result.FoldersCreated = foldersCreated
-
 			// Display summary
 			fmt.Printf("\n%s\n", strings.Repeat("=", 60))
 			fmt.Println("📊 Upload Summary")
@@ -520,8 +508,8 @@ Examples:
 			if result.FilesIgnored > 0 {
 				fmt.Printf("  Files ignored:      %d (already existed)\n", result.FilesIgnored)
 			}
-			if len(symlinks) > 0 {
-				fmt.Printf("  Symlinks skipped:   %d\n", len(symlinks))
+			if result.SymlinksSkipped > 0 {
+				fmt.Printf("  Symlinks skipped:   %d\n", result.SymlinksSkipped)
 			}
 			// After an abort the cancellations are the abort, not extra failures.
 			if reportable := result.reportableErrors(); len(reportable) > 0 {
@@ -795,8 +783,8 @@ Examples:
 			downloadResourceMgr := CreateResourceManager()
 			result, err := DownloadFolderRecursive(
 				ctx, folderID, "", outputDir, overwriteAll, skipAll, mergeAll, continueOnError, maxConcurrent, skipChecksum, dryRun, apiClient, logger, downloadResourceMgr)
-			if err != nil {
-				return err
+			if err != nil || dryRun {
+				return err // a dry run has printed its own summary
 			}
 
 			// Display summary
@@ -808,9 +796,7 @@ Examples:
 			if result.FilesSkipped > 0 {
 				fmt.Printf("  Files skipped:      %d\n", result.FilesSkipped)
 			}
-			if result.FilesFailed > 0 && dryRun {
-				fmt.Printf("  Files would fail:   %d (a dry run exits 0)\n", result.FilesFailed)
-			} else if result.FilesFailed > 0 {
+			if result.FilesFailed > 0 {
 				fmt.Printf("  Files failed:       %d\n", result.FilesFailed)
 			}
 			if result.FilesNotStarted > 0 {
@@ -830,7 +816,7 @@ Examples:
 			if err := ctx.Err(); err != nil {
 				return fmt.Errorf("download cancelled: %w", err)
 			}
-			if result.FilesFailed > 0 && !dryRun {
+			if result.FilesFailed > 0 {
 				return fmt.Errorf("some files failed to download")
 			}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,7 @@ type UploadResult struct {
 	FilesIgnored    int
 	TotalBytes      int64
 	Errors          []UploadError
-	SymlinksSkipped []string
+	SymlinksSkipped int
 	UploadedFileIDs []string
 
 	// Aborted is set when the user chose Abort at a conflict or error prompt.
@@ -121,6 +122,15 @@ func warmUploadCredentials(ctx context.Context, apiClient *api.Client, logger *l
 	credentials.GetManager(apiClient).WarmAll(ctx)
 }
 
+// printSkippedLink shows a link the folder walk left out, and why.
+func printSkippedLink(w io.Writer, root string, link localfs.FileEntry) {
+	rel, err := filepath.Rel(root, link.Path)
+	if err != nil {
+		rel = link.Path
+	}
+	fmt.Fprintf(w, "⚠️  Skipped link %s: %s\n", rel, link.SkipReason)
+}
+
 // checkFileExists checks if a file with the given name exists in the folder
 func checkFileExists(ctx context.Context, apiClient *api.Client, cache *FolderCache, folderID, fileName string) (string, bool, error) {
 	// Get contents from cache (will fetch from API if not cached)
@@ -196,7 +206,7 @@ func uploadDirectoryPipelined(
 	// Streaming progress UI — total starts at 0, increments as files are discovered.
 	uploadUI := progress.NewUploadUI(0)
 
-	// Route this command's logs through the bars — see executeFileUpload for why.
+	// Route this command's logs through the bars — see UploadFilesWithIDs for why.
 	if uploadUI.IsTerminal() {
 		logger = logger.WithOutput(uploadUI.Writer())
 	}
@@ -352,6 +362,12 @@ func uploadDirectoryPipelined(
 		folder.OrchestratorCallbacks[cliPipelinedUploadItem]{
 			OnFileDiscovered: func(snap folder.ProgressSnapshot) {
 				uploadUI.IncrementTotal()
+			},
+			OnSkippedEntry: func(link localfs.FileEntry) {
+				printSkippedLink(uploadUI.Writer(), rootPath, link)
+				resultMutex.Lock()
+				result.SymlinksSkipped++
+				resultMutex.Unlock()
 			},
 			OnFolderReady:      nil, // CLI: no folder progress events
 			OnOrchestratorDone: nil, // CLI: waits synchronously via <-dispatchDone

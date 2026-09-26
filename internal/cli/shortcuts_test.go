@@ -15,7 +15,8 @@ func TestShortcutCommands(t *testing.T) {
 		use   string
 		flags []string
 	}{
-		{newUploadShortcut(), "upload <file> [file...]", []string{"folder-id", "max-concurrent"}},
+		{newUploadShortcut(), "upload <file> [file...]", []string{"folder-id", "max-concurrent", "check-duplicates",
+			"no-check-duplicates", "skip-duplicates", "allow-duplicates", "dry-run", "pre-encrypt", "tags"}},
 		{newDownloadShortcut(), "download <file-id> [file-id...]", []string{"outdir", "max-concurrent"}},
 		{newLsShortcut(), "ls", []string{"limit"}},
 	} {
@@ -95,5 +96,19 @@ func TestShortcutMaxConcurrentRange(t *testing.T) {
 				t.Errorf("--max-concurrent %s: error %v, want one saying %q", tt.value, err, want)
 			}
 		})
+	}
+}
+
+// The upload shortcut is 'files upload' under another name, as its help says:
+// its flags work, and a dry run changes nothing.
+func TestUploadShortcutIsFilesUpload(t *testing.T) {
+	isolateCredentials(t)
+	file := writeUploadFixture(t, "data.bin", 4)
+	cmd := newUploadShortcut()
+	cmd.SetArgs([]string{"-m", "2", "--no-check-duplicates", "--dry-run", "--tags", "a,b", file})
+	var err error
+	printed := captureStdout(t, func() { err = cmd.Execute() })
+	if err != nil || !strings.Contains(printed, "Would upload:     1\n") {
+		t.Errorf("upload --dry-run returned %v after printing\n%s\nwant the dry-run preview", err, printed)
 	}
 }

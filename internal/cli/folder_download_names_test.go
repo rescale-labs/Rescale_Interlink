@@ -80,8 +80,7 @@ func TestFoldersDownloadDirRefusesNamesAndDownloadsTheRest(t *testing.T) {
 
 	printed, err := runWithCancel(t, newFoldersCmd(), write, "download-dir", "root", "--outdir", t.TempDir(), "--merge", "--dry-run")
 	if err != nil || !strings.Contains(printed, `Would fail: file in "ok" not downloaded`) || !strings.Contains(printed, "Would download:   2\n") ||
-		!strings.Contains(printed, "Would fail:       3 (the download would exit 1; a dry run exits 0)\n") ||
-		!strings.Contains(printed, "Files would fail:   3 (a dry run exits 0)\n") {
+		!strings.Contains(printed, "Would fail:       3 (the download would exit 1; a dry run exits 0)\n") {
 		t.Errorf("--dry-run returned %v after printing\n%s\nwant the refusals, 2 files to download and 3 to fail counted, and exit 0", err, printed)
 	}
 }

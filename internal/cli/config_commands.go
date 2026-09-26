@@ -451,6 +451,9 @@ Priority: flags > environment > config file > defaults`,
 	return cmd
 }
 
+// getUserProfile is the call 'config test' makes; a test replaces it.
+var getUserProfile = (*api.Client).GetUserProfile
+
 // newConfigTestCmd creates the 'config test' command.
 func newConfigTestCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -500,12 +503,13 @@ Use this to verify your API key and network connectivity.`,
 			defer cancel()
 
 			// Fetch user info as a test
-			user, err := apiClient.GetUserProfile(ctx)
+			user, err := getUserProfile(apiClient, ctx)
 			if err != nil {
 				logger.Error().Err(err).Msg("Connection test failed")
 				fmt.Println("✗ Connection FAILED")
-				fmt.Printf("  Error: %v\n", err)
-				return fmt.Errorf("connection test failed")
+				// The API's answer stays in the error: a rejected key is then
+				// the authentication failure it is, with no error report.
+				return fmt.Errorf("connection test failed: %w", err)
 			}
 
 			logger.Info().Msg("Connection test successful")
