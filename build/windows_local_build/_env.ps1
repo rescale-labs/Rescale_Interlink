@@ -20,6 +20,19 @@ $Script:WailsVersion  = $env:INTERLINK_WAILS_VERSION;  if (-not $Script:WailsVer
 $Script:DotnetVersion = $env:INTERLINK_DOTNET_VERSION; if (-not $Script:DotnetVersion) { $Script:DotnetVersion = '8.0.404' }
 $Script:WixVersion    = $env:INTERLINK_WIX_VERSION;    if (-not $Script:WixVersion)    { $Script:WixVersion    = '6.0.2' }
 
+# SHA-256 of each archive install-deps.ps1 downloads, by file name: from
+# go.dev/dl, nodejs.org's SHASUMS256.txt, and (for .NET, which publishes
+# SHA-512) the zip checked against Microsoft's release metadata. A version
+# without an entry here is refused, so a new version needs its sums added.
+$Script:Sha256 = @{
+    'go1.26.7.windows-amd64.zip'       = 'f4f534a486e4bc3387fa18f08208f2f854b7aaea8a08f2a2d829a914a05abb11'
+    'go1.26.7.windows-arm64.zip'       = '6f1b08de9e2dd94f69c52e524ab6834737275253291e8fd7f1c12ed4eceeda89'
+    'node-v24.21.0-win-x64.zip'        = '158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541'
+    'node-v24.21.0-win-arm64.zip'      = '8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921'
+    'dotnet-sdk-8.0.404-win-x64.zip'   = '783417b46c6d411576b0dbaf6dbdd07b5728f5cdc5a74b026c2e262435625723'
+    'dotnet-sdk-8.0.404-win-arm64.zip' = 'e1fc4ef9ec1fb8b08af0b57c4c571b8f32fc150f1cd1c991976ab32c39751314'
+}
+
 # --- Directory layout --------------------------------------------------------
 # build\windows_local_build\.toolchain\
 #   go\            (GOROOT --- go.exe in go\bin)

@@ -130,7 +130,8 @@ Support:       support@rescale.com
 
 Copyright (c) 2026 Rescale, Inc.
 "@
-    $readme | Out-File -FilePath (Join-Path $binDir 'README.txt') -Encoding UTF8
+    # The package's text files keep Windows line endings whatever the checkout has.
+    ("$readme`n" -replace "`r?`n", "`r`n") | Out-File -FilePath (Join-Path $binDir 'README.txt') -Encoding UTF8 -NoNewline
 
     $license = @"
 MIT License
@@ -155,7 +156,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 "@
-    $license | Out-File -FilePath (Join-Path $binDir 'LICENSE.txt') -Encoding UTF8
+    ("$license`n" -replace "`r?`n", "`r`n") | Out-File -FilePath (Join-Path $binDir 'LICENSE.txt') -Encoding UTF8 -NoNewline
 
     Write-Step "Distribution ready"
     Write-Ok $binDir

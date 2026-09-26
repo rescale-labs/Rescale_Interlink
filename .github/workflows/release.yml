@@ -5,10 +5,11 @@ on:
   push:
     tags:
       - "v*"
-  # Manual trigger: lets a maintainer build a release from ANY branch (pick the
-  # branch in the "Run workflow" dropdown). Produces the same draft release as a
-  # tag push, named by the version entered below. The git tag is only created
-  # when the draft release is published from the GitHub UI.
+  # Manual trigger: builds a release from ANY branch (pick the branch in the
+  # "Run workflow" dropdown). Produces a draft release like a tag push, without
+  # the Linux tarball (see release-linux.yml), named by the version entered
+  # below, which must be new. The git tag is only created when the draft
+  # release is published from the GitHub UI.
   workflow_dispatch:
     inputs:
       version:
@@ -25,12 +26,70 @@ env:
   # so run: steps read it from the environment, never through an expression.
   RELEASE_VERSION: ${{ github.event.inputs.version || github.ref_name }}
 
+# A second run for a version waits for the first, then finds its release.
+concurrency:
+  group: release-${{ github.event.inputs.version || github.ref_name }}
+
 jobs:
+  # Runs before anything is built. A manual run for a version that already has
+  # a tag or a release would replace that release's files, and a published
+  # one's notes, so it is refused. Publishing a manual run's draft creates its
+  # tag, and the tag push starts this workflow again: a release already
+  # published from the pushed commit is left as it is and nothing is built.
+  check:
+    name: Check for an existing release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Only a token that can write sees draft releases. This job only reads, and
+    # runs no code from the repository.
+    permissions:
+      contents: write
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Check the version has no release this run would change
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            # A manual version is typed in, names files and reaches the installer
+            # build's command line, so only vX.Y.Z or vX.Y.Z-rc.N is accepted.
+            release_re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
+            if ! [[ $RELEASE_VERSION =~ $release_re ]]; then
+              echo "::error::the version input must be vX.Y.Z or vX.Y.Z-rc.N"
+              exit 1
+            fi
+          fi
+          # "<draft> <target commit>" for each release of this version, on every page.
+          releases="$(gh api --paginate "repos/${GH_REPO}/releases" \
+            --jq '.[] | select(.tag_name == env.RELEASE_VERSION) | "\(.draft) \(.target_commitish)"')"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${RELEASE_VERSION}" \
+              --jq '.[] | select(.ref == "refs/tags/" + env.RELEASE_VERSION) | .ref')"
+            if [ -n "$releases$tag" ]; then
+              echo "::error::${RELEASE_VERSION} already has a tag or a release; a manual run builds only a new version"
+              exit 1
+            fi
+          elif [ "$releases" = "false ${GITHUB_SHA}" ]; then
+            echo "::notice::release ${RELEASE_VERSION} is already published from ${GITHUB_SHA}; this run builds nothing and leaves it unchanged"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif grep -q '^false ' <<<"$releases"; then
+            echo "::error::release ${RELEASE_VERSION} is already published, and this run will not replace its files; found (draft target): ${releases//$'\n'/, }"
+            exit 1
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
+
   # Gate every release build on the same checks that run locally. The frontend
   # is built before the Go steps because main.go embeds frontend/dist, which is
   # not in the repository — without it the Go build cannot load package main.
   verify:
     name: Verify
+    needs: [check]
+    if: needs.check.outputs.build == 'true'
     runs-on: macos-14  # Apple Silicon (M1) runner
     timeout-minutes: 45
     permissions:
@@ -51,13 +110,6 @@ jobs:
           version="$(sed -n 's/^[[:space:]]*var[[:space:]]*Version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$version_file")"
           if [ -z "$version" ]; then
             echo "could not read a Version string from $version_file" >&2
-            exit 1
-          fi
-          # A manual version is typed in, names files and reaches the installer
-          # build's command line, so only vX.Y.Z or vX.Y.Z-rc.N is accepted.
-          release_re='^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$'
-          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && ! [[ $RELEASE_VERSION =~ $release_re ]]; then
-            echo "the version input must be vX.Y.Z or vX.Y.Z-rc.N" >&2
             exit 1
           fi
           # Accept the version verbatim, or the version plus a non-empty
@@ -176,7 +228,7 @@ jobs:
         run: ./build/build_installer.ps1 -ReleaseTag $env:RELEASE_VERSION -MsiName "rescale-interlink-${env:RELEASE_VERSION}-win_amd64.msi"
         shell: pwsh
 
-      # v4.5.8: Sign the MSI after creation. The MSI is what users double-click,
+      # Sign the MSI after creation. The MSI is what users double-click,
       # so it must be signed to avoid SmartScreen "Unknown publisher" errors.
       - name: Sign MSI installer using Azure Trusted Signing
         uses: azure/artifact-signing-action@1d365fec12862c4aa68fcac418143d73f0cea293 # v0.5.11
@@ -466,6 +518,26 @@ jobs:
           path: ./artifacts
           pattern: rescale-interlink-${{ env.RELEASE_VERSION }}-* # Downloads only artifacts for this version
           merge-multiple: true # Flattens the folder structure for easier uploading
+
+      # check ran before the builds. A release published since then keeps its
+      # files and notes, and a manual run's version must still be new.
+      - name: Check again that no release would change
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          releases="$(gh api --paginate "repos/${GH_REPO}/releases" --jq '.[] | select(.tag_name == env.RELEASE_VERSION)
+            | select(env.GITHUB_EVENT_NAME == "workflow_dispatch" or (.draft | not)) | .id')"
+          tag=
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            tag="$(gh api "repos/${GH_REPO}/git/matching-refs/tags/${RELEASE_VERSION}" \
+              --jq '.[] | select(.ref == "refs/tags/" + env.RELEASE_VERSION) | .ref')"
+          fi
+          if [ -n "$releases$tag" ]; then
+            echo "::error::${RELEASE_VERSION} got a release or tag during this run that this run must not change; nothing is uploaded"
+            exit 1
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3.0.0

@@ -45,8 +45,12 @@ try {
     if (-not (Test-Path (Join-Path $frontend 'node_modules'))) {
         $npm = Join-Path $Script:NodeDir 'npm.cmd'
         Write-Step "Installing frontend deps (npm ci)"
+        # PATH is set inside cmd so npm's install scripts find node (see dist.ps1).
         Push-Location $frontend
-        try { & $npm ci; if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" } }
+        try {
+            cmd /c "set `"PATH=$($Script:NodeDir);%PATH%`"&& `"$npm`" ci"
+            if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+        }
         finally { Pop-Location }
     } else {
         Write-Ok "Frontend deps present (node_modules)."

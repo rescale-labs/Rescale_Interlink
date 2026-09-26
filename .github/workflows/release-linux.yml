@@ -5,6 +5,10 @@ run-name: ${{ github.actor }} is building the Linux release of Rescale Interlink
 # release that release.yml creates for the same tag. A push to a release branch
 # that changes the Linux packaging runs the same build and gate but only keeps
 # the tarball as a workflow artifact. Path filters never apply to tag pushes.
+# There is no manual trigger: a manual release.yml run makes a draft for a tag
+# that does not exist yet, and a separate manual run here could name another
+# version or commit, so that draft gets no Linux tarball. Publishing it creates
+# the tag, and the run that starts keeps the tarball as a workflow artifact.
 on:
   push:
     tags:
@@ -101,19 +105,24 @@ jobs:
           for attempt in $(seq 90); do
             # Every page, so that a second release for the tag cannot go unseen.
             found="$(gh api --paginate "repos/${GH_REPO}/releases" \
-              --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft)"')" \
+              --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft) \(.target_commitish)"')" \
               || { echo "::warning::release lookup failed (${attempt}/90)"; sleep 60; continue; }
             case "$found" in
               "")
                 echo "no release for ${TAG} yet (${attempt}/90)"
                 sleep 60
                 ;;
-              *$'\n'* | *" false")
-                echo "::error::expected one draft release for ${TAG}; found (id draft): ${found//$'\n'/, }"
+              *$'\n'* | *" false "*)
+                # Publishing a manual release.yml run's draft pushes its tag.
+                if [ "$found" = "${found%% *} false ${GITHUB_SHA}" ]; then
+                  echo "::warning::release ${TAG} is already published from ${GITHUB_SHA} without this tarball; it is left unchanged, and the tarball is kept as this run's artifact"
+                  exit 0
+                fi
+                echo "::error::expected one draft release for ${TAG}; found (id draft target): ${found//$'\n'/, }"
                 exit 1
                 ;;
               *)
-                id="${found% true}"
+                id="${found%% *}"
                 attach "$tarball" application/x-gtar
                 attach "${tarball}.sha256" application/octet-stream
                 exit 0

@@ -17,7 +17,7 @@ import (
 // at logon by a quoted path, launches nothing itself, and neither installs nor
 // starts a service. The script that builds the MSI must be there.
 func TestWixFile(t *testing.T) {
-	if _, err := os.Stat("build-installer.ps1"); err != nil { // go test runs in this directory
+	if _, err := os.Stat("../build/build_installer.ps1"); err != nil { // go test runs in this directory
 		t.Errorf("the installer build script: %v", err)
 	}
 	f, err := os.Open("rescale-interlink.wxs")

@@ -28,6 +28,22 @@ $nodeArch = if ($arch -eq 'arm64') { 'arm64' } else { 'x64' }
 
 New-Item -ItemType Directory -Force -Path $Script:ToolchainDir | Out-Null
 
+# Download $Url to $Path, refusing anything but the bytes pinned in _env.ps1.
+function Get-PinnedFile {
+    param([string]$Url, [string]$Path)
+    $name = Split-Path $Url -Leaf
+    $want = $Script:Sha256[$name]
+    if (-not $want) { throw "No pinned SHA-256 for $name; add it to _env.ps1 before using this version." }
+    Write-Ok $Url
+    Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+    $got = (Get-FileHash -Path $Path -Algorithm SHA256).Hash
+    if ($got -ne $want) {
+        Remove-Item -Force $Path
+        throw "Checksum mismatch for ${name}: expected $want, got $got"
+    }
+    Write-Ok "Checksum OK: $got"
+}
+
 # Download to a temp file then extract into a destination dir, flattening the
 # single top-level folder the archive usually contains.
 function Install-FromZip {
@@ -45,8 +61,7 @@ function Install-FromZip {
 
     $tmp = Join-Path $env:TEMP ("interlink-" + [IO.Path]::GetRandomFileName() + ".zip")
     Write-Step "Downloading $Name"
-    Write-Ok   $Url
-    Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing
+    Get-PinnedFile -Url $Url -Path $tmp
 
     Write-Step "Extracting $Name"
     $stage = Join-Path $env:TEMP ("interlink-stage-" + [IO.Path]::GetRandomFileName())
@@ -108,8 +123,7 @@ if ((Test-Path $dotnetExe) -and -not $Force) {
     $dotnetArch = if ($arch -eq 'arm64') { 'arm64' } else { 'x64' }
     $dotnetZipUrl = "https://builds.dotnet.microsoft.com/dotnet/Sdk/$($Script:DotnetVersion)/dotnet-sdk-$($Script:DotnetVersion)-win-$dotnetArch.zip"
     $dotnetZip = Join-Path $env:TEMP ("dotnet-sdk-" + [IO.Path]::GetRandomFileName() + ".zip")
-    Write-Ok $dotnetZipUrl
-    Invoke-WebRequest -Uri $dotnetZipUrl -OutFile $dotnetZip -UseBasicParsing
+    Get-PinnedFile -Url $dotnetZipUrl -Path $dotnetZip
 
     New-Item -ItemType Directory -Force -Path $Script:DotnetDir | Out-Null
     # System32 tar (bsdtar) extracts zip and tolerates long paths. Use the

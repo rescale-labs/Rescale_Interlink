@@ -138,7 +138,7 @@ Write-Host "Installing WiX UI extension..."
 $wixExtResult = cmd /c "wix extension add WixToolset.UI.wixext/6.0.2 -g 2>&1"
 Write-Host $wixExtResult
 # Note: wix extension add may return non-zero if already installed - that's OK
-# Pin to 6.0.x to match WiX v6 — unpinned resolves to v7.0.0-rc.1 which is incompatible
+# Pin to 6.0.x to match WiX v6 — unpinned, it can resolve to v7, which is incompatible
 
 Write-Host "WiX version:"
 # Use cmd /c wrapper to avoid PowerShell transcript console buffer conflicts
@@ -366,7 +366,7 @@ try {
         # Copy all runtime files
         Copy-Item -Path "$RuntimeSourceDir\*" -Destination $WebView2Dir -Recurse -Force
 
-        # v4.0.1: Strip unnecessary components to avoid path length issues and reduce size
+        # Strip unnecessary components to avoid path length issues and reduce size
         # - WidevineCdm: DRM for video playback - not needed for Interlink
         # - EBWebView/x86: 32-bit components - Interlink is 64-bit only
         Write-Host "Stripping unnecessary WebView2 components..."
@@ -452,7 +452,8 @@ Support:       support@rescale.com
 Copyright (c) 2026 Rescale, Inc.
 "@
 
-$ReadmeContent | Out-File -FilePath "$BinDir\README.txt" -Encoding UTF8
+# The package's text files keep Windows line endings whatever the checkout has.
+("$ReadmeContent`n" -replace "`r?`n", "`r`n") | Out-File -FilePath "$BinDir\README.txt" -Encoding UTF8 -NoNewline
 
 $LicenseContent = @"
 MIT License
@@ -478,6 +479,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 "@
 
-$LicenseContent | Out-File -FilePath "$BinDir\LICENSE.txt" -Encoding UTF8
+("$LicenseContent`n" -replace "`r?`n", "`r`n") | Out-File -FilePath "$BinDir\LICENSE.txt" -Encoding UTF8 -NoNewline
 
 Write-Host "Support files created"

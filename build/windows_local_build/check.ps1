@@ -5,7 +5,8 @@
 #   powershell -ExecutionPolicy Bypass -File build\windows_local_build\check.ps1 -Goos linux
 #
 # Mirrors the portable toolchain layout from _env.ps1. Builds the whole module
-# for the requested GOOS (default: windows), and optionally runs `go test`.
+# for the requested GOOS (default: windows), and optionally runs `go test`,
+# both in FIPS 140-3 mode (GOFIPS140=certified, -tags fips) as CI does.
 # Run install-deps.ps1 first to provision the toolchain.
 
 [CmdletBinding()]
@@ -31,21 +32,23 @@ $go = Join-Path $Script:GoBin 'go.exe'
 
 Push-Location $Script:RepoRoot
 try {
+    $env:GOFIPS140 = 'certified'
     $env:GOOS = $Goos
     # Tests must run on the host GOOS; clear cross-compile target for -Test.
     Write-Step "go build ($Goos) $Packages"
-    & $go build $Packages
+    & $go build -tags fips $Packages
     if ($LASTEXITCODE -ne 0) { throw "go build failed ($LASTEXITCODE)" }
 
     if ($Test) {
         Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
         Write-Step "go test $Packages"
-        & $go test $Packages
+        & $go test -tags fips $Packages
         if ($LASTEXITCODE -ne 0) { throw "go test failed ($LASTEXITCODE)" }
     }
     Write-Step "OK"
 }
 finally {
     Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
+    Remove-Item Env:\GOFIPS140 -ErrorAction SilentlyContinue
     Pop-Location
 }
