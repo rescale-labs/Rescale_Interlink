@@ -1,11 +1,17 @@
 package multipart
 
 import (
+	archivetar "archive/tar"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/util/tar"
 )
 
 // mkdirs creates each path under root, and writes an empty file for any path
@@ -22,6 +28,17 @@ func mkdirs(t *testing.T, root string, dirs []string, files []string) {
 			t.Fatalf("WriteFile %s: %v", f, err)
 		}
 	}
+}
+
+// resolvedTempDir is t.TempDir with symlinks resolved, as scan results are:
+// macOS keeps temporary folders under the symlinked /var.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	return dir
 }
 
 func TestScanDirectories(t *testing.T) {
@@ -187,7 +204,7 @@ func TestScanDirectories_RootMetacharactersAreLiteral(t *testing.T) {
 				t.Skip("Windows filenames cannot contain ? or *")
 			}
 
-			base := t.TempDir()
+			base := resolvedTempDir(t)
 			mkdirs(t, base, []string{
 				filepath.Join(tt.root, "Run_1"),
 				filepath.Join(tt.decoy, "Run_9"),
@@ -223,7 +240,7 @@ func TestCollectAllRunDirectories_RootMetacharactersAreLiteral(t *testing.T) {
 		filepath.Join("proj v", "Run_9"),
 	}, nil)
 
-	runs, err := CollectAllRunDirectories([]string{filepath.Join(base, "proj [v2]")}, "", "Run_*")
+	runs, err := CollectAllRunDirectories([]string{filepath.Join(base, "proj [v2]")}, "", "Run_*", nil)
 	if err != nil {
 		t.Fatalf("CollectAllRunDirectories: %v", err)
 	}
@@ -272,5 +289,172 @@ func TestScanDirectories_PatternMustStayUnderTheRoot(t *testing.T) {
 				t.Errorf("error %q does not name the pattern %q", err, pattern)
 			}
 		})
+	}
+}
+
+// make-dirs-csv writes these directories into the jobs CSV, and `pur run`
+// resolves a relative one against its own working directory. A relative --cwd
+// or --part-dirs must still give paths that name the same folders from anywhere.
+func TestScanDirectories_DirectoriesAreAbsolute(t *testing.T) {
+	base := resolvedTempDir(t)
+	mkdirs(t, base, []string{filepath.Join("proj", "Run_1"), filepath.Join("DOE_1", "Run_2")}, nil)
+	t.Chdir(base)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	for _, tt := range []struct {
+		name string
+		opts ScanOpts
+		want string
+	}{
+		{"single directory", ScanOpts{SingleDir: "proj"}, filepath.Join(wd, "proj", "Run_1")},
+		{"multi-part", ScanOpts{PartDirs: []string{"DOE_1"}}, filepath.Join(wd, "DOE_1", "Run_2")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.opts.Pattern, tt.opts.BaseJobName, tt.opts.StartIndex = "Run_*", "job", 1
+			results, err := ScanDirectories(tt.opts)
+			if err != nil {
+				t.Fatalf("ScanDirectories: %v", err)
+			}
+			if len(results) != 1 || results[0].Directory != tt.want {
+				t.Errorf("results = %+v, want one with Directory %s", results, tt.want)
+			}
+		})
+	}
+}
+
+// A run directory without the validation file used to leave the batch without a
+// word; the caller now hears of each one, in both scan modes, so it can say so.
+func TestScanDirectories_ReportsValidationSkips(t *testing.T) {
+	for _, multiPart := range []bool{false, true} {
+		root := t.TempDir()
+		mkdirs(t, root, []string{"Run_1", "Run_2", "Run_3"}, []string{filepath.Join("Run_2", "out.avg.fnc")})
+
+		var skipped []string
+		opts := ScanOpts{
+			Pattern: "Run_*", ValidationPattern: "*.avg.fnc", BaseJobName: "job", StartIndex: 1,
+			OnSkip: func(dir, _ string) { skipped = append(skipped, filepath.Base(dir)) },
+		}
+		if multiPart {
+			opts.PartDirs = []string{root}
+		} else {
+			opts.SingleDir = root
+		}
+		results, err := ScanDirectories(opts)
+		if err != nil || len(results) != 1 {
+			t.Fatalf("multi-part=%v: %d results, %v; want Run_2 alone", multiPart, len(results), err)
+		}
+		if want := []string{"Run_1", "Run_3"}; !reflect.DeepEqual(skipped, want) {
+			t.Errorf("multi-part=%v: skipped %v, want %v", multiPart, skipped, want)
+		}
+	}
+}
+
+// A part directory without the run subpath is passed over rather than failing
+// the batch, and the caller hears of it with the reason.
+func TestScanDirectories_ReportsProjectsWithoutRunSubpath(t *testing.T) {
+	root := t.TempDir()
+	mkdirs(t, root, []string{filepath.Join("DOE_1", "sim", "Run_1"), filepath.Join("DOE_2", "Run_1")}, nil)
+
+	var skipped []string
+	results, err := ScanDirectories(ScanOpts{
+		PartDirs:   []string{filepath.Join(root, "DOE_1"), filepath.Join(root, "DOE_2")},
+		RunSubpath: "sim", Pattern: "Run_*", BaseJobName: "job", StartIndex: 1,
+		OnSkip: func(dir, reason string) { skipped = append(skipped, filepath.Base(dir)+": "+reason) },
+	})
+	if err != nil || len(results) != 1 {
+		t.Fatalf("%d results, %v; want DOE_1's Run_1 alone", len(results), err)
+	}
+	if len(skipped) != 1 || !strings.HasPrefix(skipped[0], "DOE_2: ") || !strings.Contains(skipped[0], `"sim"`) {
+		t.Errorf("skipped %q, want DOE_2 alone, naming the subpath", skipped)
+	}
+}
+
+// make-dirs-csv's paths used to be relative, and `pur run` resolved them with
+// pathutil.ResolveAbsolutePath, symlinks included. Absolute, they skip that, so
+// the scan resolves them the same way: a run folder that is a symlink must
+// archive the folder's contents each way a run directory is archived, and keep
+// the job name the scanned folder gives it.
+func TestScanDirectories_SymlinkedRunIsArchivedByContents(t *testing.T) {
+	base := t.TempDir()
+	mkdirs(t, base, []string{filepath.Join("store", "case_9"), "proj"}, []string{filepath.Join("store", "case_9", "data.txt")})
+	if err := os.Symlink(filepath.Join(base, "store", "case_9"), filepath.Join(base, "proj", "Run_1")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	results, err := ScanDirectories(ScanOpts{SingleDir: filepath.Join(base, "proj"), Pattern: "Run_*", BaseJobName: "job", StartIndex: 1})
+	if err != nil || len(results) != 1 || results[0].JobName != "job_1" {
+		t.Fatalf("results %+v, %v; want one job_1, named from Run_1", results, err)
+	}
+
+	dir, out := results[0].Directory, t.TempDir()
+	for name, archive := range map[string]func(string) error{
+		"ordinary":  func(p string) error { return tar.CreateTarGz(dir, p, false, "gzip") },
+		"multipart": func(p string) error { return tar.CreateTarGz(dir, p, true, "gzip") },
+		"filtered/flattened": func(p string) error {
+			return tar.CreateTarGzWithOptions(dir, p, false, []string{"*.txt"}, nil, true, "gzip")
+		},
+	} {
+		p := filepath.Join(out, strings.ReplaceAll(name, "/", "-")+".tar.gz")
+		if err := archive(p); err != nil {
+			t.Errorf("%s archive of %s: %v", name, dir, err)
+			continue
+		}
+		held := false
+		for entry, data := range archiveEntries(t, p) {
+			held = held || filepath.Base(entry) == "data.txt" && data == "valid"
+		}
+		if !held {
+			t.Errorf("%s archive of %s does not hold data.txt: %v", name, dir, archiveEntries(t, p))
+		}
+	}
+}
+
+// archiveEntries reads a .tar.gz into entry name -> contents.
+func archiveEntries(t *testing.T, path string) map[string]string {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip %s: %v", path, err)
+	}
+	entries := map[string]string{}
+	for tr := archivetar.NewReader(gz); ; {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return entries
+		}
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		data, _ := io.ReadAll(tr)
+		entries[h.Name] = string(data)
+	}
+}
+
+// A run folder that is a symlink holds what its target holds, but the walk that
+// validates it never descended into a symlinked root, so --validation-pattern
+// rejected it. Links inside a run are still not followed.
+func TestValidateRunDirectory_SymlinkedRun(t *testing.T) {
+	base := t.TempDir()
+	mkdirs(t, base, []string{filepath.Join("store", "case_9"), filepath.Join("store", "elsewhere"), "Run_2"},
+		[]string{filepath.Join("store", "case_9", "out.avg.fnc"), filepath.Join("store", "elsewhere", "out.avg.fnc")})
+	if err := os.Symlink(filepath.Join(base, "store", "case_9"), filepath.Join(base, "Run_1")); err != nil {
+		t.Skipf("cannot create a symlink here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(base, "store", "elsewhere"), filepath.Join(base, "Run_2", "linked")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if !ValidateRunDirectory(filepath.Join(base, "Run_1"), "*.avg.fnc") {
+		t.Error("the symlinked Run_1 holds out.avg.fnc but was rejected")
+	}
+	if ValidateRunDirectory(filepath.Join(base, "Run_2"), "*.avg.fnc") {
+		t.Error("Run_2 was accepted through a link inside it, which the walk does not follow")
 	}
 }

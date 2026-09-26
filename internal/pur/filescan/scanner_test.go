@@ -446,3 +446,37 @@ func TestNotRegularReason_NonDirectory(t *testing.T) {
 		t.Errorf("notRegularReason(%s) = %q", os.DevNull, got)
 	}
 }
+
+// The paths a scan returns go into a jobs CSV, and `pur run` resolves a relative
+// one against its own working directory rather than the scan's. A relative root
+// must still give paths that name the same files from anywhere.
+func TestScanFiles_RelativeRootGivesAbsolutePaths(t *testing.T) {
+	base := t.TempDir()
+	writeScanFile(t, base, filepath.Join("scan", "a", "m1.inp"))
+	writeScanFile(t, base, filepath.Join("scan", "a", "m1.mesh"))
+	t.Chdir(base)
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	result := ScanFiles(ScanOptions{
+		RootDir:           "scan",
+		PrimaryPattern:    "a/*.inp",
+		SecondaryPatterns: []SecondaryPattern{{Pattern: "*.mesh", Required: true}},
+	})
+	if result.Error != "" || len(result.Jobs) != 1 {
+		t.Fatalf("scan: error %q, %d jobs; want one job", result.Error, len(result.Jobs))
+	}
+
+	dir := filepath.Join(wd, "scan", "a")
+	want := JobFiles{
+		PrimaryFile: filepath.Join(dir, "m1.inp"),
+		PrimaryDir:  dir,
+		PrimaryBase: "m1",
+		InputFiles:  []string{filepath.Join(dir, "m1.inp"), filepath.Join(dir, "m1.mesh")},
+	}
+	if !reflect.DeepEqual(result.Jobs[0], want) {
+		t.Errorf("job files = %+v\nwant %+v", result.Jobs[0], want)
+	}
+}

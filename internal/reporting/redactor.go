@@ -118,6 +118,10 @@ func RedactWriter(w io.Writer) io.Writer { return redactWriter{w} }
 
 type redactWriter struct{ w io.Writer }
 
+// IsTerminal answers for the writer underneath, so a logger writing through
+// redaction still colours for a terminal and not for a file or a pipe.
+func (r redactWriter) IsTerminal() bool { return logging.IsTerminal(r.w) }
+
 func (r redactWriter) Write(p []byte) (int, error) {
 	if _, err := io.WriteString(r.w, RedactSecrets(string(p))); err != nil {
 		return 0, err

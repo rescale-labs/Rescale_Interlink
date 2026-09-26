@@ -55,7 +55,14 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		return ScanResult{Error: "primary file pattern is required"}
 	}
 
-	primaryFiles, err := glob.UnderRoot(opts.RootDir, opts.PrimaryPattern)
+	// Absolute, so the jobs built from this scan, and a CSV saved from them,
+	// name the same files whichever folder they are later run from.
+	root, err := filepath.Abs(opts.RootDir)
+	if err != nil {
+		return ScanResult{Error: fmt.Sprintf("cannot resolve scan root: %v", err)}
+	}
+
+	primaryFiles, err := glob.UnderRoot(root, opts.PrimaryPattern)
 	if err != nil {
 		return ScanResult{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
 	}

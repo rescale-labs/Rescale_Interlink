@@ -27,15 +27,17 @@ type RunDirectoryEntry struct {
 //   - partDirs: List of project directory paths (e.g., ["Proj1", "Proj2"])
 //   - runSubpath: Subpath to traverse before finding runs (e.g., "Simcodes/Powerflow")
 //   - subdirPattern: Glob pattern to filter run directories (e.g., "Run_*")
+//   - onSkip: when non-nil, called with each part directory passed over for
+//     lacking runSubpath
 //
 // Returns:
 //   - List of RunDirectoryEntry containing (project_name, run_path, run_name) tuples
 //
 // Example: [
 //
-//	{ProjectName: "Proj1", RunPath: "Proj1/Simcodes/Powerflow/Run_1", RunName: "Run_1"},
-//	{ProjectName: "Proj2", RunPath: "Proj2/Simcodes/Powerflow/Run_1", RunName: "Run_1"},
-//	{ProjectName: "Proj2", RunPath: "Proj2/Simcodes/Powerflow/Run_5", RunName: "Run_5"}
+//	{ProjectName: "Proj1", RunPath: "/data/Proj1/Simcodes/Powerflow/Run_1", RunName: "Run_1"},
+//	{ProjectName: "Proj2", RunPath: "/data/Proj2/Simcodes/Powerflow/Run_1", RunName: "Run_1"},
+//	{ProjectName: "Proj2", RunPath: "/data/Proj2/Simcodes/Powerflow/Run_5", RunName: "Run_5"}
 //
 // ]
 //
@@ -43,18 +45,23 @@ type RunDirectoryEntry struct {
 //   - Multiple projects can have same run name (e.g., Run_1 in Proj1 and Proj2)
 //   - All are collected and will be processed separately with unique job names
 //   - Project name extracted from directory name for job naming later
-func CollectAllRunDirectories(partDirs []string, runSubpath, subdirPattern string) ([]RunDirectoryEntry, error) {
+func CollectAllRunDirectories(partDirs []string, runSubpath, subdirPattern string, onSkip func(dir, reason string)) ([]RunDirectoryEntry, error) {
 	var allRuns []RunDirectoryEntry
 
 	for _, partPath := range partDirs {
 		projectName := filepath.Base(partPath)
 
-		// Navigate through runSubpath if specified
-		scanPath := partPath
+		// Through runSubpath if specified, resolved before matching as
+		// ScanDirectories resolves its single root.
+		scanPath, err := filepath.Abs(filepath.Join(partPath, runSubpath))
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve %s: %w", partPath, err)
+		}
 		if runSubpath != "" {
-			scanPath = filepath.Join(partPath, runSubpath)
 			if _, err := os.Stat(scanPath); os.IsNotExist(err) {
-				// Warning logged by caller
+				if onSkip != nil {
+					onSkip(partPath, fmt.Sprintf("run subpath %q not found in it", runSubpath))
+				}
 				continue
 			}
 		}
@@ -112,6 +119,12 @@ func ValidateRunDirectory(runPath, validationPattern string) bool {
 	// Empty pattern means no validation - always valid
 	if validationPattern == "" {
 		return true
+	}
+
+	// A run folder that is a symlink is walked at its target: WalkDir does not
+	// descend into a symlinked root. Links inside the run are still not followed.
+	if resolved, err := filepath.EvalSymlinks(runPath); err == nil {
+		runPath = resolved
 	}
 
 	// Walk the directory tree looking for matching files.

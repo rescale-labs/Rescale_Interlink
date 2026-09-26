@@ -15,6 +15,7 @@ import (
 	"github.com/vbauerster/mpb/v8/decor"
 	"golang.org/x/term"
 
+	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/reporting"
 )
 
@@ -77,7 +78,7 @@ func (g *barGroup) Wait() {
 // Retry notices written there quote storage errors, so it redacts them.
 func (g *barGroup) LogWriter() io.Writer {
 	if g.progress != nil && g.isTerminal {
-		return reporting.RedactWriter(g.progress)
+		return reporting.RedactWriter(logging.Via(g.progress, os.Stderr))
 	}
 	return reporting.RedactWriter(os.Stderr)
 }

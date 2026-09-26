@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/rescale/rescale-int/internal/localfs"
+	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/util/glob"
 )
 
@@ -30,6 +31,11 @@ type ScanOpts struct {
 	ValidationPattern string   // File pattern to validate directories (e.g., "*.avg.fnc")
 	BaseJobName       string   // Template job name (for name generation)
 	StartIndex        int      // Starting index for sequential numbering
+
+	// OnSkip, when set, is called with each directory the scan passes over and
+	// why: a run directory with no file matching ValidationPattern, or a part
+	// directory without RunSubpath.
+	OnSkip func(dir, reason string)
 }
 
 // ScanDirectories scans one or more project directories for run directories,
@@ -58,7 +64,7 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 
 	if isMultiPart {
 		// Multi-part mode: scan multiple project directories
-		allRuns, err := CollectAllRunDirectories(opts.PartDirs, opts.RunSubpath, opts.Pattern)
+		allRuns, err := CollectAllRunDirectories(opts.PartDirs, opts.RunSubpath, opts.Pattern, opts.OnSkip)
 		if err != nil {
 			return nil, err
 		}
@@ -73,6 +79,8 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 					path:        run.RunPath,
 					projectName: run.ProjectName,
 				})
+			} else if opts.OnSkip != nil {
+				opts.OnSkip(run.RunPath, noValidationFile(opts.ValidationPattern))
 			}
 		}
 
@@ -80,19 +88,16 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 			return nil, fmt.Errorf("no valid run directories found (validation: %s)", opts.ValidationPattern)
 		}
 	} else {
-		// Single-part mode: scan single directory
-		scanRoot := opts.SingleDir
-		if scanRoot == "" {
-			var err error
-			scanRoot, err = os.Getwd()
-			if err != nil {
-				return nil, fmt.Errorf("failed to get current directory: %w", err)
-			}
+		// Single-part mode: scan single directory (the working directory if
+		// empty), through the run subpath if one is given. Resolved before
+		// matching in it: os.DirFS reads a bare Windows drive ("C:") as the
+		// drive's root, filepath.Join and os.Stat as its current directory, so an
+		// unresolved root has the scan list one folder and stat another.
+		scanRoot, err := filepath.Abs(filepath.Join(opts.SingleDir, opts.RunSubpath))
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve %s: %w", opts.SingleDir, err)
 		}
-
-		// Navigate through run subpath if specified
 		if opts.RunSubpath != "" {
-			scanRoot = filepath.Join(scanRoot, opts.RunSubpath)
 			if _, err := os.Stat(scanRoot); os.IsNotExist(err) {
 				return nil, fmt.Errorf("subpath '%s' not found under %s", opts.RunSubpath, opts.SingleDir)
 			}
@@ -116,6 +121,9 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 
 			// Validate using recursive walk (matching old PUR's rglob behavior)
 			if !ValidateRunDirectory(match, opts.ValidationPattern) {
+				if opts.OnSkip != nil {
+					opts.OnSkip(match, noValidationFile(opts.ValidationPattern))
+				}
 				continue
 			}
 
@@ -157,8 +165,18 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 			jobName = fmt.Sprintf("%s_%d", opts.BaseJobName, dirNum)
 		}
 
+		// Absolute, since make-dirs-csv writes it into the jobs CSV and `pur run`
+		// resolves a relative one against its own working directory. Resolved
+		// as `pur run` resolved the relative ones, symlinks included: a run folder
+		// that is a link archives as the link, not the folder's contents. The job
+		// name above still comes from the name scanned.
+		dir, err := pathutil.ResolveAbsolutePath(entry.path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve %s: %w", entry.path, err)
+		}
+
 		results = append(results, ScanResult{
-			Directory:   entry.path,
+			Directory:   dir,
 			JobName:     jobName,
 			ProjectName: entry.projectName,
 			DirNumber:   dirNum,
@@ -166,4 +184,8 @@ func ScanDirectories(opts ScanOpts) ([]ScanResult, error) {
 	}
 
 	return results, nil
+}
+
+func noValidationFile(pattern string) string {
+	return fmt.Sprintf("no file matches the validation pattern %q", pattern)
 }

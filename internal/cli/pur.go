@@ -155,12 +155,18 @@ Examples:
 				baseJobName = "Job"
 			}
 
+			skipped := 0
 			scanOpts := multipart.ScanOpts{
 				Pattern:           filepath.Base(dirPattern),
 				ValidationPattern: validationPattern,
 				BaseJobName:       baseJobName,
 				StartIndex:        startIndex,
 				RunSubpath:        runSubpath,
+				// Said per directory, or the batch is quietly smaller than the folders.
+				OnSkip: func(dir, reason string) {
+					skipped++
+					logger.Info().Str("dir", dir).Msg("Skipped directory: " + reason)
+				},
 			}
 
 			if len(partDirs) > 0 {
@@ -217,7 +223,11 @@ Examples:
 				Str("output", outputPath).
 				Msg("Jobs CSV generated successfully")
 
-			fmt.Printf("Generated %d jobs in %s\n", len(jobs), outputPath)
+			fmt.Printf("Generated %d jobs in %s", len(jobs), outputPath)
+			if skipped > 0 {
+				fmt.Printf(" (%d skipped, listed above)", skipped)
+			}
+			fmt.Println()
 			return nil
 		},
 	}
@@ -305,11 +315,14 @@ Examples:
 				}
 			}
 
-			logger.Info().
-				Str("root", rootDir).
-				Str("primary", primaryPattern).
-				Int("secondaryCount", len(patterns)).
-				Msg("Scanning for files")
+			// --json prints the JSON alone, as the other --json commands do.
+			if !outputJSON {
+				logger.Info().
+					Str("root", rootDir).
+					Str("primary", primaryPattern).
+					Int("secondaryCount", len(patterns)).
+					Msg("Scanning for files")
+			}
 
 			result := filescan.ScanFiles(filescan.ScanOptions{
 				RootDir:           rootDir,

@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rs/zerolog"
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/reporting"
 )
 
@@ -45,10 +45,7 @@ func NewDaemonLogWriter(cfg DaemonLogConfig) *DaemonLogWriter {
 	}
 
 	if cfg.Console {
-		w.console = zerolog.ConsoleWriter{
-			Out:        os.Stdout,
-			TimeFormat: "15:04:05",
-		}
+		w.console = logging.NewConsoleWriter(os.Stdout)
 	}
 
 	if cfg.LogFile != "" {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
@@ -19,24 +20,52 @@ type Logger struct {
 	output   io.Writer // current output writer
 }
 
+// terminalFd reports whether fd shows colour: a terminal (on Windows, a console
+// that renders escape codes; see consoleColor), or an MSYS or Cygwin terminal,
+// which Windows sees as a pipe. Replaceable so a test can stand in a terminal.
+var terminalFd = func(fd uintptr) bool { return consoleColor(fd) || isatty.IsCygwinTerminal(fd) }
+
+// IsTerminal reports whether what is written to w reaches a terminal that shows
+// colour. A file is asked directly; a wrapper answers for its destination by
+// implementing IsTerminal() bool, as a redacting writer and the progress display
+// do; anything else is taken to be no terminal.
+func IsTerminal(w io.Writer) bool {
+	switch w := w.(type) {
+	case *os.File:
+		return terminalFd(w.Fd())
+	case interface{ IsTerminal() bool }:
+		return w.IsTerminal()
+	}
+	return false
+}
+
+// Via returns w marked as ending up on dest, for a writer that draws on dest
+// but cannot say so itself, such as the progress display.
+func Via(w io.Writer, dest *os.File) io.Writer { return via{w, dest} }
+
+type via struct {
+	io.Writer
+	dest *os.File
+}
+
+func (v via) IsTerminal() bool { return IsTerminal(v.dest) }
+
+// NewConsoleWriter formats log lines for a person reading w. Colour only when w
+// reaches a terminal: in a pipe or a file the escape codes are noise to whatever
+// reads them. zerolog itself drops colour when NO_COLOR is set.
+func NewConsoleWriter(w io.Writer) zerolog.ConsoleWriter {
+	return zerolog.ConsoleWriter{Out: w, TimeFormat: "15:04:05", NoColor: !IsTerminal(w)}
+}
+
 // NewLogger creates a new logger for the specified mode.
 func NewLogger(mode string, eventBus *events.EventBus) *Logger {
-	var output io.Writer
-
+	// CLI mode logs to stdout (stderr is reserved for progress bars); GUI mode
+	// to stderr, for debugging.
+	stream := os.Stderr
 	if mode == "cli" {
-		// CLI mode: Use stdout for logs (stderr reserved for progress bars)
-		output = zerolog.ConsoleWriter{
-			Out:        os.Stdout,
-			TimeFormat: "15:04:05",
-		}
-	} else {
-		// GUI mode: Write to stderr for debugging
-		output = zerolog.ConsoleWriter{
-			Out:        os.Stderr,
-			TimeFormat: "15:04:05",
-		}
-		// In GUI mode, we could also send to event bus if needed
+		stream = os.Stdout
 	}
+	output := NewConsoleWriter(stream)
 
 	logger := zerolog.New(output).
 		With().
@@ -109,7 +138,7 @@ func (l *Logger) With() zerolog.Context {
 // fields added via With() are dropped. Call it before adding per-operation
 // fields, not after.
 func (l *Logger) WithOutput(w io.Writer) *Logger {
-	out := zerolog.ConsoleWriter{Out: w, TimeFormat: "15:04:05"}
+	out := NewConsoleWriter(w)
 	return &Logger{
 		zlog:     zerolog.New(out).With().Timestamp().Logger(),
 		mode:     l.mode,
@@ -122,10 +151,7 @@ func (l *Logger) WithOutput(w io.Writer) *Logger {
 // This is useful for redirecting logs through progress bars.
 func (l *Logger) SetOutput(w io.Writer) {
 	l.output = w
-	l.zlog = zerolog.New(zerolog.ConsoleWriter{
-		Out:        w,
-		TimeFormat: "15:04:05",
-	}).With().Timestamp().Logger()
+	l.zlog = zerolog.New(NewConsoleWriter(w)).With().Timestamp().Logger()
 }
 
 // Output returns the current output writer.
@@ -148,8 +174,5 @@ func init() {
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 
 	// Configure global logger
-	log.Logger = log.Output(zerolog.ConsoleWriter{
-		Out:        os.Stderr,
-		TimeFormat: "15:04:05",
-	})
+	log.Logger = log.Output(NewConsoleWriter(os.Stderr))
 }
