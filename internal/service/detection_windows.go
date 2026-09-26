@@ -23,6 +23,7 @@ func debugLog(format string, args ...interface{}) {
 
 // ServiceDetectionResult describes the current service state.
 type ServiceDetectionResult struct {
+	Installed     bool   // True if a Windows Service is registered, running or not
 	ServiceMode   bool   // True if Windows Service is running
 	SubprocessPID int    // PID if subprocess daemon is running
 	PipeInUse     bool   // True if named pipe exists
@@ -39,6 +40,7 @@ func DetectDaemon() ServiceDetectionResult {
 	// Layer 1: Try SCM (may require admin)
 	installed, reason := IsInstalledWithReason()
 	debugLog("SCM: installed=%v, reason=%s", installed, reason)
+	result.Installed = installed
 	if installed {
 		// Windows Service is installed - check if running
 		if status, err := QueryStatus(); err == nil && status == StatusRunning {

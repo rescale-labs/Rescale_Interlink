@@ -95,3 +95,13 @@ func TestValidateAutoDownloadPreFlight_FolderVerdicts(t *testing.T) {
 		})
 	}
 }
+
+// Pre-flight says where the API key is set when there is none.
+func TestValidateAutoDownloadPreFlight_NoAPIKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("RESCALE_API_KEY", "")
+	const want = "No API key configured. Set your API key in API Configuration and run Test Connection."
+	if got := (&App{}).ValidateAutoDownloadPreFlight(t.TempDir()).APIKeyError; got != want {
+		t.Errorf("APIKeyError = %q, want %q", got, want)
+	}
+}

@@ -131,17 +131,18 @@ func (a *App) StartDaemon() error {
 		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf, using defaults: %v", err))
 		daemonCfg = config.NewDaemonConfig()
 	}
-	// The detached daemon would refuse it where no one sees why.
-	if n := daemonCfg.Daemon.MaxConcurrent; n > 0 {
-		if err := daemon.CheckMaxConcurrent(n, "max_concurrent in daemon.conf"); err != nil {
-			return fmt.Errorf("cannot start daemon: %w", err)
-		}
+	// The detached daemon would refuse them where no one sees why.
+	if err := config.CheckDownloadFolder(daemonCfg.Daemon.DownloadFolder); err != nil {
+		return fmt.Errorf("cannot start daemon: %w", err)
+	}
+	if err := daemon.CheckMaxConcurrent(daemonCfg.Daemon.MaxConcurrent, "max_concurrent in daemon.conf"); err != nil {
+		return fmt.Errorf("cannot start daemon: %w", err)
 	}
 
 	// Pre-check API key availability before launching daemon
 	apiKey := config.ResolveAPIKeyForCurrentUser("")
 	if apiKey == "" {
-		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in Connection settings and test the connection first")
+		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in API Configuration and test the connection first")
 	}
 
 	// Get current executable path
@@ -305,9 +306,10 @@ func (a *App) ResumeDaemon() error {
 	return nil
 }
 
-// TriggerProfileRescan asks the daemon to re-enumerate user profiles.
-// Called after saving daemon.conf so the service picks up new users.
-// Uses existing TriggerScan("all") path.
+// TriggerProfileRescan asks the user's running daemon to poll for completed
+// jobs now. The daemon serves only this user and ignores the scope; the name
+// and the "all" scope are kept for the GUI binding and for a service from an
+// earlier version, which read "all" as every profile.
 func (a *App) TriggerProfileRescan() error {
 	if daemon.IsDaemonRunning() == 0 {
 		return fmt.Errorf("daemon is not running")
@@ -318,12 +320,11 @@ func (a *App) TriggerProfileRescan() error {
 
 	ctx := context.Background()
 
-	// "all" triggers a profile rescan rather than a single-user scan
 	if err := client.TriggerScan(ctx, "all"); err != nil {
-		return fmt.Errorf("failed to trigger profile rescan: %w", err)
+		return fmt.Errorf("failed to trigger a poll: %w", err)
 	}
 
-	a.logInfo("Daemon", "Profile rescan triggered")
+	a.logInfo("Daemon", "Poll for completed jobs triggered")
 	return nil
 }
 
@@ -403,14 +404,6 @@ type DaemonConfigDTO struct {
 
 // SaveDaemonConfig saves daemon configuration to daemon.conf.
 func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
-	// Refuse save when the download folder is not writable from the
-	// current-user identity. The Windows-strict branch is in the
-	// _windows.go sibling; this file only builds on macOS/Linux.
-	if result := pathutil.ValidateWritablePath(dto.DownloadFolder, pathutil.ConsumerCurrentUser); !result.Reachable {
-		return fmt.Errorf("%s: %s",
-			ipc.CanonicalText[result.ErrorCode], result.Reason)
-	}
-
 	// Load existing config to preserve any fields not in DTO
 	cfg, err := config.LoadDaemonConfig("")
 	if err != nil {
@@ -435,9 +428,14 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Notifications.ShowDownloadComplete = dto.ShowDownloadComplete
 	cfg.Notifications.ShowDownloadFailed = dto.ShowDownloadFailed
 
-	// Validate before saving
+	// Validate before saving, and before the probe below creates the folder.
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	// Refuse a folder the user's own daemon could not create or write.
+	if result := pathutil.ValidateWritablePath(dto.DownloadFolder, pathutil.ConsumerCurrentUser); !result.Reachable {
+		return fmt.Errorf("%s: %s",
+			ipc.CanonicalText[result.ErrorCode], result.Reason)
 	}
 
 	// Persist config.csv + token alongside daemon.conf so every identity
@@ -453,17 +451,14 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 
 	a.logInfo("Daemon", "Configuration saved to daemon.conf")
 
-	// If the daemon is running (subprocess OR Windows Service), trigger a
-	// profile rescan so the new state is picked up within seconds instead
-	// of waiting for the 5-minute rescan tick. IPC-based check works for
-	// both modes; a PID check would miss the service case.
+	// If a daemon answers, ask it to poll now rather than at its next interval.
 	if dto.Enabled {
 		client := ipc.NewClient()
 		client.SetTimeout(3 * time.Second)
 		ctx := context.Background()
 		if client.IsServiceRunning(ctx) {
 			if err := a.TriggerProfileRescan(); err != nil {
-				a.logWarn("Daemon", fmt.Sprintf("Profile rescan after save failed (non-fatal): %v", err))
+				a.logWarn("Daemon", fmt.Sprintf("Poll after save failed (non-fatal): %v", err))
 			}
 		}
 	}
@@ -679,27 +674,9 @@ func (a *App) GetServiceStatus() ServiceStatusDTO {
 	}
 }
 
-// StartServiceElevated triggers UAC prompt to start Windows Service.
+// UninstallServiceElevated triggers UAC prompt to remove Windows Service.
 // On non-Windows platforms, returns error.
-func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
-	return ElevatedServiceResultDTO{
-		Success: false,
-		Error:   "Windows Service control is only available on Windows",
-	}
-}
-
-// StopServiceElevated triggers UAC prompt to stop Windows Service.
-// On non-Windows platforms, returns error.
-func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
-	return ElevatedServiceResultDTO{
-		Success: false,
-		Error:   "Windows Service control is only available on Windows",
-	}
-}
-
-// InstallAndStartServiceElevated triggers UAC prompt to install + start Windows Service.
-// On non-Windows platforms, returns error.
-func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
+func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
 	return ElevatedServiceResultDTO{
 		Success: false,
 		Error:   "Windows Service control is only available on Windows",

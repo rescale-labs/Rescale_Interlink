@@ -40,17 +40,16 @@
       <ComponentGroupRef Id="StartMenuShortcuts" />
     </Feature>
 
-    <!-- v4.5.7: ServiceFeature removed - service installation is now handled post-install
-         via GUI/tray UAC elevation. This avoids silent failures in per-user MSI mode. -->
+    <!-- The package installs no Windows service: auto-download runs in each user's
+         session, started from the app or the tray. -->
 
     <Feature Id="TrayFeature" Title="System Tray Companion" Level="1">
       <ComponentGroupRef Id="TrayComponents" />
     </Feature>
 
     <!-- Custom actions -->
-    <!-- v4.5.7: Service install/start custom actions removed. Service is now installed
-         post-MSI via GUI/tray UAC elevation (elevation.InstallServiceElevated).
-         Only a best-effort uninstall action remains for the uninstall flow. -->
+    <!-- Best-effort removal of a Windows service that an earlier version's
+         'service install' registered. -->
     <CustomAction Id="UninstallService"
                   Directory="INSTALLFOLDER"
                   ExeCommand="[INSTALLFOLDER]rescale-int.exe service uninstall"
@@ -69,8 +68,7 @@
                   Return="ignore" />
 
     <!-- Install sequence -->
-    <!-- v4.5.7: Only best-effort service uninstall on removal + tray launch on install.
-         Service install/start actions removed (handled via GUI/tray UAC post-install). -->
+    <!-- Best-effort service removal on uninstall; tray launch on install. -->
     <InstallExecuteSequence>
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT Installed AND NOT REMOVE" />
@@ -148,10 +146,6 @@
       </Files>
     </ComponentGroup>
   </Fragment>
-
-  <!-- v4.5.7: ServiceComponents fragment removed. Service installation is handled
-       post-MSI via GUI/tray UAC elevation. The HKLM ServiceInstalled registry marker
-       is set/cleared by the elevated CLI (service install/uninstall commands). -->
 
   <!-- Tray companion components -->
   <Fragment>

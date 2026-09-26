@@ -101,7 +101,7 @@ type DaemonCoreConfig struct {
 	UseJobNameDir bool `ini:"use_job_name_dir"`
 
 	// MaxConcurrent is the maximum number of concurrent file downloads per job.
-	// Minimum: 1, Maximum: 10, Default: 5
+	// constants.MinMaxConcurrent to MaxMaxConcurrent; default DefaultMaxConcurrent.
 	MaxConcurrent int `ini:"max_concurrent"`
 
 	// LookbackDays is the number of days to look back for completed jobs.
@@ -136,8 +136,9 @@ type EligibilityConfig struct {
 // DaemonConfig validation errors
 var (
 	ErrDaemonMissingDownloadFolder = errors.New("download_folder is required when daemon is enabled")
+	ErrDaemonRelativeFolder        = errors.New("download_folder must be an absolute path")
 	ErrDaemonInvalidPollInterval   = errors.New("poll_interval_minutes must be between 1 and 1440")
-	ErrDaemonInvalidMaxConcurrent  = errors.New("max_concurrent must be between 1 and 10")
+	ErrDaemonInvalidMaxConcurrent  = fmt.Errorf("max_concurrent must be between %d and %d", constants.MinMaxConcurrent, constants.MaxMaxConcurrent)
 	ErrDaemonInvalidLookbackDays   = errors.New("lookback_days must be between 1 and 365")
 )
 
@@ -166,28 +167,6 @@ func DefaultDaemonConfigPath() (string, error) {
 	}
 
 	return filepath.Join(configDir, "daemon.conf"), nil
-}
-
-// DaemonConfigPathForUser returns the daemon.conf path for a specific user profile directory.
-// This is used by the Windows service to enumerate per-user configs.
-//   - Windows: <userProfileDir>\AppData\Roaming\Rescale\Interlink\daemon.conf
-//   - Unix: <userProfileDir>/.config/rescale/daemon.conf
-func DaemonConfigPathForUser(userProfileDir string) string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(userProfileDir, "AppData", "Roaming", "Rescale", "Interlink", "daemon.conf")
-	}
-	return filepath.Join(userProfileDir, ".config", "rescale", "daemon.conf")
-}
-
-// StateFilePathForUser returns the autodownload state file path for a user.
-//   - Windows: <userProfileDir>\AppData\Local\Rescale\Interlink\state\daemon-state.json
-//   - Unix: <userProfileDir>/.config/rescale/daemon-state.json (pre-Plan-2
-//     this was rescale-int/; Load() migrates on first read).
-func StateFilePathForUser(userProfileDir string) string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(userProfileDir, "AppData", "Local", "Rescale", "Interlink", "state", "daemon-state.json")
-	}
-	return filepath.Join(userProfileDir, ".config", "rescale", "daemon-state.json")
 }
 
 // DefaultDownloadFolder returns the platform-specific default download folder.
@@ -375,7 +354,11 @@ func SaveDaemonConfig(cfg *DaemonConfig, path string) error {
 // Validate checks if the daemon configuration is valid.
 // Returns nil if valid, or an error describing what's wrong.
 func (cfg *DaemonConfig) Validate() error {
-	// Only validate settings if daemon is enabled
+	// Refused enabled or not, for the reason CheckDownloadFolder gives.
+	if f := cfg.Daemon.DownloadFolder; f != "" && !filepath.IsAbs(f) {
+		return fmt.Errorf("%w, got %q", ErrDaemonRelativeFolder, f)
+	}
+	// Only validate the rest if daemon is enabled
 	if cfg.Daemon.Enabled {
 		if strings.TrimSpace(cfg.Daemon.DownloadFolder) == "" {
 			return ErrDaemonMissingDownloadFolder
@@ -383,7 +366,7 @@ func (cfg *DaemonConfig) Validate() error {
 		if cfg.Daemon.PollIntervalMinutes < 1 || cfg.Daemon.PollIntervalMinutes > 1440 {
 			return ErrDaemonInvalidPollInterval
 		}
-		if cfg.Daemon.MaxConcurrent < 1 || cfg.Daemon.MaxConcurrent > 10 {
+		if cfg.Daemon.MaxConcurrent < constants.MinMaxConcurrent || cfg.Daemon.MaxConcurrent > constants.MaxMaxConcurrent {
 			return ErrDaemonInvalidMaxConcurrent
 		}
 		if cfg.Daemon.LookbackDays < 1 || cfg.Daemon.LookbackDays > 365 {
@@ -394,9 +377,15 @@ func (cfg *DaemonConfig) Validate() error {
 	return nil
 }
 
-// IsEnabled returns true if the daemon is enabled and properly configured.
-func (cfg *DaemonConfig) IsEnabled() bool {
-	return cfg.Daemon.Enabled && cfg.Validate() == nil
+// CheckDownloadFolder refuses a download_folder from daemon.conf that is not
+// absolute: a daemon started from the app, the tray or in the background
+// would resolve it against wherever it happened to start.
+func CheckDownloadFolder(folder string) error {
+	if folder == "" || filepath.IsAbs(folder) {
+		return nil
+	}
+	return fmt.Errorf("download_folder in daemon.conf must be an absolute path, got %q; "+
+		"choose a folder in the Interlink app or run 'rescale-int daemon config set download_folder <absolute path>'", folder)
 }
 
 // GetExcludePatterns returns the exclude patterns as a slice.

@@ -21,13 +21,9 @@ func ResolveAbsolutePath(path string) (string, error) {
 		return os.Getwd()
 	}
 
-	// Expand ~ to home directory
-	if len(path) > 0 && path[0] == '~' {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		path = home + path[1:]
+	path, err := ExpandHome(path)
+	if err != nil {
+		return "", err
 	}
 
 	absPath, err := filepath.Abs(path)
@@ -85,4 +81,18 @@ func HasFNVSuffix(filename string) bool {
 	// Strip path to get just the filename
 	base := filepath.Base(filename)
 	return fnvSuffixRe.MatchString(strings.ToLower(base))
+}
+
+// ExpandHome replaces ~ with the home folder when it stands alone or before a
+// separator. ~foo is left as written: it names no folder this expands to.
+func ExpandHome(path string) (string, error) {
+	rest, ok := strings.CutPrefix(path, "~")
+	if !ok || rest != "" && rest[0] != '/' && !os.IsPathSeparator(rest[0]) {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return home + rest, nil
 }

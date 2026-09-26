@@ -48,10 +48,10 @@ func lockExclusive(path string) (unlock func(), err error) {
 	}, nil
 }
 
-// Daemonize on Windows is not supported for direct daemon mode.
-// Windows uses the Windows Service Manager instead.
+// Daemonize is not supported on Windows; 'daemon run --background' refuses
+// before it gets here.
 func Daemonize(args []string) error {
-	return fmt.Errorf("daemonization not supported on Windows - use Windows Service instead")
+	return fmt.Errorf("--background is not supported on Windows; start auto-download from the Interlink app, or run 'daemon run' without --background")
 }
 
 // IsDaemonChild returns true if we're running as the daemon child process.

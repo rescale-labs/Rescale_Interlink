@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -59,6 +60,15 @@ var startupLog = daemon.WriteStartupLog
 // shouldBlockSubprocess finds a Windows daemon a new one would conflict with;
 // elsewhere it finds none. A variable so a test can refuse on any system.
 var shouldBlockSubprocess = service.ShouldBlockSubprocess
+
+// isWindowsService reports whether the Service Control Manager started this
+// process, and runDisabledService runs the retired service, reporting whether
+// an SCM started it. Variables so a test can take the service path on any
+// system.
+var (
+	isWindowsService   = service.IsWindowsService
+	runDisabledService = service.RunDisabled
+)
 
 // daemonNotifyFunc adapts the rate limit notice hook to the daemon's logger,
 // which reaches the log file and the IPC log buffer. Levels come from the
@@ -180,6 +190,15 @@ Examples:
   # Run once and exit (useful for cron jobs)
   rescale-int daemon run --once`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A service installed by an earlier version still starts this
+			// command. It removes itself and stops before anything reads or
+			// writes a profile. A process that cannot tell whether it is a
+			// service asks the SCM, which dispatches only a service it started.
+			if isService, err := isWindowsService(); isService || err != nil {
+				if runDisabledService() {
+					return nil
+				}
+			}
 			if err := daemon.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
 				return err
 			}
@@ -192,16 +211,6 @@ Examples:
 				startupLog("Args: %v", redactArgs(os.Args))
 				if wd, err := os.Getwd(); err == nil {
 					startupLog("Working directory: %s", wd)
-				}
-			}
-			if runtime.GOOS == "windows" {
-				// Detect Windows service context and delegate to service handler.
-				// When SCM starts `daemon run`, we need to register with SCM properly.
-				if isService, err := service.IsWindowsService(); err == nil && isService {
-					logStartup()
-					daemon.WriteStartupLog("Detected Windows service context, starting multi-user service")
-					svcLogger := logging.NewLogger("service", nil)
-					return service.RunAsMultiUserService(service.NewMultiUserService(svcLogger))
 				}
 			}
 			// Only blocks when service is RUNNING (not just installed)
@@ -243,7 +252,7 @@ Examples:
 
 			// Plan 2 path migrations (idempotent). Must run before any file
 			// I/O that reads credentials / state / logs.
-			config.RunStartupMigrations(nil, config.ScopeCurrentUser, nil)
+			config.RunStartupMigrations(nil)
 			logStartup()
 
 			// Create daemon-specific logger with log buffer for IPC streaming.
@@ -280,12 +289,15 @@ Examples:
 			// Apply config file values as defaults, CLI flags override
 			// Only override if the flag was actually set by the user
 			if !cmd.Flags().Changed("download-dir") && daemonConf.Daemon.DownloadFolder != "" {
+				if err := config.CheckDownloadFolder(daemonConf.Daemon.DownloadFolder); err != nil {
+					return reporting.UsageError(err)
+				}
 				downloadDir = daemonConf.Daemon.DownloadFolder
 			}
 			if !cmd.Flags().Changed("poll-interval") && daemonConf.Daemon.PollIntervalMinutes > 0 {
 				pollInterval = fmt.Sprintf("%dm", daemonConf.Daemon.PollIntervalMinutes)
 			}
-			if !cmd.Flags().Changed("max-concurrent") && daemonConf.Daemon.MaxConcurrent > 0 {
+			if !cmd.Flags().Changed("max-concurrent") {
 				maxConcurrent = daemonConf.Daemon.MaxConcurrent
 				// Here, not in a background daemon's child, whose refusal no one sees.
 				if err := daemon.CheckMaxConcurrent(maxConcurrent, "max_concurrent in daemon.conf"); err != nil {
@@ -308,7 +320,7 @@ Examples:
 			// Handle background mode (Unix only)
 			if background {
 				if runtime.GOOS == "windows" {
-					return fmt.Errorf("--background is not supported on Windows; use Windows Service instead")
+					return reporting.UsageError(fmt.Errorf("--background is not supported on Windows; start auto-download from the Interlink app, or run 'daemon run' without --background"))
 				}
 
 				// If we're not the daemon child, fork and exit
@@ -1125,10 +1137,10 @@ func newDaemonConfigSetCmd() *cobra.Command {
 Available keys:
   [daemon]
     enabled                  - true/false
-    download_folder          - path to download directory
+    download_folder          - absolute path to download directory
     poll_interval_minutes    - polling interval (1-1440)
     use_job_name_dir         - true/false
-    max_concurrent           - concurrent downloads (1-10)
+    max_concurrent           - concurrent downloads (` + fmt.Sprintf("%d-%d", constants.MinMaxConcurrent, constants.MaxMaxConcurrent) + `)
     lookback_days            - days to look back (1-365)
 
   [filters]
@@ -1144,8 +1156,8 @@ Available keys:
     show_download_complete   - true/false
     show_download_failed     - true/false
 
-Note (v4.3.0): Mode (Enabled/Conditional/Disabled) is now set per-job via the
-"Auto Download" custom field in your Rescale workspace, not in this config.
+Which jobs are downloaded (Enabled, Conditional or Disabled) is set per job
+in the "Auto Download" custom field of your Rescale workspace, not here.
 
 Examples:
   rescale-int daemon config set download_folder /path/to/downloads
@@ -1156,6 +1168,7 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
 			value := args[1]
+			usage := func(format string, a ...any) error { return reporting.UsageError(fmt.Errorf(format, a...)) }
 
 			// Load existing config
 			cfg, err := config.LoadDaemonConfig("")
@@ -1169,18 +1182,25 @@ Examples:
 			case "enabled":
 				cfg.Daemon.Enabled = value == "true" || value == "1" || value == "yes"
 			case "download_folder":
-				absPath, err := pathutil.ResolveAbsolutePath(value)
+				expanded, err := pathutil.ExpandHome(value)
 				if err != nil {
-					return fmt.Errorf("invalid path: %w", err)
+					return usage("invalid path: %w", err)
+				}
+				if !filepath.IsAbs(expanded) {
+					return usage("download_folder must be an absolute path, got %q", value)
+				}
+				absPath, err := pathutil.ResolveAbsolutePath(expanded)
+				if err != nil {
+					return usage("invalid path: %w", err)
 				}
 				cfg.Daemon.DownloadFolder = absPath
 			case "poll_interval_minutes":
 				var v int
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
-					return fmt.Errorf("invalid integer: %s", value)
+					return usage("invalid integer: %s", value)
 				}
 				if v < 1 || v > 1440 {
-					return fmt.Errorf("poll_interval_minutes must be between 1 and 1440")
+					return usage("poll_interval_minutes must be between 1 and 1440")
 				}
 				cfg.Daemon.PollIntervalMinutes = v
 			case "use_job_name_dir":
@@ -1188,19 +1208,19 @@ Examples:
 			case "max_concurrent":
 				var v int
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
-					return fmt.Errorf("invalid integer: %s", value)
+					return usage("invalid integer: %s", value)
 				}
-				if v < 1 || v > 10 {
-					return fmt.Errorf("max_concurrent must be between 1 and 10")
+				if err := daemon.CheckMaxConcurrent(v, "max_concurrent"); err != nil {
+					return err
 				}
 				cfg.Daemon.MaxConcurrent = v
 			case "lookback_days":
 				var v int
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
-					return fmt.Errorf("invalid integer: %s", value)
+					return usage("invalid integer: %s", value)
 				}
 				if v < 1 || v > 365 {
-					return fmt.Errorf("lookback_days must be between 1 and 365")
+					return usage("lookback_days must be between 1 and 365")
 				}
 				cfg.Daemon.LookbackDays = v
 
@@ -1219,8 +1239,8 @@ Examples:
 				cfg.Eligibility.AutoDownloadTag = value
 				fmt.Println("Note: 'correctness_tag' is deprecated, use 'auto_download_tag' instead")
 			case "mode", "auto_download_value", "downloaded_tag":
-				fmt.Println("Note: This setting is no longer configurable in v4.3.0+")
-				fmt.Println("Mode is now set per-job via the 'Auto Download' custom field in Rescale workspace.")
+				fmt.Printf("Note: %s is no longer a setting.\n", key)
+				fmt.Println("Which jobs are downloaded is set per job in the 'Auto Download' custom field of your Rescale workspace.")
 				return nil
 
 			// [notifications] section
@@ -1232,7 +1252,7 @@ Examples:
 				cfg.Notifications.ShowDownloadFailed = value == "true" || value == "1" || value == "yes"
 
 			default:
-				return fmt.Errorf("unknown configuration key: %s", key)
+				return usage("unknown setting %q; 'rescale-int daemon config set --help' lists them", key)
 			}
 
 			// Save config

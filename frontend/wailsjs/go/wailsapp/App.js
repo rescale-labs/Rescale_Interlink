@@ -190,10 +190,6 @@ export function GetUngroupedTransferTasks() {
   return window['go']['wailsapp']['App']['GetUngroupedTransferTasks']();
 }
 
-export function InstallAndStartServiceElevated() {
-  return window['go']['wailsapp']['App']['InstallAndStartServiceElevated']();
-}
-
 export function ListJobStatuses() {
   return window['go']['wailsapp']['App']['ListJobStatuses']();
 }
@@ -374,10 +370,6 @@ export function StartFolderUpload(arg1, arg2, arg3) {
   return window['go']['wailsapp']['App']['StartFolderUpload'](arg1, arg2, arg3);
 }
 
-export function StartServiceElevated() {
-  return window['go']['wailsapp']['App']['StartServiceElevated']();
-}
-
 export function StartSingleJob(arg1) {
   return window['go']['wailsapp']['App']['StartSingleJob'](arg1);
 }
@@ -388,10 +380,6 @@ export function StartTransfers(arg1) {
 
 export function StopDaemon() {
   return window['go']['wailsapp']['App']['StopDaemon']();
-}
-
-export function StopServiceElevated() {
-  return window['go']['wailsapp']['App']['StopServiceElevated']();
 }
 
 export function TestAutoDownloadConnection(arg1) {
@@ -408,6 +396,10 @@ export function TriggerDaemonScan() {
 
 export function TriggerProfileRescan() {
   return window['go']['wailsapp']['App']['TriggerProfileRescan']();
+}
+
+export function UninstallServiceElevated() {
+  return window['go']['wailsapp']['App']['UninstallServiceElevated']();
 }
 
 export function UpdateConfig(arg1) {

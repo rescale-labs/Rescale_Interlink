@@ -11,37 +11,6 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
-// MigrationScope describes which profiles a migration run should touch.
-type MigrationScope int
-
-const (
-	// ScopeCurrentUser migrates only the current process's files. Used by
-	// the GUI, CLI, and subprocess daemon entry points.
-	ScopeCurrentUser MigrationScope = iota
-
-	// ScopeAllProfiles migrates every enumerable user profile on the
-	// machine. Used by the Windows Service main (running as SYSTEM). The
-	// caller supplies the profile list — this package does not import
-	// service/ to avoid a cycle.
-	ScopeAllProfiles
-)
-
-// ProfileMigrationTarget is a single Windows profile directory that the
-// ScopeAllProfiles migrations should touch. The service enumerator fills in
-// Username/SID/ProfilePath; the migration iterates over these.
-//
-// SID is required for the Windows token ACL tightening under spec §11.2
-// (applyTokenFileACL). When the migration runs under SYSTEM (service
-// scope), the current process SID is NOT the user's — the SID field here
-// is the authoritative source. An empty SID causes the ACL step to be
-// skipped with a WARN (the copied file keeps its inherited permissions,
-// matching pre-Plan-4 behavior).
-type ProfileMigrationTarget struct {
-	Username    string
-	SID         string
-	ProfilePath string
-}
-
 // RunStartupMigrations executes all one-time file migrations Plan 2 introduces.
 //
 // Migrations included:
@@ -59,11 +28,7 @@ type ProfileMigrationTarget struct {
 // a rollback to the previous binary still finds the source file until the
 // delete completes, and the read-side path-const fallbacks tolerate files
 // in either old or new locations during the transition release.
-//
-// For ScopeAllProfiles, callers (the Windows Service main) must pass the
-// enumerated profile list; an empty slice is treated as "no profiles"
-// rather than "all profiles."
-func RunStartupMigrations(logger *logging.Logger, scope MigrationScope, profiles []ProfileMigrationTarget) {
+func RunStartupMigrations(logger *logging.Logger) {
 	migrateStartupLogFilename(logger)
 
 	if runtime.GOOS == "darwin" {
@@ -71,15 +36,7 @@ func RunStartupMigrations(logger *logging.Logger, scope MigrationScope, profiles
 	}
 
 	if runtime.GOOS == "windows" {
-		// Current-user migration always runs; the service extends to all
-		// profiles so the service-read paths (per-profile config.csv and
-		// token) land in Local regardless of who enumerated them.
 		migrateCurrentUserWindowsCredentials(logger)
-		if scope == ScopeAllProfiles {
-			for _, p := range profiles {
-				migratePerProfileWindowsCredentials(logger, p)
-			}
-		}
 	}
 }
 
@@ -166,49 +123,6 @@ func migrateCurrentUserWindowsCredentials(logger *logging.Logger) {
 				logger.Warn().Err(aclErr).
 					Str("to", to).
 					Msg("Could not apply explicit ACL to migrated token (current user)")
-			}
-		}
-	}
-}
-
-// migratePerProfileWindowsCredentials does the same under an explicit
-// user-profile root. Service-mode scope: this runs under SYSTEM, so the
-// target user's SID must come from the ProfileMigrationTarget, NOT the
-// current process SID (which would be SYSTEM's).
-func migratePerProfileWindowsCredentials(logger *logging.Logger, p ProfileMigrationTarget) {
-	if p.ProfilePath == "" {
-		return
-	}
-	oldBase := filepath.Join(p.ProfilePath, "AppData", "Roaming", "Rescale", "Interlink")
-	newBase := filepath.Join(p.ProfilePath, "AppData", "Local", "Rescale", "Interlink")
-	for _, name := range []string{"token", "config.csv"} {
-		from := filepath.Join(oldBase, name)
-		to := filepath.Join(newBase, name)
-		if err := copyThenRemove(from, to); err != nil {
-			if logger != nil {
-				logger.Warn().Err(err).
-					Str("user", p.Username).
-					Str("from", from).
-					Str("to", to).
-					Msg("Windows credential migration (per profile) failed")
-			}
-			continue
-		}
-		if name == "token" {
-			if p.SID == "" {
-				if logger != nil {
-					logger.Warn().
-						Str("user", p.Username).
-						Str("to", to).
-						Msg("No SID available for migrated token; skipping explicit ACL (file retains inherited permissions)")
-				}
-				continue
-			}
-			if aclErr := applyTokenFileACL(to, p.SID); aclErr != nil && logger != nil {
-				logger.Warn().Err(aclErr).
-					Str("user", p.Username).
-					Str("to", to).
-					Msg("Could not apply explicit ACL to migrated token (per profile)")
 			}
 		}
 	}

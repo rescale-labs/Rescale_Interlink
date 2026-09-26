@@ -116,8 +116,7 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 		jobsDownloaded = h.daemon.GetDownloadedCount()
 	}
 
-	// Get current user's SID for Windows IPC matching
-	// (Matches service mode which sets SID from UserProfile — see service/ipc_handler.go)
+	// The current user's SID, which the GUI and tray match their own against.
 	sid := ""
 	if currentUser, err := user.Current(); err == nil {
 		sid = currentUser.Uid // On Windows, Uid is the SID string (e.g., "S-1-5-21-...")

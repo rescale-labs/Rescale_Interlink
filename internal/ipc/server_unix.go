@@ -45,14 +45,12 @@ type ServiceHandler interface {
 	// This is supported on Unix (unlike Windows where SCM handles it).
 	Shutdown() error
 
-	// GetRecentLogs returns recent log entries from the daemon.
-	// In service mode, userID routes to the correct per-user daemon.
-	// In subprocess mode, userID is ignored (only one user).
+	// GetRecentLogs returns recent log entries from the daemon, which serves
+	// one user, so userID is ignored.
 	GetRecentLogs(userID string, count int) []LogEntryData
 
-	// ReloadConfig requests daemon config reload.
-	// In subprocess mode, returns active download count for GUI to decide restart timing.
-	// In service mode, delegates to TriggerRescan().
+	// ReloadConfig requests daemon config reload. It returns the active
+	// download count for the GUI to decide when to restart the daemon.
 	ReloadConfig(userID string) *ReloadConfigData
 
 	// GetTransferStatus returns a snapshot of the daemon's transfer queue

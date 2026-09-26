@@ -1,6 +1,9 @@
 package ipc
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // allCodes is the authoritative list of codes that must be supported by
 // CanonicalText. When a new code is added to errors.go, add it here too; the
@@ -9,13 +12,10 @@ import "testing"
 var allCodes = []ErrorCode{
 	CodeNoAPIKey,
 	CodeDownloadFolderInaccessible,
-	CodeServiceDisabledInSCM,
 	CodeIPCNotResponding,
 	CodeCLINotFound,
 	CodeServiceAlreadyRunning,
 	CodePermissionDenied,
-	CodeServiceNotInstalled,
-	CodeServiceStopped,
 	CodeTransientTimeout,
 	CodeConfigInvalid,
 	CodeWorkspaceMissingField,
@@ -61,5 +61,28 @@ func TestCodeFromCanonicalTextRoundTrip(t *testing.T) {
 func TestCodeFromCanonicalTextUnknown(t *testing.T) {
 	if got := CodeFromCanonicalText("something the daemon would never say"); got != "" {
 		t.Errorf("CodeFromCanonicalText unknown = %q, want \"\"", got)
+	}
+}
+
+// Every text and hint, as the surfaces compose them, names the controls the
+// app has: auto-download runs in the user's own session, not as a service,
+// and the API key is set in API Configuration.
+func TestTextsNameCurrentControls(t *testing.T) {
+	for _, code := range allCodes {
+		composed := CanonicalText[code] + ". " + HintFor(code)
+		for _, stale := range []string{"service", "connection settings"} {
+			if strings.Contains(strings.ToLower(composed), stale) {
+				t.Errorf("%s: %q mentions %q", code, composed, stale)
+			}
+		}
+	}
+	if hint := HintFor(CodeNoAPIKey); !strings.Contains(hint, "API Configuration") {
+		t.Errorf("no-API-key hint %q does not say where the key is set", hint)
+	}
+	// A daemon that does not answer IPC cannot be stopped through it: the
+	// recovery goes through a command that stops it or names its process.
+	const stuck = "Auto-download is not responding. Run 'rescale-int daemon stop', which stops the daemon or says how to end its process, then start auto-download from the Interlink app."
+	if got := CanonicalText[CodeIPCNotResponding] + ". " + HintFor(CodeIPCNotResponding); got != stuck {
+		t.Errorf("not-responding message = %q, want %q", got, stuck)
 	}
 }

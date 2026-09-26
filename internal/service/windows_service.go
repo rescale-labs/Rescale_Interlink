@@ -4,228 +4,87 @@
 package service
 
 import (
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
-
-	"github.com/rescale/rescale-int/internal/ipc"
-	"github.com/rescale/rescale-int/internal/logging"
 )
 
-// windowsService implements the svc.Handler interface for single-user mode.
-type windowsService struct {
-	service *Service
-	elog    *eventlog.Log
-}
+// retiredService runs a retired service's work and returns, so that svc.Run
+// reports it stopped with exit code 0, which the recovery actions that restart
+// a failed service ignore.
+type retiredService func(running func())
 
-// multiUserWindowsService implements svc.Handler for multi-user mode.
-type multiUserWindowsService struct {
-	service    *MultiUserService
-	elog       *eventlog.Log
-	ipcServer  *ipc.Server
-	ipcHandler *ServiceIPCHandler
-	logger     *logging.Logger
-}
-
-// Execute implements svc.Handler.Execute.
-// This is called by the Windows Service Control Manager.
-func (ws *windowsService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (svcSpecificEC bool, exitCode uint32) {
-	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPauseAndContinue
-
-	// Report start pending
-	changes <- svc.Status{State: svc.StartPending}
-
-	// Start the daemon
-	if err := ws.service.Start(); err != nil {
-		ws.elog.Error(1, fmt.Sprintf("Failed to start service: %v", err))
-		changes <- svc.Status{State: svc.StopPending}
-		return false, 1
-	}
-
-	// Report running
-	ws.elog.Info(1, "Service started successfully")
-	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
-
-	// Service loop - handle control requests
-	for c := range r {
-		switch c.Cmd {
-		case svc.Interrogate:
-			changes <- c.CurrentStatus
-
-		case svc.Stop, svc.Shutdown:
-			ws.elog.Info(1, "Service stop requested")
-			changes <- svc.Status{State: svc.StopPending}
-			ws.service.Stop()
-			changes <- svc.Status{State: svc.Stopped}
-			return false, 0
-
-		case svc.Pause:
-			ws.elog.Info(1, "Service pause requested")
-			changes <- svc.Status{State: svc.PausePending}
-			// For now, we stop polling on pause
-			ws.service.Stop()
-			changes <- svc.Status{State: svc.Paused, Accepts: cmdsAccepted}
-
-		case svc.Continue:
-			ws.elog.Info(1, "Service continue requested")
-			changes <- svc.Status{State: svc.ContinuePending}
-			if err := ws.service.Start(); err != nil {
-				ws.elog.Error(1, fmt.Sprintf("Failed to continue service: %v", err))
-			}
-			changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
-
-		default:
-			ws.elog.Warning(1, fmt.Sprintf("Unexpected control request: %d", c.Cmd))
-		}
-	}
-
+func (work retiredService) Execute(_ []string, _ <-chan svc.ChangeRequest, changes chan<- svc.Status) (bool, uint32) {
+	work(func() { changes <- svc.Status{State: svc.Running} })
 	return false, 0
 }
 
-// RunAsService starts the service under SCM control (single-user mode).
-// This should be called when running as a Windows service in single-user mode.
-func RunAsService(s *Service) error {
-	// Open event log
-	elog, err := eventlog.Open(ServiceName)
-	if err != nil {
-		return fmt.Errorf("failed to open event log: %w", err)
+// RunDisabled runs a service installed by an earlier version, touching no user
+// profile, and reports whether an SCM started this process. A failure has
+// nowhere else to be reported: the service has no console, and an error report
+// would be written to a profile.
+func RunDisabled() bool {
+	log := func(string) {}
+	if elog, err := eventlog.Open(ServiceName); err == nil {
+		defer elog.Close()
+		log = func(msg string) { elog.Info(1, msg) }
 	}
-	defer elog.Close()
-
-	elog.Info(1, "Starting service (single-user mode)")
-
-	ws := &windowsService{
-		service: s,
-		elog:    elog,
-	}
-
-	// Run the service
-	err = svc.Run(ServiceName, ws)
-	if err != nil {
-		elog.Error(1, fmt.Sprintf("Service run failed: %v", err))
-		return fmt.Errorf("failed to run service: %w", err)
-	}
-
-	return nil
+	return retire(scmHost{
+		dispatch: func(work func(running func())) error { return svc.Run(ServiceName, retiredService(work)) },
+		notService: func(err error) bool {
+			return errors.Is(err, windows.ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
+		},
+		deleteSelf:  deleteSelf,
+		clearMarker: clearInstalledMarker,
+		log:         log,
+	})
 }
 
-// Execute implements svc.Handler.Execute for multi-user mode.
-func (ws *multiUserWindowsService) Execute(args []string, r <-chan svc.ChangeRequest, changes chan<- svc.Status) (svcSpecificEC bool, exitCode uint32) {
-	const cmdsAccepted = svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPauseAndContinue
-
-	// Report start pending
-	changes <- svc.Status{State: svc.StartPending}
-
-	// Start IPC server BEFORE daemon so GUI can connect immediately
-	// when SCM reports "running"
-	if ws.ipcServer != nil {
-		if err := ws.ipcServer.Start(); err != nil {
-			ws.elog.Warning(1, fmt.Sprintf("Failed to start IPC server (tray communication unavailable): %v", err))
-			// Non-fatal - service can still run without IPC
-		} else {
-			ws.elog.Info(1, "IPC server started for tray/GUI communication")
+// deleteSelf marks this service for deletion. The SCM removes it once it has
+// stopped and every handle to it is closed, the two opened here included; one
+// already marked counts as done.
+func deleteSelf() error {
+	return withService(windows.DELETE, func(h windows.Handle) error {
+		if err := windows.DeleteService(h); !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+			return err
 		}
-	}
-
-	// Start the multi-user daemon
-	if err := ws.service.Start(); err != nil {
-		ws.elog.Error(1, fmt.Sprintf("Failed to start multi-user service: %v", err))
-		// Clean up IPC server if daemon start fails
-		if ws.ipcServer != nil {
-			ws.ipcServer.Stop()
-		}
-		changes <- svc.Status{State: svc.StopPending}
-		return false, 1
-	}
-
-	// Report running
-	ws.elog.Info(1, fmt.Sprintf("Multi-user service started successfully (%d users)", ws.service.RunningCount()))
-	changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
-
-	// Service loop - handle control requests
-	for c := range r {
-		switch c.Cmd {
-		case svc.Interrogate:
-			changes <- c.CurrentStatus
-
-		case svc.Stop, svc.Shutdown:
-			ws.elog.Info(1, "Multi-user service stop requested")
-			changes <- svc.Status{State: svc.StopPending}
-			// Stop IPC server first
-			if ws.ipcServer != nil {
-				ws.ipcServer.Stop()
-			}
-			ws.service.Stop()
-			changes <- svc.Status{State: svc.Stopped}
-			return false, 0
-
-		case svc.Pause:
-			ws.elog.Info(1, "Multi-user service pause requested")
-			changes <- svc.Status{State: svc.PausePending}
-			// Keep IPC server running during pause so tray can still communicate
-			ws.service.Stop()
-			changes <- svc.Status{State: svc.Paused, Accepts: cmdsAccepted}
-
-		case svc.Continue:
-			ws.elog.Info(1, "Multi-user service continue requested")
-			changes <- svc.Status{State: svc.ContinuePending}
-			if err := ws.service.Start(); err != nil {
-				ws.elog.Error(1, fmt.Sprintf("Failed to continue multi-user service: %v", err))
-			}
-			ws.elog.Info(1, fmt.Sprintf("Multi-user service resumed (%d users)", ws.service.RunningCount()))
-			changes <- svc.Status{State: svc.Running, Accepts: cmdsAccepted}
-
-		default:
-			ws.elog.Warning(1, fmt.Sprintf("Unexpected control request: %d", c.Cmd))
-		}
-	}
-
-	return false, 0
+		return nil
+	})
 }
 
-// RunAsMultiUserService starts the service under SCM control (multi-user mode).
-// This is the recommended mode for Windows services that need to support multiple user profiles.
-func RunAsMultiUserService(s *MultiUserService) error {
-	// Create logger for the service
-	logger := logging.NewLogger("service", nil)
-
-	// Open event log
-	elog, err := eventlog.Open(ServiceName)
+// withService opens this service with access, and the SCM with only the right
+// to connect, runs fn, and closes both handles before it returns.
+func withService(access uint32, fn func(windows.Handle) error) error {
+	m, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
-		return fmt.Errorf("failed to open event log: %w", err)
+		return err
 	}
-	defer elog.Close()
-
-	elog.Info(1, "Starting service (multi-user mode)")
-
-	// Create IPC handler and server.
-	// Use service mode server for multi-user mode —
-	// this relaxes owner-based auth since user-scoped routing handles isolation.
-	ipcHandler := NewServiceIPCHandler(s, logger)
-	ipcServer := ipc.NewServiceModeServer(ipcHandler, logger)
-
-	ws := &multiUserWindowsService{
-		service:    s,
-		elog:       elog,
-		ipcServer:  ipcServer,
-		ipcHandler: ipcHandler,
-		logger:     logger,
-	}
-
-	// Run the service
-	err = svc.Run(ServiceName, ws)
+	defer windows.CloseServiceHandle(m)
+	name, err := windows.UTF16PtrFromString(ServiceName)
 	if err != nil {
-		elog.Error(1, fmt.Sprintf("Multi-user service run failed: %v", err))
-		return fmt.Errorf("failed to run multi-user service: %w", err)
+		return err
 	}
+	h, err := windows.OpenService(m, name, access)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(h)
+	return fn(h)
+}
 
-	return nil
+// clearInstalledMarker removes the HKLM marker that an earlier version's
+// 'service install' set for the GUI and tray.
+func clearInstalledMarker() {
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); err == nil {
+		k.DeleteValue("ServiceInstalled")
+		k.Close()
+	}
 }
 
 // IsWindowsService returns true if running as a Windows service.
@@ -233,90 +92,43 @@ func IsWindowsService() (bool, error) {
 	return svc.IsWindowsService()
 }
 
+// scmQuery returns the service's state. It asks only for the query rights
+// that the default service permissions give a standard user: mgr.Connect asks
+// for full access, which only an elevated administrator gets, so a standard
+// user could not see that an old service is installed. A variable so a test
+// can stand in for the SCM.
+var scmQuery = func() (state svc.State, err error) {
+	err = withService(windows.SERVICE_QUERY_STATUS, func(h windows.Handle) error {
+		var st windows.SERVICE_STATUS
+		err := windows.QueryServiceStatus(h, &st)
+		state = svc.State(st.CurrentState)
+		return err
+	})
+	return state, err
+}
+
 // IsInstalledWithReason returns (installed, errReason) for better diagnostics.
+// The reason is empty when the service is simply not installed.
 func IsInstalledWithReason() (bool, string) {
-	m, err := mgr.Connect()
-	if err != nil {
+	_, err := scmQuery()
+	if err == nil {
+		return true, ""
+	}
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return false, ""
+	}
+	// DetectDaemon looks for "denied" to fall back to IPC; the OS text may not
+	// be English.
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		return false, fmt.Sprintf("SCM access denied: %v", err)
 	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(ServiceName)
-	if err != nil {
-		return false, fmt.Sprintf("Service query failed: %v", err)
-	}
-	defer s.Close()
-	return true, ""
+	return false, fmt.Sprintf("Service query failed: %v", err)
 }
 
 // IsInstalled returns true if the service is installed in the Service Control Manager.
 func IsInstalled() bool {
 	installed, _ := IsInstalledWithReason()
 	return installed
-}
-
-// Install installs the service with the Service Control Manager.
-func Install(execPath string, configPath string) error {
-	// Open service manager
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("failed to connect to service manager: %w", err)
-	}
-	defer m.Disconnect()
-
-	// Check if service already exists
-	s, err := m.OpenService(ServiceName)
-	if err == nil {
-		s.Close()
-		return fmt.Errorf("service %s already exists", ServiceName)
-	}
-
-	// Build service arguments
-	args := []string{"daemon", "run"}
-	if configPath != "" {
-		args = append(args, "--config", configPath)
-	}
-
-	// Create service
-	s, err = m.CreateService(ServiceName, execPath, mgr.Config{
-		DisplayName: ServiceDisplayName,
-		Description: ServiceDescription,
-		StartType:   mgr.StartAutomatic,
-	}, args...)
-	if err != nil {
-		return fmt.Errorf("failed to create service: %w", err)
-	}
-	defer s.Close()
-
-	// Set recovery actions (restart on failure)
-	err = s.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 5 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 30 * time.Second},
-		{Type: mgr.ServiceRestart, Delay: 60 * time.Second},
-	}, 86400) // Reset failure count after 1 day
-	if err != nil {
-		// Non-fatal, just log
-		fmt.Printf("Warning: failed to set recovery actions: %v\n", err)
-	}
-
-	// Create event log source
-	err = eventlog.InstallAsEventCreate(ServiceName, eventlog.Error|eventlog.Warning|eventlog.Info)
-	if err != nil {
-		// Non-fatal, just log
-		fmt.Printf("Warning: failed to install event log: %v\n", err)
-	}
-
-	// Set HKLM registry marker so GUI/tray can detect service installation
-	// without needing SCM access (which may be blocked on restricted VMs).
-	// This runs in the elevated CLI process, so HKLM write is allowed.
-	if regKey, _, regErr := registry.CreateKey(registry.LOCAL_MACHINE,
-		`SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); regErr == nil {
-		regKey.SetDWordValue("ServiceInstalled", 1)
-		regKey.Close()
-	}
-
-	fmt.Printf("Service %s installed successfully\n", ServiceName)
-	return nil
 }
 
 // Uninstall removes the service from the Service Control Manager.
@@ -365,38 +177,9 @@ func Uninstall() error {
 		fmt.Printf("Warning: failed to remove event log: %v\n", err)
 	}
 
-	// Clear HKLM registry marker so GUI/tray knows service is no longer installed.
-	// This runs in the elevated CLI process, so HKLM write is allowed.
-	if regKey, regErr := registry.OpenKey(registry.LOCAL_MACHINE,
-		`SOFTWARE\Rescale\Interlink`, registry.SET_VALUE); regErr == nil {
-		regKey.DeleteValue("ServiceInstalled")
-		regKey.Close()
-	}
+	clearInstalledMarker()
 
 	fmt.Printf("Service %s uninstalled successfully\n", ServiceName)
-	return nil
-}
-
-// Start starts the installed service.
-func StartService() error {
-	m, err := mgr.Connect()
-	if err != nil {
-		return fmt.Errorf("failed to connect to service manager: %w", err)
-	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(ServiceName)
-	if err != nil {
-		return fmt.Errorf("failed to open service: %w", err)
-	}
-	defer s.Close()
-
-	err = s.Start()
-	if err != nil {
-		return fmt.Errorf("failed to start service: %w", err)
-	}
-
-	fmt.Printf("Service %s started\n", ServiceName)
 	return nil
 }
 
@@ -423,26 +206,17 @@ func StopService() error {
 	return nil
 }
 
-// QueryStatus returns the current service status.
+// QueryStatus returns the current service status; one that is not installed
+// is stopped.
 func QueryStatus() (Status, error) {
-	m, err := mgr.Connect()
-	if err != nil {
-		return StatusUnknown, fmt.Errorf("failed to connect to service manager: %w", err)
+	st, err := scmQuery()
+	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return StatusStopped, nil
 	}
-	defer m.Disconnect()
-
-	s, err := m.OpenService(ServiceName)
 	if err != nil {
-		return StatusStopped, nil // Service not installed = stopped
+		return StatusUnknown, err
 	}
-	defer s.Close()
-
-	status, err := s.Query()
-	if err != nil {
-		return StatusUnknown, fmt.Errorf("failed to query service status: %w", err)
-	}
-
-	return svcStateToStatus(status.State), nil
+	return svcStateToStatus(st), nil
 }
 
 // svcStateToStatus converts Windows service state to our Status type.
@@ -465,13 +239,4 @@ func svcStateToStatus(state svc.State) Status {
 	default:
 		return StatusUnknown
 	}
-}
-
-// GetExecutablePath returns the path to the current executable.
-func GetExecutablePath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("failed to get executable path: %w", err)
-	}
-	return filepath.Abs(exe)
 }

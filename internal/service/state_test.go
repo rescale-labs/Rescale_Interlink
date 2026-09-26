@@ -112,28 +112,32 @@ func TestPresentationMatrixCoverage(t *testing.T) {
 // user actually sees; the matrix test above only checks each cell is populated.
 func TestPresentationCells(t *testing.T) {
 	tests := []struct {
-		name        string
-		state       State
-		wantPhrases []string
-		wantActions []Action
+		name         string
+		state        State
+		wantPhrases  []string
+		wantActions  []Action
+		exactActions []Action
 	}{
 		{
-			name:        "not installed",
-			state:       State{Installation: InstallationNotInstalled},
-			wantPhrases: []string{"Install Service"},
-			wantActions: []Action{ActionInstallService},
+			// No service is the usual state now: the user's own daemon does the
+			// work, so the cell is the per-user one, with nothing to install.
+			name:         "not installed",
+			state:        State{Installation: InstallationNotInstalled, PerUser: PerUserNotConfigured},
+			wantPhrases:  []string{"Configure"},
+			exactActions: []Action{ActionOpenLogs, ActionConfigure, ActionOpenGUI},
 		},
 		{
-			name:        "stopped",
-			state:       State{Installation: InstallationStopped},
-			wantPhrases: []string{"Start Service"},
-			wantActions: []Action{ActionStartService},
+			// A service installed by an earlier version can only be removed.
+			name:         "stopped",
+			state:        State{Installation: InstallationStopped, PerUser: PerUserRunning},
+			wantPhrases:  []string{"Auto-download active"},
+			exactActions: []Action{ActionOpenLogs, ActionPause, ActionTriggerScan, ActionConfigure, ActionOpenGUI, ActionUninstallService},
 		},
 		{
 			name:        "running but not configured",
 			state:       State{Installation: InstallationRunning, PerUser: PerUserNotConfigured},
 			wantPhrases: []string{"Configure"},
-			wantActions: []Action{ActionConfigure},
+			wantActions: []Action{ActionConfigure, ActionUninstallService},
 		},
 		{
 			name:        "running and active",
@@ -156,7 +160,17 @@ func TestPresentationCells(t *testing.T) {
 				LastError:     ipc.CanonicalText[ipc.CodeNoAPIKey],
 				LastErrorCode: ipc.CodeNoAPIKey,
 			},
-			wantPhrases: []string{ipc.CanonicalText[ipc.CodeNoAPIKey], ipc.HintFor(ipc.CodeNoAPIKey)},
+			wantPhrases: []string{ipc.CanonicalText[ipc.CodeNoAPIKey], ipc.HintFor(ipc.CodeNoAPIKey), "API Configuration"},
+		},
+		{
+			name:        "a daemon that does not answer",
+			state:       State{Installation: InstallationSubprocessOnly, PerUser: PerUserError, LastError: ipc.CanonicalText[ipc.CodeIPCNotResponding], LastErrorCode: ipc.CodeIPCNotResponding},
+			wantPhrases: []string{"auto-download"},
+		},
+		{
+			name:        "a daemon that takes too long",
+			state:       State{Installation: InstallationSubprocessOnly, PerUser: PerUserError, LastError: ipc.CanonicalText[ipc.CodeTransientTimeout], LastErrorCode: ipc.CodeTransientTimeout},
+			wantPhrases: []string{"Auto-download"},
 		},
 	}
 
@@ -173,7 +187,68 @@ func TestPresentationCells(t *testing.T) {
 					t.Errorf("expected action %v, got %v", action, p.AllowedActions)
 				}
 			}
+			if tt.exactActions != nil && !slices.Equal(p.AllowedActions, tt.exactActions) {
+				t.Errorf("actions = %v, want %v", p.AllowedActions, tt.exactActions)
+			}
+			if strings.Contains(strings.ToLower(p.GUILongForm+p.TrayTooltip), "service") {
+				t.Errorf("per-user wording names a service: %q / %q", p.GUILongForm, p.TrayTooltip)
+			}
 		})
+	}
+}
+
+// A service installed by an earlier version can be removed whatever else
+// runs: the user's own daemon, a stale pipe, or the service changing state.
+func TestRemovalOfferedWhileAServiceIsInstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		found ServiceDetectionResult
+		state State // Presentation only, for states Compute does not produce off Windows
+		want  bool
+	}{
+		{name: "installed, own daemon running", found: ServiceDetectionResult{Installed: true, SubprocessPID: 42}, want: true},
+		{name: "installed, stale pipe", found: ServiceDetectionResult{Installed: true, PipeInUse: true}, want: true},
+		{name: "not installed, own daemon running", found: ServiceDetectionResult{SubprocessPID: 42}, want: false},
+		{name: "starting", state: State{Installation: InstallationStarting}, want: true},
+		{name: "stopping", state: State{Installation: InstallationStopping}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := tc.state
+			if st.Installation == InstallationUnknown {
+				st = (&Computer{
+					Clock:    &fakeClock{},
+					Detector: fakeDetector{result: tc.found},
+					IPC:      fakeIPC{statusErr: errors.New("no daemon")},
+					Config:   fakeConfig{cfg: newDisabledConfig()},
+					Identity: fakeIdentity{},
+				}).Compute(context.Background(), State{})
+			}
+			if got := slices.Contains(st.Presentation().AllowedActions, ActionUninstallService); got != tc.want {
+				t.Errorf("removal offered = %v, want %v (state %+v)", got, tc.want, st)
+			}
+		})
+	}
+}
+
+// The user's own daemon can be started whenever none answers and no service
+// from an earlier version is running, installed or not.
+func TestCanStartDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		state State
+		want  bool
+	}{
+		{State{Installation: InstallationSubprocessOnly}, true},
+		{State{Installation: InstallationNotInstalled}, true},
+		{State{Installation: InstallationStopped}, true},
+		{State{Installation: InstallationSubprocessOnly, IPCConnected: true}, false},
+		{State{Installation: InstallationRunning}, false},
+		{State{Installation: InstallationStarting}, false},
+		{State{Installation: InstallationStopping}, false},
+		{State{Installation: InstallationUnknown}, false},
+	} {
+		if got := tc.state.CanStartDaemon(); got != tc.want {
+			t.Errorf("CanStartDaemon(%+v) = %v, want %v", tc.state, got, tc.want)
+		}
 	}
 }
 
@@ -384,10 +459,86 @@ func TestMatchesWindowsUsername(t *testing.T) {
 		{"alice", "BOB", false},
 		{"", "alice", false},
 		{"alice", "", false},
+		// UPN: a domain on one side only, or domains that agree.
+		{"jdoe@corp.example.com", "jdoe", true},
+		{"CORP\\jdoe", "JDoe@Corp.Example.com", true},
+		{"jdoe@corp.example.com", "jdoe@CORP.example.com", true},
+		{"CORP\\jdoe", "jdoe", true},
+		// Conflicting domains.
+		{"jdoe@corp.example.com", "jdoe@other.example.com", false},
+		{"jdoe@corp.example.com", "jdoe@corp.example.org", false},
+		{"OTHER\\jdoe", "jdoe@corp.example.com", false},
+		{"CORP\\jdoe", "WORKSTATION\\jdoe", false},
+		// Malformed UPNs and empty names never match, not even each other.
+		{"@corp.example.com", "@corp.example.com", false},
+		{"@corp.example.com", "@other.example.com", false},
+		{"jdoe@", "jdoe", false},
+		{"jdoe@corp@example.com", "jdoe", false},
+		{"CORP\\", "OTHER\\", false},
+		{"CORP\\", "CORP\\", false},
+		{"  ", " ", false},
+		// Case and space around the name are not part of it.
+		{"CORP\\ JDoe ", "corp\\jdoe", true},
+		// Display names, as before.
+		{"Jane Doe", "jane doe", true},
+		{"CORP\\Jane Doe", " Jane Doe ", true},
+		{"jdoe.CORP", "CORP\\jdoe", false},
 	}
 	for _, tc := range cases {
-		if got := matchesWindowsUsername(tc.a, tc.b); got != tc.want {
-			t.Errorf("matchesWindowsUsername(%q,%q)=%v, want %v", tc.a, tc.b, got, tc.want)
+		for _, c := range [][2]string{{tc.a, tc.b}, {tc.b, tc.a}} {
+			if got := matchesWindowsUsername(c[0], c[1]); got != tc.want {
+				t.Errorf("matchesWindowsUsername(%q,%q)=%v, want %v", c[0], c[1], got, tc.want)
+			}
 		}
+	}
+}
+
+// TestMatchUser pins which IPC entry is the caller's: an exact SID match
+// anywhere in the list beats any name match, a name never overrides a SID that
+// differs, and the single entry a single-user daemon reports is taken only when
+// nothing about it says it is someone else's.
+func TestMatchUser(t *testing.T) {
+	const mine, theirs, third = "S-1-5-21-1000000001-1000000002-1000000003-1001", "S-1-5-21-1000000001-1000000002-1000000003-1002", "S-1-5-21-1000000001-1000000002-1000000003-1003"
+	me := fakeIdentity{sid: mine, username: "CORP\\jdoe"}
+	tests := []struct {
+		name     string
+		identity fakeIdentity
+		users    []ipc.UserStatus
+		want     int // index into users, or -1 for no match
+	}{
+		{"SID match after a SID-less name match", me, []ipc.UserStatus{{Username: "jdoe"}, {Username: "other", SID: mine}}, 1},
+		{"SID match before a SID-less name match", me, []ipc.UserStatus{{Username: "other", SID: mine}, {Username: "jdoe"}}, 0},
+		{"SID match after a name match with another SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}, {Username: "jdoe.CORP", SID: mine}}, 1},
+		{"a name does not override a different SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}, {Username: "other", SID: third}}, -1},
+		{"name match when the entry has no SID", fakeIdentity{sid: mine, username: "jdoe@corp.example.com"}, []ipc.UserStatus{{Username: "other"}, {Username: "jdoe"}}, 1},
+		{"name match when the caller has no SID", fakeIdentity{username: "jdoe"}, []ipc.UserStatus{{Username: "other", SID: theirs}, {Username: "CORP\\jdoe", SID: mine}}, 1},
+		{"no match among conflicting domains", fakeIdentity{username: "jdoe@corp.example.com"}, []ipc.UserStatus{{Username: "jdoe@other.example.com"}, {Username: "OTHER\\jdoe"}}, -1},
+		{"no entries", me, nil, -1},
+
+		// The single entry of a single-user daemon.
+		{"single entry with our SID", me, []ipc.UserStatus{{Username: "unknown", SID: mine}}, 0},
+		{"single entry with our name", me, []ipc.UserStatus{{Username: "jdoe"}}, 0},
+		{"single entry with neither SID nor name", me, []ipc.UserStatus{{}}, 0},
+		{"single entry with a different SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}}, -1},
+		{"single entry with a different SID and no name", me, []ipc.UserStatus{{SID: theirs}}, -1},
+		{"single entry with another name", me, []ipc.UserStatus{{Username: "other"}}, -1},
+		{"single entry in a conflicting domain", fakeIdentity{sid: mine, username: "jdoe@corp.example.com"}, []ipc.UserStatus{{Username: "jdoe@other.example.com"}}, -1},
+		{"single entry with a malformed UPN", me, []ipc.UserStatus{{Username: "@corp.example.com"}}, -1},
+		{"single entry with a domain and no name", me, []ipc.UserStatus{{Username: "CORP\\"}}, -1},
+		{"single entry with a display name", fakeIdentity{sid: mine, username: "Jane Doe"}, []ipc.UserStatus{{Username: "jane doe"}}, 0},
+		{"single entry whose name is only spaces", me, []ipc.UserStatus{{Username: "  "}}, 0},
+		{"SID match ignores case", me, []ipc.UserStatus{{Username: "other", SID: strings.ToLower(mine)}}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := (&Computer{Identity: tt.identity}).matchUser(tt.users)
+			want := (*ipc.UserStatus)(nil)
+			if tt.want >= 0 {
+				want = &tt.users[tt.want]
+			}
+			if got != want {
+				t.Fatalf("matchUser = %+v, want %+v", got, want)
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -132,6 +133,7 @@ func TestDaemonConfigLoadNonExistent(t *testing.T) {
 }
 
 func TestDaemonConfigValidate(t *testing.T) {
+	folder := t.TempDir() // absolute on every system
 	tests := []struct {
 		name    string
 		modify  func(*DaemonConfig)
@@ -146,7 +148,7 @@ func TestDaemonConfigValidate(t *testing.T) {
 			name: "enabled with valid settings",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
+				cfg.Daemon.DownloadFolder = folder
 			},
 			wantErr: nil,
 		},
@@ -162,7 +164,7 @@ func TestDaemonConfigValidate(t *testing.T) {
 			name: "poll interval too low",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
+				cfg.Daemon.DownloadFolder = folder
 				cfg.Daemon.PollIntervalMinutes = 0
 			},
 			wantErr: ErrDaemonInvalidPollInterval,
@@ -171,7 +173,7 @@ func TestDaemonConfigValidate(t *testing.T) {
 			name: "poll interval too high",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
+				cfg.Daemon.DownloadFolder = folder
 				cfg.Daemon.PollIntervalMinutes = 2000
 			},
 			wantErr: ErrDaemonInvalidPollInterval,
@@ -180,7 +182,7 @@ func TestDaemonConfigValidate(t *testing.T) {
 			name: "max concurrent too low",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
+				cfg.Daemon.DownloadFolder = folder
 				cfg.Daemon.MaxConcurrent = 0
 			},
 			wantErr: ErrDaemonInvalidMaxConcurrent,
@@ -189,16 +191,55 @@ func TestDaemonConfigValidate(t *testing.T) {
 			name: "max concurrent too high",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
-				cfg.Daemon.MaxConcurrent = 20
+				cfg.Daemon.DownloadFolder = folder
+				cfg.Daemon.MaxConcurrent = 21
 			},
 			wantErr: ErrDaemonInvalidMaxConcurrent,
+		},
+		{
+			name: "max concurrent at its lowest",
+			modify: func(cfg *DaemonConfig) {
+				cfg.Daemon.Enabled = true
+				cfg.Daemon.DownloadFolder = folder
+				cfg.Daemon.MaxConcurrent = 1
+			},
+		},
+		{
+			// the range 'daemon run --max-concurrent' accepts
+			name: "max concurrent at its highest",
+			modify: func(cfg *DaemonConfig) {
+				cfg.Daemon.Enabled = true
+				cfg.Daemon.DownloadFolder = folder
+				cfg.Daemon.MaxConcurrent = 20
+			},
+		},
+		{
+			name: "relative download folder",
+			modify: func(cfg *DaemonConfig) {
+				cfg.Daemon.Enabled = true
+				cfg.Daemon.DownloadFolder = filepath.Join("relative", "dir")
+			},
+			wantErr: ErrDaemonRelativeFolder,
+		},
+		{
+			name:    "relative download folder, disabled",
+			modify:  func(cfg *DaemonConfig) { cfg.Daemon.DownloadFolder = "relative" },
+			wantErr: ErrDaemonRelativeFolder,
+		},
+		{
+			// daemon.conf is read as written: nothing expands ~.
+			name: "download folder under ~",
+			modify: func(cfg *DaemonConfig) {
+				cfg.Daemon.Enabled = true
+				cfg.Daemon.DownloadFolder = "~/downloads"
+			},
+			wantErr: ErrDaemonRelativeFolder,
 		},
 		{
 			name: "lookback days too low",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
+				cfg.Daemon.DownloadFolder = folder
 				cfg.Daemon.LookbackDays = 0
 			},
 			wantErr: ErrDaemonInvalidLookbackDays,
@@ -207,7 +248,7 @@ func TestDaemonConfigValidate(t *testing.T) {
 			name: "lookback days too high",
 			modify: func(cfg *DaemonConfig) {
 				cfg.Daemon.Enabled = true
-				cfg.Daemon.DownloadFolder = "/test"
+				cfg.Daemon.DownloadFolder = folder
 				cfg.Daemon.LookbackDays = 500
 			},
 			wantErr: ErrDaemonInvalidLookbackDays,
@@ -219,7 +260,7 @@ func TestDaemonConfigValidate(t *testing.T) {
 			cfg := NewDaemonConfig()
 			tt.modify(cfg)
 			err := cfg.Validate()
-			if err != tt.wantErr {
+			if !errors.Is(err, tt.wantErr) || (err == nil) != (tt.wantErr == nil) {
 				t.Errorf("Expected error %v, got %v", tt.wantErr, err)
 			}
 		})
@@ -276,27 +317,5 @@ func TestDaemonConfigSetExcludePatterns(t *testing.T) {
 	cfg.SetExcludePatterns(nil)
 	if cfg.Filters.Exclude != "" {
 		t.Errorf("Expected empty string, got '%s'", cfg.Filters.Exclude)
-	}
-}
-
-func TestDaemonConfigIsEnabled(t *testing.T) {
-	cfg := NewDaemonConfig()
-
-	// Not enabled
-	if cfg.IsEnabled() {
-		t.Error("Expected IsEnabled=false when Enabled=false")
-	}
-
-	// Enabled but invalid
-	cfg.Daemon.Enabled = true
-	cfg.Daemon.DownloadFolder = ""
-	if cfg.IsEnabled() {
-		t.Error("Expected IsEnabled=false when config is invalid")
-	}
-
-	// Enabled and valid
-	cfg.Daemon.DownloadFolder = "/test"
-	if !cfg.IsEnabled() {
-		t.Error("Expected IsEnabled=true when config is valid and enabled")
 	}
 }

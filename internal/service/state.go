@@ -80,10 +80,7 @@ const (
 type Action string
 
 const (
-	ActionInstallService   Action = "install_service"
 	ActionUninstallService Action = "uninstall_service"
-	ActionStartService     Action = "start_service"
-	ActionStopService      Action = "stop_service"
 	ActionConfigure        Action = "configure"
 	ActionOpenGUI          Action = "open_gui"
 	ActionPause            Action = "pause"
@@ -117,6 +114,10 @@ type State struct {
 	Uptime          string
 	IPCConnected    bool
 	ServiceMode     bool
+
+	// ServiceInstalled is true while a service from an earlier version is
+	// registered, whatever Installation says about the daemon that runs.
+	ServiceInstalled bool
 }
 
 // Presentation is the canonical per-surface rendering of a State.
@@ -221,9 +222,11 @@ func DefaultComputer(client IPCClient) *Computer {
 func (c *Computer) Compute(ctx context.Context, prior State) State {
 	now := c.Clock.Now()
 
+	found := c.Detector.Detect(ctx)
 	s := State{
-		Installation: classifyInstallation(c.Detector.Detect(ctx)),
-		Version:      version.Version,
+		Installation:     classifyInstallation(found),
+		ServiceInstalled: found.Installed,
+		Version:          version.Version,
 	}
 
 	// Per-user configuration state starts from daemon.conf.
@@ -320,28 +323,42 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 
 // matchUser finds the IPC user entry corresponding to the current process
 // identity. Windows matches by SID primarily, with a username fallback;
-// Unix matches by username.
+// Unix matches by username. A SID match anywhere in the list wins, and an
+// entry whose SID differs from ours is never ours.
 func (c *Computer) matchUser(users []ipc.UserStatus) *ipc.UserStatus {
-	if len(users) == 0 {
-		return nil
-	}
 	sid := c.Identity.CurrentSID()
+	if sid != "" {
+		for i := range users {
+			if strings.EqualFold(users[i].SID, sid) {
+				return &users[i]
+			}
+		}
+	}
+	noSIDConflict := func(u ipc.UserStatus) bool { return sid == "" || u.SID == "" }
 	username := c.Identity.CurrentUsername()
 	for i := range users {
-		u := &users[i]
-		if sid != "" && u.SID != "" && strings.EqualFold(u.SID, sid) {
-			return u
-		}
-		if matchesWindowsUsername(u.Username, username) {
-			return u
+		if noSIDConflict(users[i]) && matchesWindowsUsername(users[i].Username, username) {
+			return &users[i]
 		}
 	}
-	// Subprocess hardening: single-user daemons return exactly one entry
-	// with no SID match by convention. Treat it as "the current user."
-	if len(users) == 1 {
+	// A single-user daemon reports one entry by convention. It is ours only
+	// when nothing on it says otherwise: no other SID, and no name, since a
+	// name here has already failed to match.
+	if len(users) == 1 && noSIDConflict(users[0]) && strings.TrimSpace(users[0].Username) == "" {
 		return &users[0]
 	}
 	return nil
+}
+
+// CanStartDaemon reports whether a surface may offer to start the user's own
+// daemon: none answers, and no service from an earlier version is running or
+// changing state.
+func (s State) CanStartDaemon() bool {
+	switch s.Installation {
+	case InstallationSubprocessOnly, InstallationNotInstalled, InstallationStopped:
+		return !s.IPCConnected
+	}
+	return false
 }
 
 // classifyInstallation maps a ServiceDetectionResult to an InstallationState.
@@ -357,7 +374,7 @@ func classifyInstallation(d ServiceDetectionResult) InstallationState {
 		// purposes, treat Windows as SubprocessOnly when no SCM service is up.
 		return InstallationSubprocessOnly
 	}
-	if IsInstalled() {
+	if d.Installed {
 		if st, err := QueryStatus(); err == nil {
 			switch st {
 			case StatusRunning:
@@ -377,43 +394,61 @@ func classifyInstallation(d ServiceDetectionResult) InstallationState {
 	return InstallationNotInstalled
 }
 
-// matchesWindowsUsername compares two Windows username renderings
-// case-insensitively, ignoring any DOMAIN\ prefix. Moved from
-// internal/wailsapp/daemon_bindings_windows.go so it can be reused from
-// state.Compute regardless of platform.
+// matchesWindowsUsername compares two renderings of a Windows account,
+// CORP\jdoe, a UPN such as jdoe@corp.example.com, or a bare name,
+// case-insensitively.
+// The names must be equal and not empty, and when both sides name a domain the
+// domains must agree: a NetBIOS domain agrees with a DNS domain whose first
+// label it is, as CORP does with corp.example.com.
 func matchesWindowsUsername(a, b string) bool {
-	if a == "" || b == "" {
+	nameA, domainA := splitWindowsUsername(a)
+	nameB, domainB := splitWindowsUsername(b)
+	if nameA == "" || nameA != nameB {
 		return false
 	}
-	strip := func(s string) string {
-		if i := strings.LastIndex(s, `\`); i >= 0 {
-			s = s[i+1:]
-		}
-		return strings.ToLower(strings.TrimSpace(s))
+	if domainA == "" || domainB == "" || domainA == domainB {
+		return true
 	}
-	return strip(a) == strip(b)
+	labelA, _, dnsA := strings.Cut(domainA, ".")
+	labelB, _, dnsB := strings.Cut(domainB, ".")
+	return dnsA != dnsB && labelA == labelB
+}
+
+// splitWindowsUsername returns the lower-cased name and domain of s. The name
+// is empty when there is none, as in a malformed UPN.
+func splitWindowsUsername(s string) (name, domain string) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if i := strings.LastIndex(s, `\`); i >= 0 {
+		return strings.TrimSpace(s[i+1:]), s[:i]
+	}
+	if n, d, ok := strings.Cut(s, "@"); ok {
+		if d == "" || strings.Contains(d, "@") {
+			return "", ""
+		}
+		return n, d
+	}
+	return s, ""
 }
 
 // Presentation returns the canonical rendering of s across all surfaces.
 // Pure function of s; safe to call from tests.
 func (s State) Presentation() Presentation {
+	p := s.presentation()
+	// A service installed by an earlier version can only be removed.
+	switch s.Installation {
+	case InstallationStopped, InstallationStarting, InstallationRunning, InstallationStopping:
+		s.ServiceInstalled = true
+	}
+	if s.ServiceInstalled {
+		p.AllowedActions = append(p.AllowedActions, ActionUninstallService)
+	}
+	return p
+}
+
+func (s State) presentation() Presentation {
 	p := Presentation{AllowedActions: []Action{ActionOpenLogs}}
 
 	switch s.Installation {
-	case InstallationNotInstalled:
-		p.GUILongForm = "Auto-download is not installed. Click Install Service to set it up."
-		p.TrayStatusLine = "Service not installed"
-		p.TrayTooltip = "Rescale Interlink: Service not installed"
-		p.AllowedActions = append(p.AllowedActions, ActionInstallService, ActionConfigure, ActionOpenGUI)
-		p.CLIStatusLine = "Status: service not installed"
-		return p
-	case InstallationStopped:
-		p.GUILongForm = "Windows Service installed but stopped. Click Start Service."
-		p.TrayStatusLine = "Service stopped"
-		p.TrayTooltip = "Rescale Interlink: Service installed but not running"
-		p.AllowedActions = append(p.AllowedActions, ActionStartService, ActionUninstallService, ActionOpenGUI)
-		p.CLIStatusLine = "Status: service stopped"
-		return p
 	case InstallationStarting:
 		p.GUILongForm = "Service starting..."
 		p.TrayStatusLine = "Service starting"
@@ -429,20 +464,20 @@ func (s State) Presentation() Presentation {
 		return p
 	}
 
-	// Either InstallationRunning (Windows service mode) or
-	// InstallationSubprocessOnly (macOS/Linux, or Windows portable/subprocess).
+	// The user's own daemon, or a service from an earlier version that is
+	// still running.
 	switch s.PerUser {
 	case PerUserNotConfigured:
-		p.GUILongForm = "Service running. You are not set up for auto-download. Click Configure to enable for your account."
+		p.GUILongForm = "You are not set up for auto-download. Click Configure to enable it for your account."
 		p.TrayStatusLine = "Setup required"
 		p.TrayTooltip = "Rescale Interlink: Configure to enable auto-download for this user"
 		p.AllowedActions = append(p.AllowedActions, ActionConfigure, ActionOpenGUI)
 		p.CLIStatusLine = "Status: not configured"
 		return p
 	case PerUserPending:
-		p.GUILongForm = "Activating... the service is picking up your settings. This usually takes a few seconds."
+		p.GUILongForm = "Activating... auto-download is picking up your settings. This usually takes a few seconds."
 		p.TrayStatusLine = "Activating..."
-		p.TrayTooltip = "Rescale Interlink: Activating — waiting for the service to register this user"
+		p.TrayTooltip = "Rescale Interlink: Activating — waiting for auto-download to pick up your settings"
 		p.AllowedActions = append(p.AllowedActions, ActionOpenGUI, ActionRetry)
 		p.CLIStatusLine = "Status: activating"
 		return p

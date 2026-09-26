@@ -20,34 +20,29 @@ func warnLegacyAPIKeyOnce() {
 }
 
 // ResolveAPIKey returns an API key by checking multiple sources in priority order.
-// This provides consistent API key resolution across CLI, GUI, and auto-download service.
+// This provides consistent API key resolution across CLI, GUI, and auto-download.
 //
 // Priority (highest to lowest):
 //  1. Provided apiKey parameter (if non-empty) - e.g., from --api-key flag
 //  2. Per-user token file (when userProfilePath is provided)
-//  3. apiconfig INI file (for auto-download service compatibility)
+//  3. apiconfig INI file (older versions stored the key there)
 //  4. Default token file (~/.config/rescale/token) - created by 'config init' or GUI
 //  5. RESCALE_API_KEY environment variable
-//
-// In service mode (serviceMode=true), steps 4-5 are skipped to prevent the Windows
-// service from falling back to SYSTEM-level credentials, which would violate per-user
-// isolation. Only per-user sources (steps 1-3) are checked.
 //
 // Parameters:
 //   - apiKey: Explicitly provided API key (e.g., from command line flag)
 //   - userProfilePath: User's profile directory for loading per-user token and apiconfig
 //     (Windows: C:\Users\username, Unix: /home/username)
-//     If empty, per-user token and apiconfig checks are skipped (subprocess mode).
-//   - serviceMode: When true, truncates fallback after per-user sources (steps 1-3).
+//     If empty, per-user token and apiconfig checks are skipped.
 //
 // Returns empty string if no API key found in any source.
-func ResolveAPIKey(apiKey string, userProfilePath string, serviceMode bool) string {
+func ResolveAPIKey(apiKey string, userProfilePath string) string {
 	// 1. If explicitly provided, use it (highest priority)
 	if apiKey != "" {
 		return apiKey
 	}
 
-	// 2. Per-user token file (for service mode where default path resolves to SYSTEM)
+	// 2. Per-user token file
 	if userProfilePath != "" {
 		userTokenPath := GetUserTokenPath(userProfilePath)
 		if key, err := ReadTokenFile(userTokenPath); err == nil && key != "" {
@@ -55,19 +50,13 @@ func ResolveAPIKey(apiKey string, userProfilePath string, serviceMode bool) stri
 		}
 	}
 
-	// 3. Try apiconfig INI file (for auto-download service compatibility)
+	// 3. Try apiconfig INI file
 	if userProfilePath != "" {
 		apiconfigPath := APIConfigPathForUser(userProfilePath)
 		if cfg, err := LoadAPIConfig(apiconfigPath); err == nil && cfg.APIKey != "" {
 			warnLegacyAPIKeyOnce()
 			return cfg.APIKey
 		}
-	}
-
-	// In service mode, stop here — do not fall through to default token file or env var,
-	// which resolve to SYSTEM credentials on Windows services.
-	if serviceMode {
-		return ""
 	}
 
 	// 4. Try default token file (~/.config/rescale/token)
@@ -97,74 +86,12 @@ func ResolveAPIKeyForCurrentUser(apiKey string) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		// Fall back to checking without apiconfig
-		return ResolveAPIKey(apiKey, "", false)
+		return ResolveAPIKey(apiKey, "")
 	}
-	return ResolveAPIKey(apiKey, homeDir, false)
-}
-
-// ResolveAPIKeySource returns the API key and its source for debugging/logging.
-// This is useful for CLI --verbose mode to show where the API key came from.
-//
-// Priority matches ResolveAPIKey:
-//  1. flag (explicitly provided apiKey parameter)
-//  2. user-token-file (per-user token, when userProfilePath is provided)
-//  3. apiconfig (INI file, when userProfilePath is provided)
-//  4. token-file (default token path) — skipped in service mode
-//  5. environment (RESCALE_API_KEY env var) — skipped in service mode
-//
-// In service mode (serviceMode=true), steps 4-5 are skipped to prevent the Windows
-// service from falling back to SYSTEM-level credentials. Only per-user sources
-// (steps 1-3) are checked.
-//
-// Returns:
-//   - apiKey: The resolved API key (empty if not found)
-//   - source: Description of where the key was found
-//     "flag", "user-token-file", "apiconfig", "token-file", "environment", or "" if not found
-func ResolveAPIKeySource(apiKey string, userProfilePath string, serviceMode bool) (string, string) {
-	// 1. If explicitly provided, use it
-	if apiKey != "" {
-		return apiKey, "flag"
-	}
-
-	// 2. Per-user token file (for service mode where default path resolves to SYSTEM)
-	if userProfilePath != "" {
-		userTokenPath := GetUserTokenPath(userProfilePath)
-		if key, err := ReadTokenFile(userTokenPath); err == nil && key != "" {
-			return key, "user-token-file"
-		}
-	}
-
-	// 3. Try apiconfig INI file
-	if userProfilePath != "" {
-		apiconfigPath := APIConfigPathForUser(userProfilePath)
-		if cfg, err := LoadAPIConfig(apiconfigPath); err == nil && cfg.APIKey != "" {
-			warnLegacyAPIKeyOnce()
-			return cfg.APIKey, "apiconfig"
-		}
-	}
-
-	// In service mode, stop here — do not fall through to SYSTEM-level sources.
-	if serviceMode {
-		return "", ""
-	}
-
-	// 4. Try default token file
-	if tokenPath := GetDefaultTokenPath(); tokenPath != "" {
-		if key, err := ReadTokenFile(tokenPath); err == nil && key != "" {
-			return key, "token-file"
-		}
-	}
-
-	// 5. Environment variable
-	if envKey := os.Getenv("RESCALE_API_KEY"); envKey != "" {
-		return envKey, "environment"
-	}
-
-	return "", ""
+	return ResolveAPIKey(apiKey, homeDir)
 }
 
 // GetUserTokenPath returns the token file path for a specific user profile.
-// Used by the Windows service to find per-user token files.
 //
 //   - Windows: <userProfilePath>\AppData\Local\Rescale\Interlink\token. Falls
 //     back to the Roaming location during the Plan 2 transition window.

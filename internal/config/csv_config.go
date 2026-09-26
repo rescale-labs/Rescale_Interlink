@@ -623,34 +623,6 @@ func GetDefaultConfigPath() string {
 	return newPath
 }
 
-// GetConfigPathForProfile returns the config.csv path for a specific user
-// profile. Used by the Windows service to load per-user config.csv for
-// correct APIBaseURL and proxy settings instead of hardcoding
-// DefaultPlatformURL.
-//
-//   - Windows: <userProfilePath>\AppData\Local\Rescale\Interlink\config.csv.
-//     Falls back to the Roaming location for the transition window when
-//     Local is missing but Roaming exists — so the per-profile migration
-//     (see migrations.go) can run before the first read.
-//   - Unix: <userProfilePath>/.config/rescale/config.csv.
-func GetConfigPathForProfile(userProfilePath string) string {
-	if userProfilePath == "" {
-		return ""
-	}
-	if runtime.GOOS == "windows" {
-		newPath := filepath.Join(userProfilePath, "AppData", "Local", "Rescale", "Interlink", "config.csv")
-		if _, err := os.Stat(newPath); err == nil {
-			return newPath
-		}
-		oldPath := filepath.Join(userProfilePath, "AppData", "Roaming", "Rescale", "Interlink", "config.csv")
-		if _, err := os.Stat(oldPath); err == nil {
-			return oldPath
-		}
-		return newPath
-	}
-	return filepath.Join(userProfilePath, ".config", ConfigDir, "config.csv")
-}
-
 // GetDefaultTokenPath returns the default token file path
 // - Windows: %APPDATA%\Rescale\Interlink\token (standard Windows location)
 // - Unix: ~/.config/rescale/token (XDG standard)

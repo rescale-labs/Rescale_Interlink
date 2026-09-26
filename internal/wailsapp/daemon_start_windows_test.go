@@ -32,6 +32,21 @@ func TestStartDaemonSaysWhyItCannotStart(t *testing.T) {
 	if _, err := os.Stat(config.LogDirectory()); !os.IsNotExist(err) {
 		t.Errorf("the refused start wrote diagnostics in %s", config.LogDirectory())
 	}
+	// Only an omitted key means the default; past the checks, Start finds no
+	// rescale-int.exe beside the test binary.
+	for section, want := range map[string]string{
+		"max_concurrent = 0":        "max_concurrent in daemon.conf must be between 1 and 20, got 0",
+		"max_concurrent = -1":       "max_concurrent in daemon.conf must be between 1 and 20, got -1",
+		"download_folder = rel":     `download_folder in daemon.conf must be an absolute path, got "rel"`,
+		"poll_interval_minutes = 5": "CLI not found",
+	} {
+		if err := os.WriteFile(conf, []byte("[daemon]\r\n"+section+"\r\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&App{}).startDaemonSubprocess(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("startDaemonSubprocess with %s: %v, want an error containing %q", section, err, want)
+		}
+	}
 
 	for stderr, want := range map[string]string{
 		"Error: " + want + "\r\nUsage:\r\n  rescale-int daemon run [flags]\r\n\r\nFlags:\r\n  -v, --verbose   verbose\r\n": "Error: " + want,

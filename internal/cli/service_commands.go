@@ -2,77 +2,61 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 
 	"github.com/spf13/cobra"
 
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/service"
 )
+
+// errWindowsOnly refuses the service commands where there is no service.
+var errWindowsOnly = reporting.UsageError(errors.New("service management is only supported on Windows"))
 
 // newServiceCmd creates the 'service' command group for Windows service management.
 func newServiceCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
-		Short: "Windows service management commands",
-		Long: `Manage the Rescale Interlink Windows service.
+		Short: "Remove or check a Windows service installed by an earlier version",
+		Long: `Remove, stop or check a Rescale Interlink Windows service installed by an
+earlier version.
 
-The service automatically downloads output files from completed Rescale jobs
-in the background. It runs as a Windows service and can be started automatically
-at system boot.
+Multi-user service mode is not available in this version. Auto-download runs
+in each user's session from the Interlink app. A service installed by an
+earlier version removes itself the next time Windows starts it; 'service
+uninstall' removes it now.
 
 Available commands:
-  install    Install the service
-  uninstall  Uninstall the service
-  start      Start the service
+  uninstall  Remove the service
   stop       Stop the service
   status     Show service status
 
-Note: Service management requires administrator privileges.`,
+Note: Removing or stopping the service requires administrator privileges.`,
 	}
 
-	cmd.AddCommand(newServiceInstallCmd())
 	cmd.AddCommand(newServiceUninstallCmd())
-	cmd.AddCommand(newServiceStartCmd())
 	cmd.AddCommand(newServiceStopCmd())
 	cmd.AddCommand(newServiceStatusCmd())
-	cmd.AddCommand(newServiceInstallAndStartCmd())
+	for _, use := range []string{"install", "install-and-start", "start"} {
+		cmd.AddCommand(newRetiredServiceCmd(use))
+	}
 
 	return cmd
 }
 
-// newServiceInstallCmd creates the 'service install' command.
-func newServiceInstallCmd() *cobra.Command {
-	var configPath string
-
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install the Windows service",
-		Long: `Install the Rescale Interlink auto-download service.
-
-The service will be configured to start automatically at system boot.
-Requires administrator privileges.
-
-Example:
-  rescale-int service install
-  rescale-int service install --config C:\path\to\config.csv`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS != "windows" {
-				return fmt.Errorf("service installation is only supported on Windows")
-			}
-
-			execPath, err := service.GetExecutablePath()
-			if err != nil {
-				return fmt.Errorf("failed to get executable path: %w", err)
-			}
-
-			return service.Install(execPath, configPath)
+// newRetiredServiceCmd makes a command that used to install or start the
+// service. It stays so that a script calling it learns why nothing happens.
+func newRetiredServiceCmd(use string) *cobra.Command {
+	return &cobra.Command{
+		Use:    use,
+		Short:  "Not available in this version",
+		Hidden: true,
+		RunE: func(*cobra.Command, []string) error {
+			return reporting.UsageError(errors.New(service.ModeUnavailable))
 		},
 	}
-
-	cmd.Flags().StringVar(&configPath, "config", "", "Path to configuration file (optional)")
-
-	return cmd
 }
 
 // newServiceUninstallCmd creates the 'service uninstall' command.
@@ -89,32 +73,10 @@ Example:
   rescale-int service uninstall`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runtime.GOOS != "windows" {
-				return fmt.Errorf("service management is only supported on Windows")
+				return errWindowsOnly
 			}
 
 			return service.Uninstall()
-		},
-	}
-}
-
-// newServiceStartCmd creates the 'service start' command.
-func newServiceStartCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "start",
-		Short: "Start the Windows service",
-		Long: `Start the Rescale Interlink auto-download service.
-
-The service must be installed first using 'service install'.
-Requires administrator privileges.
-
-Example:
-  rescale-int service start`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS != "windows" {
-				return fmt.Errorf("service management is only supported on Windows")
-			}
-
-			return service.StartService()
 		},
 	}
 }
@@ -130,58 +92,10 @@ Example:
   rescale-int service stop`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runtime.GOOS != "windows" {
-				return fmt.Errorf("service management is only supported on Windows")
+				return errWindowsOnly
 			}
 
 			return service.StopService()
-		},
-	}
-}
-
-// newServiceInstallAndStartCmd creates the 'service install-and-start' command.
-func newServiceInstallAndStartCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "install-and-start",
-		Short: "Install and start the Windows service (idempotent)",
-		Long: `Install (if not already installed) and start the Rescale Interlink service.
-
-This is an idempotent operation: if the service is already installed, the install
-step is skipped. If the service is already running, the start step is skipped.
-Requires administrator privileges.
-
-Example:
-  rescale-int service install-and-start`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if runtime.GOOS != "windows" {
-				return fmt.Errorf("service management is only supported on Windows")
-			}
-
-			// Idempotent install: skip if already installed
-			if !service.IsInstalled() {
-				execPath, err := service.GetExecutablePath()
-				if err != nil {
-					return fmt.Errorf("failed to get executable path: %w", err)
-				}
-				if err := service.Install(execPath, ""); err != nil {
-					return fmt.Errorf("install failed: %w", err)
-				}
-				fmt.Println("Service installed successfully")
-			} else {
-				fmt.Println("Service already installed, skipping install")
-			}
-
-			// Idempotent start: skip if already running
-			status, err := service.QueryStatus()
-			if err == nil && status == service.StatusRunning {
-				fmt.Println("Service already running")
-				return nil
-			}
-
-			if err := service.StartService(); err != nil {
-				return fmt.Errorf("start failed: %w", err)
-			}
-			fmt.Println("Service started successfully")
-			return nil
 		},
 	}
 }
@@ -197,7 +111,7 @@ Example:
   rescale-int service status`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runtime.GOOS != "windows" {
-				return fmt.Errorf("service management is only supported on Windows")
+				return errWindowsOnly
 			}
 
 			status, err := service.QueryStatus()
@@ -205,8 +119,12 @@ Example:
 				return fmt.Errorf("failed to query service status: %w", err)
 			}
 
+			state := status.String()
+			if !service.IsInstalled() {
+				state = "Not installed"
+			}
 			fmt.Printf("Service: %s\n", service.ServiceDisplayName)
-			fmt.Printf("Status:  %s\n", status.String())
+			fmt.Printf("Status:  %s\n", state)
 
 			return nil
 		},

@@ -13,18 +13,12 @@ type ErrorCode string
 const (
 	// CodeNoAPIKey indicates no Rescale API key is available to the daemon.
 	// Common cause: the user entered a key in the GUI but the token file was
-	// not persisted before the service (which runs as SYSTEM) started polling.
+	// not persisted before the daemon started polling.
 	CodeNoAPIKey ErrorCode = "no_api_key"
 
 	// CodeDownloadFolderInaccessible indicates the configured download folder
-	// cannot be reached from the consuming process's identity. Typical on
-	// Windows when the folder is a mapped drive letter that exists in the
-	// user's session but not in the Windows Service SYSTEM session.
+	// cannot be created, reached or written by the process that will use it.
 	CodeDownloadFolderInaccessible ErrorCode = "download_folder_inaccessible"
-
-	// CodeServiceDisabledInSCM indicates the Windows Service is installed but
-	// has startup type Disabled. Requires admin intervention in Services.msc.
-	CodeServiceDisabledInSCM ErrorCode = "service_disabled_in_scm"
 
 	// CodeIPCNotResponding indicates the daemon's IPC endpoint exists but is
 	// not responding to requests within the client timeout. Typically a
@@ -35,26 +29,18 @@ const (
 	// subprocess daemon cannot be found in the expected location.
 	CodeCLINotFound ErrorCode = "cli_not_found"
 
-	// CodeServiceAlreadyRunning indicates a service or subprocess is already
-	// running; starting another would conflict.
+	// CodeServiceAlreadyRunning indicates a daemon is already running;
+	// starting another would conflict.
 	CodeServiceAlreadyRunning ErrorCode = "service_already_running"
 
 	// CodePermissionDenied indicates the operation requires elevated privileges
 	// (typically administrator on Windows) that the caller does not have.
 	CodePermissionDenied ErrorCode = "permission_denied"
 
-	// CodeServiceNotInstalled indicates the Windows Service is not installed
-	// with SCM.
-	CodeServiceNotInstalled ErrorCode = "service_not_installed"
-
-	// CodeServiceStopped indicates the Windows Service is installed but in the
-	// Stopped state.
-	CodeServiceStopped ErrorCode = "service_stopped"
-
 	// CodeTransientTimeout indicates a transient pending state that has
 	// exceeded the 10-second timeout and is now treated as an error. Surfaces
-	// when the service fails to register a user quickly, or when IPC is
-	// unavailable despite the service appearing to run.
+	// when the daemon does not come up quickly, or when IPC is unavailable
+	// despite the daemon appearing to run.
 	CodeTransientTimeout ErrorCode = "transient_timeout"
 
 	// CodeConfigInvalid indicates the user's daemon configuration is missing
@@ -92,15 +78,12 @@ const (
 // stable identifier.
 var CanonicalText = map[ErrorCode]string{
 	CodeNoAPIKey:                     "No API key configured",
-	CodeDownloadFolderInaccessible:   "Download folder inaccessible from service context",
-	CodeServiceDisabledInSCM:         "Service is installed but disabled in SCM",
-	CodeIPCNotResponding:             "IPC pipe exists but not responding",
+	CodeDownloadFolderInaccessible:   "Download folder is not accessible",
+	CodeIPCNotResponding:             "Auto-download is not responding",
 	CodeCLINotFound:                  "Interlink CLI not found",
-	CodeServiceAlreadyRunning:        "Service is already running",
+	CodeServiceAlreadyRunning:        "Auto-download is already running",
 	CodePermissionDenied:             "Permission denied — run as administrator",
-	CodeServiceNotInstalled:          "Windows Service is not installed",
-	CodeServiceStopped:               "Windows Service installed but stopped",
-	CodeTransientTimeout:             "Service is taking longer than expected to respond",
+	CodeTransientTimeout:             "Auto-download is taking longer than expected to respond",
 	CodeConfigInvalid:                "Configuration is invalid",
 	CodeWorkspaceMissingField:        "Workspace is missing the 'Auto Download' custom field",
 	CodeWorkspaceFieldWrongType:      "Workspace 'Auto Download' custom field has the wrong type",
@@ -113,15 +96,12 @@ var CanonicalText = map[ErrorCode]string{
 // Not every code needs one — some errors speak for themselves. Returning an
 // empty string means "no hint needed."
 var hintText = map[ErrorCode]string{
-	CodeNoAPIKey:                     "Set your API key in Connection settings and run Test Connection.",
-	CodeDownloadFolderInaccessible:   "Use a local path (e.g. C:\\Users\\...) or a UNC path (\\\\server\\share). Mapped drive letters may not be visible to the service.",
-	CodeServiceDisabledInSCM:         "An administrator must change the service's startup type in Services.msc.",
-	CodeIPCNotResponding:             "Restart the service (Admin) from the tray or GUI.",
+	CodeNoAPIKey:                     "Set your API key in API Configuration and run Test Connection.",
+	CodeDownloadFolderInaccessible:   "Choose a folder you can create and write to.",
+	CodeIPCNotResponding:             "Run 'rescale-int daemon stop', which stops the daemon or says how to end its process, then start auto-download from the Interlink app.",
 	CodeCLINotFound:                  "Reinstall Interlink or verify rescale-int.exe is next to the GUI binary.",
 	CodeServiceAlreadyRunning:        "",
 	CodePermissionDenied:             "Re-run the action and approve the UAC prompt, or use an administrator account.",
-	CodeServiceNotInstalled:          "Install the service from the Setup tab (UAC required).",
-	CodeServiceStopped:               "Start the service from the Setup tab (UAC required).",
 	CodeTransientTimeout:             "If this persists, click Retry, or Open Logs to see the daemon's startup log.",
 	CodeConfigInvalid:                "Review the Setup tab for fields highlighted as invalid.",
 	CodeWorkspaceMissingField:        "A workspace administrator must add an 'Auto Download' custom field (select-list with Enabled/Disabled/Conditional options) in Rescale workspace settings.",

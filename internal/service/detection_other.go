@@ -7,6 +7,7 @@ package service
 // ServiceDetectionResult describes the current service state.
 // On non-Windows platforms, this is a stub.
 type ServiceDetectionResult struct {
+	Installed     bool
 	ServiceMode   bool
 	SubprocessPID int
 	PipeInUse     bool

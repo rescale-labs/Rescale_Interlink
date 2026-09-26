@@ -51,11 +51,9 @@ type PathValidationResult struct {
 // ValidateWritablePath checks that path is reachable and writable from the
 // identity that will consume it.
 //
-// On Windows the strict Service-SYSTEM check runs regardless of the supplied
-// consumer, because a user may install the service after configuring the
-// folder — the current runtime mode is not a reliable gate. On macOS and
-// Linux, the consumer argument is honored (there is no mapped-drive concept
-// to worry about, so the distinction is only relevant for future extensions).
+// On Windows a path the service would read gets the strict SYSTEM check; any
+// other path, like one the user's own daemon uses, is probed as the user, so a
+// mapped drive the user can see is accepted. Elsewhere every path is probed.
 //
 // Empty paths return Reachable=true; the caller decides whether empty is
 // acceptable for its context.
@@ -72,14 +70,16 @@ func ValidateWritablePath(path string, consumer PathConsumer) PathValidationResu
 		}
 	}
 
-	// Windows always runs the strict service check; see function doc.
-	if runtime.GOOS == "windows" {
-		_ = consumer // acknowledge unused arg on Windows
-		return validateWindowsStrict(resolved)
+	if onWindows && consumer == ConsumerWindowsService {
+		return serviceCheck(resolved)
 	}
 
 	return probeWritable(resolved)
 }
+
+// onWindows and serviceCheck are variables so a test can take the Windows
+// branch on any system.
+var onWindows, serviceCheck = runtime.GOOS == "windows", validateWindowsStrict
 
 // The drive types GetDriveType reports for local volumes and network drives,
 // mirrored as plain numbers because golang.org/x/sys/windows builds on Windows

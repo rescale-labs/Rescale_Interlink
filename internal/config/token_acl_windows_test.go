@@ -100,18 +100,15 @@ func TestMigrate_AppliesACLOnCopiedToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Drive the per-profile path directly; use the current process SID so
-	// GetNamedSecurityInfo returns three ACEs with one recognizable owner.
-	sid, err := currentUserSID()
-	if err != nil || sid == "" {
+	// The migration applies the current process SID, so GetNamedSecurityInfo
+	// returns three ACEs with one recognizable owner.
+	if sid, err := currentUserSID(); err != nil || sid == "" {
 		t.Skipf("could not capture current user SID: %v", err)
 	}
+	t.Setenv("APPDATA", filepath.Join(profileRoot, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(profileRoot, "AppData", "Local"))
 
-	migratePerProfileWindowsCredentials(nil, ProfileMigrationTarget{
-		Username:    "test",
-		SID:         sid,
-		ProfilePath: profileRoot,
-	})
+	migrateCurrentUserWindowsCredentials(nil)
 
 	newToken := filepath.Join(profileRoot, "AppData", "Local", "Rescale", "Interlink", "token")
 	if _, err := os.Stat(newToken); err != nil {

@@ -36,13 +36,11 @@ import {
   GetFileLoggingSettings,
   SetFileLoggingEnabled,
   GetServiceStatus,
-  StartServiceElevated,
-  StopServiceElevated,
+  UninstallServiceElevated,
   TriggerProfileRescan,
   ReloadDaemonConfig,
   ValidateAutoDownloadPreFlight,
   OpenLogsDirectory,
-  InstallAndStartServiceElevated,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
 import {
@@ -137,10 +135,11 @@ export function SetupTab() {
   // transient-pending timeout. The frontend just renders whatever userState
   // + userStateDetail the DTO says.
 
-  // Windows SCM service status (separate from IPC-based daemon status)
+  // A Windows Service installed by an earlier version (separate from the
+  // IPC-based daemon status); all it can do now is be removed.
   const [serviceStatus, setServiceStatus] = useState<wailsapp.ServiceStatusDTO | null>(null);
   const [isServiceLoading, setIsServiceLoading] = useState(false);
-  const [showUACConfirmDialog, setShowUACConfirmDialog] = useState<'start' | 'stop' | null>(null);
+  const [showUACConfirmDialog, setShowUACConfirmDialog] = useState(false);
 
   const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
   const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
@@ -593,7 +592,7 @@ export function SetupTab() {
         } catch {
           // Daemon may not be running yet — that's fine for config-first workflow
           try { await TriggerProfileRescan(); } catch { /* silent */ }
-          setStatusMessage('Auto-download enabled. Service will detect within 5 minutes.');
+          setStatusMessage('Auto-download enabled.');
         }
       } else {
         setStatusMessage('Auto-download disabled. You will no longer receive automatic job downloads.');
@@ -620,7 +619,7 @@ export function SetupTab() {
       return 'Enable auto-download first';
     }
     if (daemonStatus?.userState === 'pending') {
-      return 'Waiting for service to detect your configuration...';
+      return 'Waiting for auto-download to pick up your settings...';
     }
     return '';
   };
@@ -654,65 +653,23 @@ export function SetupTab() {
     setIsServiceLoading(false);
   };
 
-  const handleStartServiceElevated = async () => {
+  const handleUninstallServiceElevated = async () => {
     try {
       setIsServiceLoading(true);
-      setShowUACConfirmDialog(null);
-      setStatusMessage('Starting Windows Service (UAC prompt will appear)...');
+      setShowUACConfirmDialog(false);
+      setStatusMessage('Removing the old Windows Service (UAC prompt will appear)...');
 
-      const result = await StartServiceElevated();
+      const result = await UninstallServiceElevated();
       if (result.success) {
-        setStatusMessage('Service start command executed. Waiting for service to start...');
-        await waitForService('Start', (status) => status.running,
-          'Windows Service started successfully', 'Service may still be starting. Check status in a moment.');
+        setStatusMessage('Remove command executed. Waiting for the service to be removed...');
+        await waitForService('Remove', (status) => !status.installed,
+          'Old Windows Service removed', 'The service may still be being removed. Check status in a moment.');
       } else {
-        setStatusMessage(`Failed to start service: ${result.error}`);
+        setStatusMessage(`Failed to remove service: ${result.error}`);
         setIsServiceLoading(false);
       }
     } catch (err) {
-      setStatusMessage(`Failed to start service: ${err}`);
-      setIsServiceLoading(false);
-    }
-  };
-
-  const handleInstallAndStartServiceElevated = async () => {
-    try {
-      setIsServiceLoading(true);
-      setShowUACConfirmDialog(null);
-      setStatusMessage('Installing and starting Windows Service (UAC prompt will appear)...');
-
-      const result = await InstallAndStartServiceElevated();
-      if (result.success) {
-        setStatusMessage('Install & start command executed. Waiting for service...');
-        await waitForService('Install and start', (status) => status.running,
-          'Windows Service installed and started successfully', 'Service may still be starting. Check status in a moment.');
-      } else {
-        setStatusMessage(`Failed to install and start service: ${result.error}`);
-        setIsServiceLoading(false);
-      }
-    } catch (err) {
-      setStatusMessage(`Failed to install and start service: ${err}`);
-      setIsServiceLoading(false);
-    }
-  };
-
-  const handleStopServiceElevated = async () => {
-    try {
-      setIsServiceLoading(true);
-      setShowUACConfirmDialog(null);
-      setStatusMessage('Stopping Windows Service (UAC prompt will appear)...');
-
-      const result = await StopServiceElevated();
-      if (result.success) {
-        setStatusMessage('Service stop command executed. Waiting for service to stop...');
-        await waitForService('Stop', (status) => !status.running,
-          'Windows Service stopped successfully', 'Service may still be stopping. Check status in a moment.');
-      } else {
-        setStatusMessage(`Failed to stop service: ${result.error}`);
-        setIsServiceLoading(false);
-      }
-    } catch (err) {
-      setStatusMessage(`Failed to stop service: ${err}`);
+      setStatusMessage(`Failed to remove service: ${err}`);
       setIsServiceLoading(false);
     }
   };
@@ -1344,74 +1301,40 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* Service Control: show when Windows Service is installed, SCM blocked + IPC service mode, or status is available */}
-            {(serviceStatus?.installed || (serviceStatus?.scmBlocked && daemonStatus?.serviceMode) || (serviceStatus && !serviceStatus.installed && serviceStatus.status !== 'Not Available (Windows only)')) && (
+            {/* A Windows Service installed by an earlier version removes itself when it next starts; offer to remove it now */}
+            {serviceStatus?.installed && (
               <div className="border-t border-gray-200 pt-4 mt-4">
                 <div className="flex items-center gap-2 mb-3">
-                  <h4 className="text-sm font-medium text-gray-700">Service Control</h4>
+                  <h4 className="text-sm font-medium text-gray-700">Windows Service</h4>
                   <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded flex items-center gap-1">
                     <ShieldCheckIcon className="w-3 h-3" />
                     Admin
                   </span>
                 </div>
-                {serviceStatus?.scmBlocked && (
-                  <div className="mb-3 p-2 bg-amber-50 rounded text-xs text-amber-700">
-                    SCM status unavailable (access denied). Run as administrator for full access.
-                  </div>
-                )}
-                <div className={clsx(
-                  'p-4 rounded-lg',
-                  serviceStatus?.running ? 'bg-green-50' : 'bg-gray-50'
-                )}>
+                <div className="p-4 rounded-lg bg-gray-50">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
                       <div className={clsx(
                         'w-3 h-3 rounded-full',
-                        serviceStatus?.running ? 'bg-green-500' : 'bg-gray-400'
+                        serviceStatus.running ? 'bg-green-500' : 'bg-gray-400'
                       )} />
-                      <div>
-                        <div className="font-medium text-gray-900">
-                          Status: {serviceStatus?.status || 'Unknown'}
-                        </div>
+                      <div className="font-medium text-gray-900">
+                        Status: {serviceStatus.status || 'Unknown'}
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      {!serviceStatus?.installed && !serviceStatus?.running ? (
-                        <button
-                          onClick={() => setShowUACConfirmDialog('start')}
-                          disabled={isServiceLoading}
-                          className="btn-primary text-sm flex items-center gap-1"
-                          title="Install and start Windows Service (requires administrator privileges)"
-                        >
-                          <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Installing...' : 'Install & Start Service'}
-                        </button>
-                      ) : !serviceStatus?.running ? (
-                        <button
-                          onClick={() => setShowUACConfirmDialog('start')}
-                          disabled={isServiceLoading}
-                          className="btn-primary text-sm flex items-center gap-1"
-                          title="Start Windows Service (requires administrator privileges)"
-                        >
-                          <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Starting...' : 'Start Service'}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => setShowUACConfirmDialog('stop')}
-                          disabled={isServiceLoading}
-                          className="btn-secondary text-sm text-red-600 hover:text-red-700 flex items-center gap-1"
-                          title="Stop Windows Service (requires administrator privileges)"
-                        >
-                          <ShieldCheckIcon className="w-4 h-4" />
-                          {isServiceLoading ? 'Stopping...' : 'Stop Service (Admin)'}
-                        </button>
-                      )}
-                    </div>
+                    <button
+                      onClick={() => setShowUACConfirmDialog(true)}
+                      disabled={isServiceLoading}
+                      className="btn-secondary text-sm flex items-center gap-1"
+                      title="Remove the Windows Service installed by an earlier version (requires administrator privileges)"
+                    >
+                      <ShieldCheckIcon className="w-4 h-4" />
+                      {isServiceLoading ? 'Removing...' : 'Remove Old Service'}
+                    </button>
                   </div>
                 </div>
                 <p className="mt-2 text-xs text-gray-500">
-                  These actions require administrator privileges. A Windows security prompt (UAC) will appear.
+                  A Windows Service from an earlier version of Interlink is installed. Multi-user service mode is not available in this version, so the service removes itself the next time Windows starts it; Remove Old Service removes it now, with administrator permission (a Windows security prompt, UAC, will appear). Auto-download runs in your session, started below.
                 </p>
               </div>
             )}
@@ -1562,12 +1485,12 @@ export function SetupTab() {
                       <p className="text-sm font-medium text-red-800 flex items-center gap-2">
                         <XCircleIcon className="w-4 h-4" />
                         {daemonStatus?.errorCode === CodeNoAPIKey
-                          ? 'Service cannot find your API key'
+                          ? 'Auto-download cannot find your API key'
                           : daemonStatus?.userStateDetail || 'Error'}
                       </p>
                       <p className="text-xs text-red-700 mt-1">
                         {daemonStatus?.errorCode === CodeNoAPIKey
-                          ? 'Ensure Connection settings are saved and Test Connection succeeds.'
+                          ? 'Ensure API Configuration is saved and Test Connection succeeds.'
                           : daemonStatus?.errorCode === CodeTransientTimeout
                             ? 'If this persists, click Retry or Open Logs.'
                             : daemonStatus?.error || ''}
@@ -1660,15 +1583,15 @@ export function SetupTab() {
                 )}
 
                 <p className="mt-2 text-xs text-gray-500">
-                  These controls only affect your downloads. The service continues running for other users.
+                  These controls only affect your downloads.
                 </p>
               </div>
             )}
 
-            {/* Subprocess mode: Show start button when service not installed and not running */}
-            {!serviceStatus?.installed && !daemonStatus?.running && (
+            {/* Auto-download in the user's own session: start it when it is not running */}
+            {!daemonStatus?.running && (
               <div className="border-t border-gray-200 pt-4 mt-4">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
+                <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download Control</h4>
                 <div className="p-4 rounded-lg bg-gray-50">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -1688,23 +1611,23 @@ export function SetupTab() {
                           "btn-primary text-sm",
                           !daemonConfig?.enabled && "opacity-50 cursor-not-allowed"
                         )}
-                        title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download service'}
+                        title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download in your session'}
                       >
-                        {isDaemonLoading ? 'Starting...' : 'Start Service'}
+                        {isDaemonLoading ? 'Starting...' : 'Start Auto-Download'}
                       </button>
                     </div>
                   </div>
                 </div>
                 <p className="mt-2 text-xs text-gray-500">
-                  The auto-download service runs in the background and automatically downloads completed jobs.
+                  Auto-download runs in the background in your session and downloads completed jobs.
                 </p>
               </div>
             )}
 
-            {/* Subprocess mode: Show controls when running in subprocess mode (no Windows Service) */}
-            {!serviceStatus?.installed && daemonStatus?.running && (
+            {/* Auto-download in the user's own session: controls while it runs (not an earlier version's service) */}
+            {daemonStatus?.running && !daemonStatus?.serviceMode && (
               <div className="border-t border-gray-200 pt-4 mt-4">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Service Control</h4>
+                <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download Control</h4>
                 <div className={clsx(
                   'p-4 rounded-lg',
                   daemonStatus?.ipcConnected ? 'bg-green-50' : 'bg-yellow-50'
@@ -1760,7 +1683,7 @@ export function SetupTab() {
                             disabled={isDaemonLoading}
                             className="btn-secondary text-sm text-red-600 hover:text-red-700"
                           >
-                            {isDaemonLoading ? 'Stopping...' : 'Stop'}
+                            {isDaemonLoading ? 'Stopping...' : 'Stop Auto-Download'}
                           </button>
                         </>
                       ) : (
@@ -1812,7 +1735,7 @@ export function SetupTab() {
                   <div className="flex items-center gap-3 mb-4">
                     <ShieldCheckIcon className="w-8 h-8 text-amber-500" />
                     <h3 className="text-lg font-semibold text-gray-900">
-                      {showUACConfirmDialog === 'start' ? 'Start Service?' : 'Stop Service?'}
+                      Remove Old Service?
                     </h3>
                   </div>
                   <p className="text-gray-600 mb-6">
@@ -1820,15 +1743,13 @@ export function SetupTab() {
                   </p>
                   <div className="flex justify-end gap-3">
                     <button
-                      onClick={() => setShowUACConfirmDialog(null)}
+                      onClick={() => setShowUACConfirmDialog(false)}
                       className="btn-secondary"
                     >
                       Cancel
                     </button>
                     <button
-                      onClick={showUACConfirmDialog === 'start'
-                        ? (!serviceStatus?.installed ? handleInstallAndStartServiceElevated : handleStartServiceElevated)
-                        : handleStopServiceElevated}
+                      onClick={handleUninstallServiceElevated}
                       className="btn-primary flex items-center gap-2"
                     >
                       <ShieldCheckIcon className="w-4 h-4" />

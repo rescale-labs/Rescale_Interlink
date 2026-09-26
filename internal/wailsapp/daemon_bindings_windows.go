@@ -117,8 +117,8 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 }
 
 // StartDaemon starts the daemon as a subprocess (no admin required).
-// Uses subprocess mode by default instead of Windows Service (which requires admin).
-// Blocks subprocess spawn if Windows Service is already running.
+// It runs in the user's own session. Blocks the spawn while a service from an
+// earlier version is running.
 func (a *App) StartDaemon() error {
 	// Persist config + token before handing off to a different-identity process.
 	if err := a.ensureAllConfigPersisted(); err != nil {
@@ -128,7 +128,7 @@ func (a *App) StartDaemon() error {
 	// Pre-check API key availability
 	apiKey := config.ResolveAPIKeyForCurrentUser("")
 	if apiKey == "" {
-		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in Connection settings and test the connection first")
+		return fmt.Errorf("cannot start daemon: no API key configured. Set your API key in API Configuration and test the connection first")
 	}
 
 	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
@@ -206,11 +206,12 @@ func (a *App) startDaemonSubprocess() error {
 		a.logWarn("Daemon", fmt.Sprintf("Warning: failed to load daemon.conf: %v (using defaults)", err))
 		daemonCfg = config.NewDaemonConfig()
 	}
-	// The detached daemon would refuse it where no one sees why.
-	if n := daemonCfg.Daemon.MaxConcurrent; n > 0 {
-		if err := daemon.CheckMaxConcurrent(n, "max_concurrent in daemon.conf"); err != nil {
-			return err
-		}
+	// The detached daemon would refuse them where no one sees why.
+	if err := config.CheckDownloadFolder(daemonCfg.Daemon.DownloadFolder); err != nil {
+		return err
+	}
+	if err := daemon.CheckMaxConcurrent(daemonCfg.Daemon.MaxConcurrent, "max_concurrent in daemon.conf"); err != nil {
+		return err
 	}
 
 	// Find rescale-int.exe in the same directory as the GUI
@@ -410,9 +411,10 @@ func (a *App) ResumeDaemon() error {
 	return nil
 }
 
-// TriggerProfileRescan asks the daemon to re-enumerate user profiles.
-// Called after saving daemon.conf so the service picks up new users.
-// Uses existing TriggerScan("all") path.
+// TriggerProfileRescan asks the user's running daemon to poll for completed
+// jobs now. The daemon serves only this user and ignores the scope; the name
+// and the "all" scope are kept for the GUI binding and for a service from an
+// earlier version, which read "all" as every profile.
 func (a *App) TriggerProfileRescan() error {
 	client := ipc.NewClient()
 	client.SetTimeout(5 * time.Second)
@@ -423,12 +425,11 @@ func (a *App) TriggerProfileRescan() error {
 		return fmt.Errorf("daemon is not running or IPC not available")
 	}
 
-	// "all" triggers profile rescan across all users
 	if err := client.TriggerScan(ctx, "all"); err != nil {
-		return fmt.Errorf("failed to trigger profile rescan: %w", err)
+		return fmt.Errorf("failed to trigger a poll: %w", err)
 	}
 
-	a.logInfo("Daemon", "Profile rescan triggered")
+	a.logInfo("Daemon", "Poll for completed jobs triggered")
 	return nil
 }
 
@@ -457,10 +458,9 @@ func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	}
 
 	if data.Applied {
-		// Check if service mode — in service mode, TriggerRescan handles everything
+		// A service from an earlier version applies the reload itself.
 		status, statusErr := client.GetStatus(ctx)
 		if statusErr == nil && status.ServiceMode {
-			// Service mode: TriggerRescan already applied
 			result.Applied = true
 			a.logInfo("Daemon", "Config reload applied via service rescan")
 			return result
@@ -515,15 +515,6 @@ type DaemonConfigDTO struct {
 
 // SaveDaemonConfig saves daemon configuration to daemon.conf.
 func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
-	// Refuse save when the download folder is unreachable. On Windows the
-	// validator always applies the service-SYSTEM strictness regardless of
-	// current runtime mode — the user may install the service later, so
-	// the save-time gate must be conservative.
-	if result := pathutil.ValidateWritablePath(dto.DownloadFolder, pathutil.ConsumerWindowsService); !result.Reachable {
-		return fmt.Errorf("%s: %s",
-			ipc.CanonicalText[result.ErrorCode], result.Reason)
-	}
-
 	// Load existing config to preserve any fields not in DTO
 	cfg, err := config.LoadDaemonConfig("")
 	if err != nil {
@@ -548,9 +539,14 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 	cfg.Notifications.ShowDownloadComplete = dto.ShowDownloadComplete
 	cfg.Notifications.ShowDownloadFailed = dto.ShowDownloadFailed
 
-	// Validate before saving
+	// Validate before saving, and before the probe below creates the folder.
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	// Refuse a folder the user's own daemon could not create or write.
+	if result := pathutil.ValidateWritablePath(dto.DownloadFolder, pathutil.ConsumerCurrentUser); !result.Reachable {
+		return fmt.Errorf("%s: %s",
+			ipc.CanonicalText[result.ErrorCode], result.Reason)
 	}
 
 	if err := a.ensureAllConfigPersisted(); err != nil {
@@ -569,7 +565,7 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 		ctx := context.Background()
 		if client.IsServiceRunning(ctx) {
 			if err := a.TriggerProfileRescan(); err != nil {
-				a.logWarn("Daemon", fmt.Sprintf("Profile rescan after save failed (non-fatal): %v", err))
+				a.logWarn("Daemon", fmt.Sprintf("Poll after save failed (non-fatal): %v", err))
 			}
 		}
 	}
@@ -835,67 +831,20 @@ func (a *App) GetServiceStatus() ServiceStatusDTO {
 	}
 }
 
-// StartServiceElevated triggers UAC prompt to start Windows Service.
-// Returns immediately after UAC approved (poll GetServiceStatus to confirm).
-func (a *App) StartServiceElevated() ElevatedServiceResultDTO {
-	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
-	// The elevated "rescale-int service start" will report errors properly.
-	a.logInfo("Service", "Starting Windows Service with UAC elevation...")
+// UninstallServiceElevated triggers a UAC prompt to remove a Windows Service
+// installed by an earlier version. Returns once the command has run; poll
+// GetServiceStatus to confirm.
+func (a *App) UninstallServiceElevated() ElevatedServiceResultDTO {
+	a.logInfo("Service", "Removing Windows Service with UAC elevation...")
 
-	if err := a.ensureAllConfigPersisted(); err != nil {
-		return ElevatedServiceResultDTO{Success: false, Error: err.Error()}
-	}
-
-	// Trigger UAC elevation
-	if err := elevation.StartServiceElevated(); err != nil {
+	if err := elevation.UninstallServiceElevated(); err != nil {
 		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
 		return ElevatedServiceResultDTO{
 			Success: false,
-			Error:   fmt.Sprintf("Failed to start service: %v", err),
+			Error:   fmt.Sprintf("Failed to remove service: %v", err),
 		}
 	}
 
-	a.logInfo("Service", "UAC approved, service start command executed")
-	return ElevatedServiceResultDTO{Success: true}
-}
-
-// StopServiceElevated triggers UAC prompt to stop Windows Service.
-// Returns immediately after UAC approved (poll GetServiceStatus to confirm).
-func (a *App) StopServiceElevated() ElevatedServiceResultDTO {
-	// Don't gate on IsInstalled() - SCM may be inaccessible from non-admin context.
-	// The elevated "rescale-int service stop" will report errors properly.
-	a.logInfo("Service", "Stopping Windows Service with UAC elevation...")
-
-	// Trigger UAC elevation
-	if err := elevation.StopServiceElevated(); err != nil {
-		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to stop service: %v", err),
-		}
-	}
-
-	a.logInfo("Service", "UAC approved, service stop command executed")
-	return ElevatedServiceResultDTO{Success: true}
-}
-
-// InstallAndStartServiceElevated triggers UAC prompt to install + start Windows Service.
-// Combined operation -- single UAC prompt for both install and start.
-func (a *App) InstallAndStartServiceElevated() ElevatedServiceResultDTO {
-	a.logInfo("Service", "Installing and starting Windows Service with UAC elevation...")
-
-	if err := a.ensureAllConfigPersisted(); err != nil {
-		return ElevatedServiceResultDTO{Success: false, Error: err.Error()}
-	}
-
-	if err := elevation.InstallAndStartServiceElevated(); err != nil {
-		a.logError("Service", fmt.Sprintf("UAC elevation failed: %v", err))
-		return ElevatedServiceResultDTO{
-			Success: false,
-			Error:   fmt.Sprintf("Failed to install and start service: %v", err),
-		}
-	}
-
-	a.logInfo("Service", "UAC approved, install-and-start command executed")
+	a.logInfo("Service", "UAC approved, service uninstall command executed")
 	return ElevatedServiceResultDTO{Success: true}
 }

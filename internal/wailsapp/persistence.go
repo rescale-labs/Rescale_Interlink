@@ -9,9 +9,9 @@ import (
 )
 
 // ensureAllConfigPersisted writes the current in-memory Config and API key to
-// disk before handing off to a different-identity process (Windows Service
-// via UAC, or a subprocess daemon). In-memory state must reach disk before
-// the handoff — otherwise the consuming process reads stale or missing files.
+// disk before handing off to the subprocess daemon. In-memory state must
+// reach disk before the handoff — otherwise the daemon reads stale or missing
+// files.
 //
 // Idempotent: calling with unchanged state is a no-op. Secrets that should
 // never be persisted (currently the proxy password) are filtered out by
@@ -19,12 +19,11 @@ import (
 //
 // Token file handling:
 //   - In-memory key set → write to the token file iff it differs from disk.
-//   - In-memory key cleared → remove the token file. Otherwise a service
-//     booting later would resurrect the stale credential.
+//   - In-memory key cleared → remove the token file. Otherwise a daemon
+//     started later would resurrect the stale credential.
 //
 // Called before:
-//   - StartDaemon, StartServiceElevated, InstallAndStartServiceElevated,
-//     ReloadDaemonConfig (handoffs).
+//   - StartDaemon, ReloadDaemonConfig (handoffs).
 //   - SaveDaemonConfig (persistence is the point).
 func (a *App) ensureAllConfigPersisted() error {
 	if a.config == nil {

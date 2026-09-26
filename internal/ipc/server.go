@@ -1,7 +1,7 @@
 //go:build windows
 
-// Package ipc provides inter-process communication between the Windows service
-// and the GUI/tray application using named pipes.
+// Package ipc provides inter-process communication between the daemon and the
+// GUI/tray application using named pipes.
 package ipc
 
 import (
@@ -23,12 +23,12 @@ import (
 const maxIPCMessageSize = 1 << 20 // 1MB - bounds IPC message reads to prevent OOM
 
 var (
-	modkernel32                   = windows.NewLazySystemDLL("kernel32.dll")
+	modkernel32                     = windows.NewLazySystemDLL("kernel32.dll")
 	procGetNamedPipeClientProcessId = modkernel32.NewProc("GetNamedPipeClientProcessId")
 )
 
-// ServiceHandler defines the interface for service operations.
-// The Windows service implements this to handle IPC requests.
+// ServiceHandler defines the interface for daemon operations.
+// The daemon implements this to handle IPC requests.
 type ServiceHandler interface {
 	// GetStatus returns the current service status.
 	GetStatus() *StatusData
@@ -53,9 +53,8 @@ type ServiceHandler interface {
 	// Shutdown gracefully stops the daemon.
 	Shutdown() error
 
-	// GetRecentLogs returns recent log entries from the daemon.
-	// In service mode, userID routes to the correct per-user daemon.
-	// In subprocess mode, userID is ignored (only one user).
+	// GetRecentLogs returns recent log entries from the daemon, which serves
+	// one user, so userID is ignored.
 	GetRecentLogs(userID string, count int) []LogEntryData
 
 	// ReloadConfig requests daemon config reload.
@@ -88,11 +87,6 @@ type Server struct {
 	// ownerSID is the SID of the user who started the daemon.
 	// Used for per-user authorization to prevent cross-user daemon control.
 	ownerSID string
-
-	// serviceMode indicates multi-user Windows Service mode.
-	// In service mode, owner-based auth is relaxed because user-scoped
-	// routing handles isolation (each user can only affect their own daemon).
-	serviceMode bool
 }
 
 // NewServer creates a new IPC server.
@@ -113,17 +107,6 @@ func NewServer(handler ServiceHandler, logger *logging.Logger) *Server {
 		logger.Warn().Err(err).Msg("Failed to get owner SID; cross-user authorization disabled")
 	}
 
-	return s
-}
-
-// NewServiceModeServer creates a new IPC server for multi-user Windows Service mode.
-// In service mode, authorization is relaxed because user-scoped routing
-// handles isolation. Any authenticated user is allowed to connect and control
-// their own daemon via the handler's user-scoped operations.
-func NewServiceModeServer(handler ServiceHandler, logger *logging.Logger) *Server {
-	s := NewServer(handler, logger)
-	s.serviceMode = true
-	logger.Info().Msg("IPC server configured for multi-user service mode")
 	return s
 }
 
@@ -380,48 +363,19 @@ func getProcessOwnerSID(pid uint32) (string, error) {
 	return user.User.Sid.String(), nil
 }
 
-// resolveUserScope centralizes the spec §11.3 IPC authorization policy
-// so that every user-scoped handler inherits the same behavior:
-//
-//   - In service mode the returned userID is ALWAYS callerSID (req.UserID
-//     is ignored — a client cannot ask the service to act on another
-//     user's daemon).
-//   - In service mode, an empty callerSID fails-closed with an audit-log
-//     line and an error response. Silent scoping to userID="" violates
-//     §11.3 ("modify requests from an unidentifiable caller are rejected")
-//     and makes SID-based filtering of read responses meaningless.
-//   - When mustAuthorizeModify is true, authorizeModifyRequest gates the
-//     request regardless of mode (subprocess mode enforces owner match).
-//
-// In subprocess mode the returned userID is simply req.UserID — the
-// handler decides how to interpret an empty value. A handler that has a
-// sensible subprocess-mode default passes subprocessFallback; others
-// treat empty as an error after the helper returns.
-//
-// The policy is enforced over the full user-scoped message catalog by
-// TestServiceMode_UserScopedMessages_FailClosedWithoutCallerSID in
-// server_security_test.go — new handler types must be registered there
-// or the test will fail.
+// resolveUserScope returns the user a request is for, req.UserID or else
+// fallback, and when mustAuthorizeModify is true refuses a caller who is not
+// the daemon's owner.
 func (s *Server) resolveUserScope(
 	operation string,
 	callerSID string,
 	reqUserID string,
-	subprocessFallback string,
+	fallback string,
 	mustAuthorizeModify bool,
 ) (userID string, errResp *Response) {
-	if s.serviceMode {
-		if callerSID == "" {
-			s.logger.Info().
-				Str("operation", operation).
-				Msg("IPC request denied: could not identify caller")
-			return "", NewErrorResponse("unauthorized: could not identify caller")
-		}
-		userID = callerSID
-	} else {
-		userID = reqUserID
-		if userID == "" {
-			userID = subprocessFallback
-		}
+	userID = reqUserID
+	if userID == "" {
+		userID = fallback
 	}
 	if mustAuthorizeModify {
 		if err := s.authorizeModifyRequest(callerSID, operation); err != nil {
@@ -440,20 +394,6 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewStatusResponse(status)
 
 	case MsgGetUserList:
-		// In service mode, filter to caller's own entry only
-		if s.serviceMode {
-			if callerSID == "" {
-				return NewErrorResponse("unauthorized: could not identify caller")
-			}
-			allUsers := s.handler.GetUserList()
-			var filtered []UserStatus
-			for _, u := range allUsers {
-				if u.SID == callerSID {
-					filtered = append(filtered, u)
-				}
-			}
-			return NewUserListResponse(filtered)
-		}
 		users := s.handler.GetUserList()
 		return NewUserListResponse(users)
 
@@ -494,15 +434,6 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 		return NewOKResponse()
 
 	case MsgOpenLogs:
-		// OpenLogs has a service-scope bypass: a client may pass userID="service"
-		// to open the service's own logs in service mode. Any other value goes
-		// through the standard user-scope helper.
-		if s.serviceMode && req.UserID == "service" {
-			if err := s.handler.OpenLogs("service"); err != nil {
-				return NewErrorResponse(err.Error())
-			}
-			return NewOKResponse()
-		}
 		userID, errResp := s.resolveUserScope("OpenLogs", callerSID, req.UserID, "service", false)
 		if errResp != nil {
 			return errResp
@@ -594,24 +525,7 @@ func (s *Server) handleRequest(req *Request, callerSID string) *Response {
 
 // authorizeModifyRequest checks if the caller is authorized to perform a modify operation.
 // Only the daemon owner can execute commands that modify daemon state.
-// In service mode, authorization is relaxed — any authenticated user is allowed
-// because user-scoped routing in the handler ensures isolation.
 func (s *Server) authorizeModifyRequest(callerSID, operation string) error {
-	// In service mode, any authenticated user is allowed
-	// User-scoped routing in the handler handles isolation
-	if s.serviceMode {
-		if callerSID == "" {
-			// Use INFO level for visibility in Activity tab
-			s.logger.Info().
-				Str("operation", operation).
-				Msg("IPC request denied: could not identify caller")
-			return fmt.Errorf("unauthorized: could not identify caller")
-		}
-		// Allow - routing will scope to caller's daemon
-		return nil
-	}
-
-	// Subprocess mode: owner-based authorization
 	// Fail-closed for security — if owner SID was not captured at startup,
 	// deny modify operations rather than allowing all requests
 	if s.ownerSID == "" {

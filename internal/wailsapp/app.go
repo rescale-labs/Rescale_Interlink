@@ -246,7 +246,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	// Plan 2 path migrations (idempotent; current-user scope in GUI).
-	config.RunStartupMigrations(wailsLogger, config.ScopeCurrentUser, nil)
+	config.RunStartupMigrations(wailsLogger)
 
 	// Auto-launch tray companion if available (Windows only, no-op on other platforms)
 	go a.launchTrayIfNeeded()

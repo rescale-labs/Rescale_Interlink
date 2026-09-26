@@ -126,6 +126,27 @@ func TestValidateWritablePath(t *testing.T) {
 	}
 }
 
+// On Windows only a path the service would read gets the service's check: a
+// folder the user's own daemon uses is probed as the user, so a mapped drive
+// the user can see is accepted even when its UNC name cannot be found.
+func TestValidateWritablePathConsumers(t *testing.T) {
+	origWindows, origCheck := onWindows, serviceCheck
+	t.Cleanup(func() { onWindows, serviceCheck = origWindows, origCheck })
+	onWindows = true
+	var checked []string
+	serviceCheck = func(resolved string) PathValidationResult {
+		checked = append(checked, resolved)
+		return PathValidationResult{ResolvedPath: resolved, ErrorCode: ipc.CodeDownloadFolderInaccessible}
+	}
+	folder := t.TempDir()
+	if got := ValidateWritablePath(folder, ConsumerCurrentUser); !got.Reachable || len(checked) != 0 {
+		t.Errorf("current user: %+v, service check asked about %q; want probed as the user", got, checked)
+	}
+	if got := ValidateWritablePath(folder, ConsumerWindowsService); got.Reachable || len(checked) != 1 {
+		t.Errorf("Windows service: %+v, service check asked about %q; want the service check", got, checked)
+	}
+}
+
 // TestValidateWindowsStrict runs the Windows service check with fake drive-type
 // and WNet answers, so it runs on every platform. Only a network drive has to
 // resolve to a UNC path, and a drive Windows cannot type is refused unasked.

@@ -3,7 +3,11 @@
 package service
 
 import (
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc"
 )
 
 func TestDetectDaemon_ReturnTypes(t *testing.T) {
@@ -90,5 +94,38 @@ func TestIsInstalledWithReason_ReturnsReason(t *testing.T) {
 	// This is just logging for diagnostic purposes
 	if !installed {
 		t.Logf("Service not installed, reason: %s", reason)
+	}
+}
+
+// A service installed by an earlier version blocks a per-user daemon only while
+// it runs; installed and stopped, which is all it can be now, it blocks none.
+// Whether the service is installed is told apart from not being allowed to ask.
+func TestServiceStateDecidesBlocking(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", t.TempDir()) // no per-user daemon's PID file
+	orig := scmQuery
+	t.Cleanup(func() { scmQuery = orig })
+	for _, tc := range []struct {
+		name             string
+		state            svc.State
+		err              error
+		installed        bool
+		reason, blockMsg string
+	}{
+		{"not installed", 0, windows.ERROR_SERVICE_DOES_NOT_EXIST, false, "", ""},
+		{"installed and stopped", svc.Stopped, nil, true, "", ""},
+		{"installed and running", svc.Running, nil, true, "", "Windows Service is running"},
+		{"not allowed to ask", 0, windows.ERROR_ACCESS_DENIED, false, "denied", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scmQuery = func() (svc.State, error) { return tc.state, tc.err }
+			installed, reason := IsInstalledWithReason()
+			if installed != tc.installed || (tc.reason == "") != (reason == "") || !strings.Contains(reason, tc.reason) {
+				t.Errorf("IsInstalledWithReason = (%v, %q), want (%v, containing %q)", installed, reason, tc.installed, tc.reason)
+			}
+			blocked, why := ShouldBlockSubprocess()
+			if blocked != (tc.blockMsg != "") || !strings.Contains(why, tc.blockMsg) {
+				t.Errorf("ShouldBlockSubprocess = (%v, %q), want it to block only for %q", blocked, why, tc.blockMsg)
+			}
+		})
 	}
 }

@@ -1,7 +1,7 @@
 package config
 
 // Canonical filenames for every log Interlink writes. The directory is returned
-// by LogDirectory / LogDirectoryForUser; these constants are the filenames
+// by LogDirectory; these constants are the filenames
 // expected within that directory.
 const (
 	// DaemonLogName is the structured per-daemon log.

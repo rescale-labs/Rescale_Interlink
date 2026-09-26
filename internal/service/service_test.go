@@ -36,20 +36,6 @@ func TestServiceConstants(t *testing.T) {
 	if ServiceDisplayName == "" {
 		t.Error("ServiceDisplayName should not be empty")
 	}
-	if ServiceDescription == "" {
-		t.Error("ServiceDescription should not be empty")
-	}
-}
-
-func TestGetExecutablePath(t *testing.T) {
-	path, err := GetExecutablePath()
-	if err != nil {
-		t.Errorf("GetExecutablePath() error = %v", err)
-		return
-	}
-	if path == "" {
-		t.Error("GetExecutablePath() returned empty path")
-	}
 }
 
 func TestIsWindowsService(t *testing.T) {
@@ -61,59 +47,4 @@ func TestIsWindowsService(t *testing.T) {
 	}
 	// Error may or may not be nil depending on platform
 	_ = err
-}
-
-// =============================================================================
-// Multi-User Support Tests (D2.5)
-// =============================================================================
-
-func TestGetCurrentUserProfile(t *testing.T) {
-	profile, err := GetCurrentUserProfile()
-	if err != nil {
-		t.Fatalf("GetCurrentUserProfile() error = %v", err)
-	}
-
-	// Profile should have basic fields set
-	if profile.ProfilePath == "" {
-		t.Error("ProfilePath should not be empty")
-	}
-	if profile.ConfigPath == "" {
-		t.Error("ConfigPath should not be empty")
-	}
-	if profile.StateFilePath == "" {
-		t.Error("StateFilePath should not be empty")
-	}
-
-	// ConfigPath should be under ProfilePath
-	if len(profile.ConfigPath) <= len(profile.ProfilePath) {
-		t.Error("ConfigPath should be a path under ProfilePath")
-	}
-
-	// StateFilePath should be under ProfilePath
-	if len(profile.StateFilePath) <= len(profile.ProfilePath) {
-		t.Error("StateFilePath should be a path under ProfilePath")
-	}
-}
-
-func TestEnumerateUserProfiles(t *testing.T) {
-	// On Unix, this should return 0-1 profiles (current user only, if they have config)
-	// On Windows, this would return all configured users
-	profiles, err := EnumerateUserProfiles()
-	if err != nil {
-		t.Fatalf("EnumerateUserProfiles() error = %v", err)
-	}
-
-	// Should not error even if no profiles are configured
-	// (just returns empty list)
-	_ = profiles
-
-	// If we got profiles, verify they have required fields
-	for _, p := range profiles {
-		if p.ProfilePath == "" {
-			t.Error("Profile should have ProfilePath set")
-		}
-		if p.ConfigPath == "" {
-			t.Error("Profile should have ConfigPath set")
-		}
-	}
 }

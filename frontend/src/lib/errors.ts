@@ -9,13 +9,10 @@
 
 export const CodeNoAPIKey = "no_api_key";
 export const CodeDownloadFolderInaccessible = "download_folder_inaccessible";
-export const CodeServiceDisabledInSCM = "service_disabled_in_scm";
 export const CodeIPCNotResponding = "ipc_not_responding";
 export const CodeCLINotFound = "cli_not_found";
 export const CodeServiceAlreadyRunning = "service_already_running";
 export const CodePermissionDenied = "permission_denied";
-export const CodeServiceNotInstalled = "service_not_installed";
-export const CodeServiceStopped = "service_stopped";
 export const CodeTransientTimeout = "transient_timeout";
 export const CodeConfigInvalid = "config_invalid";
 export const CodeWorkspaceMissingField = "workspace_missing_field";
@@ -27,13 +24,10 @@ export const CodeScanFailed = "scan_failed";
 export type ErrorCode =
   | typeof CodeNoAPIKey
   | typeof CodeDownloadFolderInaccessible
-  | typeof CodeServiceDisabledInSCM
   | typeof CodeIPCNotResponding
   | typeof CodeCLINotFound
   | typeof CodeServiceAlreadyRunning
   | typeof CodePermissionDenied
-  | typeof CodeServiceNotInstalled
-  | typeof CodeServiceStopped
   | typeof CodeTransientTimeout
   | typeof CodeConfigInvalid
   | typeof CodeWorkspaceMissingField

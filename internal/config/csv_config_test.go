@@ -523,37 +523,6 @@ func TestMergeWithFlagsAndTokenFile(t *testing.T) {
 	})
 }
 
-func TestGetConfigPathForProfile(t *testing.T) {
-	tests := []struct {
-		name        string
-		profilePath string
-		wantEmpty   bool
-		wantSuffix  string // platform-dependent suffix to check
-	}{
-		{"empty profile returns empty", "", true, ""},
-		{"non-empty profile returns path", filepath.FromSlash("/home/testuser"), false, "config.csv"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := GetConfigPathForProfile(tt.profilePath)
-			if tt.wantEmpty && result != "" {
-				t.Errorf("Expected empty, got %q", result)
-			}
-			if !tt.wantEmpty {
-				if result == "" {
-					t.Error("Expected non-empty path")
-				}
-				if !strings.HasSuffix(result, tt.wantSuffix) {
-					t.Errorf("Expected path ending in %q, got %q", tt.wantSuffix, result)
-				}
-				if !strings.Contains(result, tt.profilePath) {
-					t.Errorf("Expected path to contain profile path %q, got %q", tt.profilePath, result)
-				}
-			}
-		})
-	}
-}
-
 // TestWriteTokenFile_RepairsLoosePermissions verifies that overwriting an
 // existing token file that has loose (0644) permissions tightens it back to
 // 0600. os.WriteFile alone only sets the mode on create, so a pre-existing

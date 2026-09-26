@@ -5,7 +5,6 @@ package cli
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,7 +19,6 @@ import (
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
-	"github.com/rescale/rescale-int/internal/ratelimit"
 	"github.com/rescale/rescale-int/internal/reporting"
 )
 
@@ -38,17 +36,6 @@ func isolateDaemonHome(t *testing.T) string {
 	t.Setenv("HOME", home)
 	t.Setenv("RESCALE_API_KEY", "")
 	return home
-}
-
-// keepDaemonRunGlobals restores what 'daemon run' changes for the whole
-// process: the standard logger's output and the rate limit notice hook.
-func keepDaemonRunGlobals(t *testing.T) {
-	flags, out, notify := log.Flags(), log.Writer(), ratelimit.NotifyFunc()
-	t.Cleanup(func() {
-		log.SetFlags(flags)
-		log.SetOutput(out)
-		ratelimit.SetGlobalNotifyFunc(notify)
-	})
 }
 
 // startStandInDaemon makes this test process look like a running daemon: it

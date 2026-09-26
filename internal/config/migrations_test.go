@@ -101,7 +101,7 @@ func TestRunStartupMigrations_NoLogDir(t *testing.T) {
 	t.Setenv("HOME", tmp)
 	t.Setenv("LOCALAPPDATA", filepath.Join(tmp, "Local"))
 	t.Setenv("APPDATA", filepath.Join(tmp, "Roaming"))
-	RunStartupMigrations(nil, ScopeCurrentUser, nil)
+	RunStartupMigrations(nil)
 }
 
 func TestMigrateStartupLogFilename(t *testing.T) {

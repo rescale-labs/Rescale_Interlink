@@ -48,19 +48,6 @@ func MacOSLegacyLogDirectory() string {
 	return filepath.Join(configDir, "rescale", "logs")
 }
 
-// LogDirectoryForUser returns the log directory for a specific user profile.
-//
-// On Windows, uses the user's profile path to construct the log directory:
-//   - profilePath\AppData\Local\Rescale\Interlink\logs
-func LogDirectoryForUser(profilePath string) string {
-	if runtime.GOOS == "windows" {
-		// Windows: profilePath\AppData\Local\Rescale\Interlink\logs
-		return filepath.Join(profilePath, "AppData", "Local", "Rescale", "Interlink", "logs")
-	}
-	// Unix: Use profile-specific config directory
-	return filepath.Join(profilePath, ".config", "rescale", "logs")
-}
-
 // ReportDirectory returns the directory for error report files.
 //
 // Locations:
