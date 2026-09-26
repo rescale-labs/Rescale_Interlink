@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,14 +16,24 @@ import (
 	"time"
 )
 
-// GetSocketPath returns the path to the Unix domain socket.
-// On Mac/Linux: ~/.config/rescale/interlink.sock
-func GetSocketPath() string {
+var errNoHome = errors.New("cannot place this user's socket without their home folder")
+
+// UserSocketPath is this user's socket file under ~/.config/rescale: the
+// daemon's or the rate-limit coordinator's. Without a home folder there is
+// none; a shared path, such as one in /tmp, could be another user's.
+func UserSocketPath(file string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/rescale-interlink.sock"
+		return "", fmt.Errorf("%w: %w", errNoHome, err)
 	}
-	return filepath.Join(home, ".config", "rescale", "interlink.sock")
+	return filepath.Join(home, ".config", "rescale", file), nil
+}
+
+// GetSocketPath returns the daemon's socket, ~/.config/rescale/interlink.sock,
+// or "" when this user's home folder is unknown.
+func GetSocketPath() string {
+	path, _ := UserSocketPath("interlink.sock")
+	return path
 }
 
 // Client connects to the IPC server via Unix domain socket.
@@ -54,6 +65,9 @@ func (c *Client) SetTimeout(timeout time.Duration) {
 
 // connect establishes a connection to the Unix socket.
 func (c *Client) connect(ctx context.Context) (net.Conn, error) {
+	if c.socketPath == "" {
+		return nil, errNoHome
+	}
 	// Create a dialer with timeout
 	dialer := net.Dialer{
 		Timeout: c.timeout,

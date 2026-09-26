@@ -6,10 +6,11 @@ import (
 	"context"
 	"net"
 
-	"github.com/Microsoft/go-winio"
+	"github.com/rescale/rescale-int/internal/ipc"
 )
 
-// dial creates a connection to the coordinator via Windows named pipe.
+// dial connects to this user's coordinator pipe, and to no pipe another user
+// created under its name.
 func (c *Client) dial(ctx context.Context) (net.Conn, error) {
-	return winio.DialPipeContext(ctx, c.socketPath)
+	return ipc.DialUserPipe(ctx, c.socketPath)
 }

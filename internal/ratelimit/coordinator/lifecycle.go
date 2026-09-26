@@ -10,17 +10,20 @@ import (
 )
 
 // PIDFilePath returns the path to the coordinator PID file.
-func PIDFilePath() string {
+func PIDFilePath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/rescale-ratelimit-coordinator.pid"
+		return "", fmt.Errorf("cannot place the coordinator's PID file without a home folder: %w", err)
 	}
-	return filepath.Join(home, ".config", "rescale", "ratelimit-coordinator.pid")
+	return filepath.Join(home, ".config", "rescale", "ratelimit-coordinator.pid"), nil
 }
 
 // WritePIDFile writes the current process's PID to the coordinator PID file.
 func WritePIDFile() error {
-	pidPath := PIDFilePath()
+	pidPath, err := PIDFilePath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(pidPath), 0700); err != nil {
 		return fmt.Errorf("failed to create PID file directory: %w", err)
 	}
@@ -33,13 +36,19 @@ func WritePIDFile() error {
 
 // RemovePIDFile removes the coordinator PID file.
 func RemovePIDFile() {
-	os.Remove(PIDFilePath())
+	if path, err := PIDFilePath(); err == nil {
+		os.Remove(path)
+	}
 }
 
 // ReadPIDFile reads the PID from the coordinator PID file.
 // Returns 0 if the file doesn't exist or is invalid.
 func ReadPIDFile() int {
-	data, err := os.ReadFile(PIDFilePath())
+	path, err := PIDFilePath()
+	if err != nil {
+		return 0
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
@@ -61,7 +70,11 @@ func ReadPIDFile() int {
 //  5. Wait up to 3s for socket to appear
 //  6. Connect and return client, or return error
 func EnsureCoordinator() (*Client, error) {
-	client := NewClient()
+	path, err := SocketPath()
+	if err != nil {
+		return nil, err
+	}
+	client := NewClientWithPath(path)
 
 	// Step 1: Try connecting to existing coordinator
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -74,7 +87,7 @@ func EnsureCoordinator() (*Client, error) {
 	pid := ReadPIDFile()
 	if pid > 0 && isProcessAlive(pid) {
 		// Coordinator process exists but socket not ready yet — wait
-		if waitForSocket(3 * time.Second) {
+		if waitForSocket(path, 3*time.Second) {
 			ctx2, cancel2 := context.WithTimeout(context.Background(), 500*time.Millisecond)
 			defer cancel2()
 			if err := client.Ping(ctx2); err == nil {
@@ -83,13 +96,17 @@ func EnsureCoordinator() (*Client, error) {
 		}
 	}
 
-	// Step 3: Spawn new coordinator
+	// Step 3: Spawn new coordinator. One that cannot write its PID file stops at
+	// once, so none is started, and no retry waits for it in vain.
+	if _, err := PIDFilePath(); err != nil {
+		return nil, err
+	}
 	if err := spawnCoordinator(); err != nil {
 		return nil, fmt.Errorf("failed to spawn coordinator: %w", err)
 	}
 
 	// Step 4: Wait for socket to appear
-	if !waitForSocket(3 * time.Second) {
+	if !waitForSocket(path, 3*time.Second) {
 		return nil, fmt.Errorf("coordinator did not start within 3s")
 	}
 
@@ -104,10 +121,10 @@ func EnsureCoordinator() (*Client, error) {
 }
 
 // waitForSocket polls for the coordinator socket to appear.
-func waitForSocket(timeout time.Duration) bool {
+func waitForSocket(path string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(SocketPath()); err == nil {
+		if _, err := os.Stat(path); err == nil {
 			return true
 		}
 		time.Sleep(100 * time.Millisecond)

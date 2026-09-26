@@ -438,7 +438,7 @@ Examples:
 			}
 
 			// Start IPC server if enabled.
-			// Windows IPC uses named pipes (\\.\pipe\rescale-interlink) which work without admin.
+			// Windows IPC uses a named pipe per user (\\.\pipe\rescale-interlink-<SID>), which works without admin.
 			// This allows GUI/tray to communicate with daemon running as subprocess.
 			var ipcServer *ipc.Server
 			if enableIPC {
@@ -502,7 +502,7 @@ Examples:
 					}
 				}
 				if enableIPC {
-					fmt.Printf("IPC: Enabled (%s)\n", ipc.GetSocketPath())
+					fmt.Printf("IPC: Enabled (%s)\n", ipcServer.GetSocketPath())
 				}
 				fmt.Println("----------------------------------------------------------------------")
 				if runOnce {
@@ -556,6 +556,19 @@ Examples:
 	cmd.Flags().BoolVar(&enableIPC, "ipc", false, "Enable IPC server for remote control (pause/resume/status/stop)")
 
 	return cmd
+}
+
+// onWindows is a variable so a test on any system can see the Windows advice.
+var onWindows = runtime.GOOS == "windows"
+
+// oldServiceRunning reports whether a service installed by an earlier version
+// is running; see service.OldServiceRunning.
+func oldServiceRunning() bool {
+	if !service.IsInstalled() {
+		return false
+	}
+	st, err := service.QueryStatus()
+	return err == nil && st == service.StatusRunning
 }
 
 // newDaemonStatusCmd creates the 'daemon status' command.
@@ -638,21 +651,18 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 			}
 
 			// IPC not responding — fall through to the state-file view.
-			{
-				// On Windows, check if service is running but IPC not responding
-				if runtime.GOOS == "windows" && service.IsInstalled() {
-					if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
-						fmt.Println("Note: Windows Service is running but IPC not responding.")
-						fmt.Println("The service may be initializing or have an IPC issue.")
-						fmt.Println()
-					}
-				}
+			if oldServiceRunning() {
+				fmt.Println(service.OldServiceRunning + ".")
+				fmt.Println()
 			}
 
 			// Check PID file
 			if pid := daemon.IsDaemonRunning(); pid != 0 {
 				fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
 				fmt.Println("It may be starting, stopping, or running without --ipc.")
+				if onWindows {
+					fmt.Println(service.EarlierDaemonRunning + ".")
+				}
 				fmt.Println()
 			} else {
 				fmt.Println("No running daemon detected.")
@@ -728,30 +738,15 @@ func newDaemonStopCmd() *cobra.Command {
 This sends a shutdown command via IPC to gracefully stop the daemon,
 then waits up to 10 seconds for the daemon process to exit, and fails
 if it has not. The daemon must have been started with --ipc flag for
-this to work.
-
-On Windows, behavior depends on mode:
-  - Subprocess mode: Shuts down the daemon via IPC (like macOS/Linux)
-  - Service mode: Pauses your user daemon via IPC (service stop requires admin)`,
+this to work.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			client := ipc.NewClient()
 			client.SetTimeout(5 * time.Second)
 
-			// Windows subprocess uses IPC shutdown; service mode pauses user
-			if runtime.GOOS == "windows" && service.IsInstalled() {
-				if svcStatus, _ := service.QueryStatus(); svcStatus == service.StatusRunning {
-					fmt.Println("Windows Service detected. Pausing your daemon...")
-					// Pass empty userID - server infers caller SID
-					if err := client.PauseUser(ctx, ""); err != nil {
-						return fmt.Errorf("failed to pause: %w", err)
-					}
-					fmt.Println("Your daemon paused. To stop the entire service:")
-					fmt.Println("  - Run as admin: rescale-int service stop")
-					fmt.Println("  - Or: net stop \"Rescale Interlink Auto-Download\"")
-					fmt.Println("  - Or: Services.msc → Rescale Interlink Auto-Download → Stop")
-					return nil
-				}
+			if oldServiceRunning() {
+				fmt.Println(service.OldServiceRunning + ".")
+				return nil
 			}
 
 			// Check if daemon is running (subprocess mode)
@@ -769,8 +764,8 @@ On Windows, behavior depends on mode:
 				if pid != 0 {
 					fmt.Printf("Daemon process found (PID %d) but IPC not responding.\n", pid)
 					fmt.Println("The daemon may not have been started with --ipc flag.")
-					if runtime.GOOS == "windows" {
-						fmt.Println("Use Task Manager to terminate the process.")
+					if onWindows {
+						fmt.Println(service.EarlierDaemonRunning + ".")
 					} else {
 						fmt.Printf("Use 'kill %d' to forcefully terminate it.\n", pid)
 					}

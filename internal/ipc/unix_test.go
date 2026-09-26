@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,8 +75,8 @@ func (h *mockHandler) GetTransferStatus(userID string) (*DaemonTransferSnapshot,
 	return &DaemonTransferSnapshot{}, nil
 }
 
-func (h *mockHandler) CancelDaemonBatch(userID, batchID string) error    { return nil }
-func (h *mockHandler) CancelDaemonTransfer(userID, taskID string) error  { return nil }
+func (h *mockHandler) CancelDaemonBatch(userID, batchID string) error   { return nil }
+func (h *mockHandler) CancelDaemonTransfer(userID, taskID string) error { return nil }
 func (h *mockHandler) RetryFailedInDaemonBatch(userID, batchID string) error {
 	return nil
 }
@@ -220,5 +221,25 @@ func TestGetSocketPath(t *testing.T) {
 	expected := filepath.Join(home, ".config", "rescale", "interlink.sock")
 	if path != expected {
 		t.Errorf("Expected socket path '%s', got '%s'", expected, path)
+	}
+}
+
+// Without a home folder there is no socket of this user's, and no shared one in
+// /tmp either, where another user could hold the name: the server refuses to
+// start and clients report that there is no daemon, as on Windows without a SID.
+func TestNoHome_NoSocket(t *testing.T) {
+	t.Setenv("HOME", "")
+	if path := GetSocketPath(); path != "" {
+		t.Fatalf("GetSocketPath with no home folder = %q, want none", path)
+	}
+	server := NewServer(&mockHandler{}, logging.NewLogger("test", events.NewEventBus(10)))
+	if err := server.Start(); err == nil || !strings.Contains(err.Error(), "home folder") {
+		if err == nil {
+			server.Stop()
+		}
+		t.Errorf("Start with no home folder = %v, want a refusal naming it", err)
+	}
+	if _, err := NewClient().GetStatus(context.Background()); err == nil || !strings.Contains(err.Error(), "home folder") {
+		t.Errorf("GetStatus with no home folder = %v, want a refusal naming it", err)
 	}
 }

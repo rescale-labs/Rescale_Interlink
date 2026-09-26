@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
@@ -387,5 +389,28 @@ func TestDaemonRunStopsOnSIGHUP(t *testing.T) {
 	}
 	if _, err := os.Stat(daemon.PIDFilePath()); !os.IsNotExist(err) {
 		t.Errorf("the PID file outlived the daemon (stat: %v)", err)
+	}
+}
+
+// On Windows, a daemon that holds the PID file but does not answer on this
+// version's pipe may be an earlier version's, which listens where this version
+// does not look: status and stop say how to end it, and do not send the user
+// to 'rescale-int daemon stop', which cannot reach it.
+func TestDaemonStatusAndStopSayHowToEndAnEarlierVersionsDaemon(t *testing.T) {
+	isolateDaemonHome(t)
+	if err := daemon.WritePIDFile(); err != nil {
+		t.Fatalf("WritePIDFile: %v", err)
+	}
+	t.Cleanup(daemon.RemovePIDFile)
+	orig := onWindows
+	onWindows = true
+	t.Cleanup(func() { onWindows = orig })
+
+	const want = "If an earlier version of Interlink started it, end the rescale-int process in Task Manager, or sign out and back in."
+	for name, cmd := range map[string]*cobra.Command{"status": newDaemonStatusCmd(), "stop": newDaemonStopCmd()} {
+		out, err := runDaemonCommand(t, cmd)
+		if err != nil || !strings.Contains(out, want) || strings.Contains(out, "rescale-int daemon stop") {
+			t.Errorf("daemon %s: %v; want the line %q and no 'rescale-int daemon stop'\n%s", name, err, want, out)
+		}
 	}
 }

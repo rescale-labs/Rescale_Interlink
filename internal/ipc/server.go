@@ -15,7 +15,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/Microsoft/go-winio"
 	"github.com/rescale/rescale-int/internal/logging"
 	"golang.org/x/sys/windows"
 )
@@ -79,6 +78,7 @@ type Server struct {
 	handler  ServiceHandler
 	logger   *logging.Logger
 	listener net.Listener
+	pipeName string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -100,11 +100,11 @@ func NewServer(handler ServiceHandler, logger *logging.Logger) *Server {
 	}
 
 	// Capture the owner's SID for authorization checks
-	if sid, err := getCurrentUserSID(); err == nil {
+	if sid, err := currentUserSID(); err == nil {
 		s.ownerSID = sid
 		logger.Debug().Str("owner_sid", sid).Msg("IPC server owner SID captured")
 	} else {
-		logger.Warn().Err(err).Msg("Failed to get owner SID; cross-user authorization disabled")
+		logger.Warn().Err(err).Msg("Failed to get owner SID; the IPC server will not start")
 	}
 
 	return s
@@ -128,43 +128,27 @@ func getCurrentUserSID() (string, error) {
 
 // Start begins listening for IPC connections.
 func (s *Server) Start() error {
-	if IsPipeInUse() {
+	name, err := UserPipeName(pipeBase)
+	if err != nil {
+		return err
+	}
+	if pipeInUse(name) {
 		return fmt.Errorf("failed to create named pipe: pipe already exists (another daemon is running). Stop the existing daemon first")
 	}
 
-	// Create named pipe listener with security descriptor
-	//
-	// SECURITY NOTE:
-	// The descriptor "D:P(A;;GA;;;AU)" allows any authenticated user to connect.
-	// However, modify operations (Pause, Resume, TriggerScan, Shutdown) are now
-	// protected by per-user authorization in authorizeModifyRequest().
-	//
-	// Security model:
-	// - Any authenticated user can connect and perform read-only operations
-	//   (GetStatus, GetUserList, GetRecentLogs, OpenLogs)
-	// - Only the daemon owner (matched by SID) can perform modify operations
-	// - This prevents User A from controlling User B's daemon
-	//
-	// Alternative descriptors (for reference):
-	// - "D:P(A;;GA;;;BA)(A;;GA;;;SY)" - Allow only Administrators and SYSTEM
-	// - "D:P(A;;GA;;;BA)(A;;GA;;;AU)" - Allow Admins full control, Authenticated Users connect
-	cfg := &winio.PipeConfig{
-		SecurityDescriptor: "D:P(A;;GA;;;AU)", // DACL: Allow Generic All for Authenticated Users
-		MessageMode:        true,
-		InputBufferSize:    4096,
-		OutputBufferSize:   4096,
-	}
-
-	listener, err := winio.ListenPipe(PipeName, cfg)
+	// Only the owner and LocalSystem can open the pipe, so another user can
+	// neither read this daemon's status and logs nor send it requests;
+	// authorizeModifyRequest still checks each modify request's caller.
+	listener, err := ListenUserPipe(name, 4096)
 	if err != nil {
 		if strings.Contains(err.Error(), "Access is denied") {
 			return fmt.Errorf("failed to create named pipe: another daemon is running or pipe is stale. Error: %w", err)
 		}
 		return fmt.Errorf("failed to create named pipe: %w", err)
 	}
-	s.listener = listener
+	s.listener, s.pipeName = listener, name
 
-	s.logger.Info().Str("pipe", PipeName).Msg("IPC server started")
+	s.logger.Info().Str("pipe", name).Msg("IPC server started")
 
 	// Start accepting connections
 	s.wg.Add(1)
@@ -577,5 +561,5 @@ func (s *Server) sendResponse(conn net.Conn, resp *Response) {
 // GetSocketPath returns the named pipe path (for API compatibility with Unix).
 // On Windows, this returns the named pipe path rather than a socket path.
 func (s *Server) GetSocketPath() string {
-	return PipeName
+	return s.pipeName
 }

@@ -87,12 +87,16 @@ func DetectDaemon() ServiceDetectionResult {
 // Returns (blocked, reason). Only blocks when service is RUNNING, not just
 // installed — this allows subprocess mode when service is installed but stopped.
 func ShouldBlockSubprocess() (bool, string) {
-	d := DetectDaemon()
+	return blockSubprocess(DetectDaemon())
+}
+
+// blockSubprocess is ShouldBlockSubprocess for a detection already made.
+func blockSubprocess(d ServiceDetectionResult) (bool, string) {
 	if d.ServiceMode {
-		return true, "Windows Service is running. Manage via Services.msc"
+		return true, OldServiceRunning
 	}
 	if d.SubprocessPID > 0 {
-		return true, fmt.Sprintf("Daemon already running (PID %d)", d.SubprocessPID)
+		return true, fmt.Sprintf("Auto-download is already running (PID %d). %s", d.SubprocessPID, EarlierDaemonRunning)
 	}
 	if d.PipeInUse {
 		return true, d.Error

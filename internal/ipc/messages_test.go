@@ -157,15 +157,6 @@ func TestMessageTypes(t *testing.T) {
 	}
 }
 
-func TestPipeName(t *testing.T) {
-	if PipeName == "" {
-		t.Error("PipeName should not be empty")
-	}
-	if PipeName != `\\.\pipe\rescale-interlink` {
-		t.Errorf("unexpected PipeName: %q", PipeName)
-	}
-}
-
 func TestDecodeInvalidRequest(t *testing.T) {
 	_, err := DecodeRequest([]byte("not valid json"))
 	if err == nil {

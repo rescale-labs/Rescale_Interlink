@@ -5,29 +5,26 @@ package coordinator
 import (
 	"net"
 
-	"github.com/Microsoft/go-winio"
+	"github.com/rescale/rescale-int/internal/ipc"
 )
 
-// PipeName is the Windows named pipe path for the rate limit coordinator.
-const PipeName = `\\.\pipe\rescale-ratelimit-coordinator`
+// pipeBase is the coordinator's pipe; each user's has their SID appended. A
+// variable so a test can listen on a pipe of its own.
+var pipeBase = "rescale-ratelimit-coordinator"
 
-// SocketPath returns the coordinator's communication endpoint path.
-// On Windows, this is a named pipe path.
-func SocketPath() string {
-	return PipeName
+// SocketPath returns this user's coordinator pipe. Each signed-in user runs
+// their own coordinator, as on macOS and Linux.
+func SocketPath() (string, error) {
+	return ipc.UserPipeName(pipeBase)
 }
 
-// Listen creates a Windows named pipe listener for the coordinator.
+// Listen creates this user's coordinator pipe; see ipc.ListenUserPipe.
 func Listen() (net.Listener, error) {
-	cfg := &winio.PipeConfig{
-		// Allow authenticated users
-		SecurityDescriptor: "D:P(A;;GA;;;AU)",
-		MessageMode:        true,
-		InputBufferSize:    65536,
-		OutputBufferSize:   65536,
+	name, err := SocketPath()
+	if err != nil {
+		return nil, err
 	}
-
-	return winio.ListenPipe(PipeName, cfg)
+	return ipc.ListenUserPipe(name, 65536)
 }
 
 // CleanupSocket is a no-op on Windows (named pipes are cleaned up automatically).

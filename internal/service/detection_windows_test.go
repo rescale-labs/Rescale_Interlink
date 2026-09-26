@@ -113,7 +113,7 @@ func TestServiceStateDecidesBlocking(t *testing.T) {
 	}{
 		{"not installed", 0, windows.ERROR_SERVICE_DOES_NOT_EXIST, false, "", ""},
 		{"installed and stopped", svc.Stopped, nil, true, "", ""},
-		{"installed and running", svc.Running, nil, true, "", "Windows Service is running"},
+		{"installed and running", svc.Running, nil, true, "", OldServiceRunning},
 		{"not allowed to ask", 0, windows.ERROR_ACCESS_DENIED, false, "denied", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,5 +127,20 @@ func TestServiceStateDecidesBlocking(t *testing.T) {
 				t.Errorf("ShouldBlockSubprocess = (%v, %q), want it to block only for %q", blocked, why, tc.blockMsg)
 			}
 		})
+	}
+}
+
+// A daemon from an earlier version listens where this version no longer looks,
+// so neither the app nor 'rescale-int daemon stop' can stop it; the refusal
+// says what can.
+func TestBlockSubprocess_SaysHowToStopTheRunningDaemon(t *testing.T) {
+	blocked, reason := blockSubprocess(ServiceDetectionResult{SubprocessPID: 1234})
+	for _, want := range []string{"PID 1234", "Task Manager", "sign out and back in"} {
+		if !blocked || !strings.Contains(reason, want) {
+			t.Errorf("blockSubprocess = %v, %q; want a refusal naming %q", blocked, reason, want)
+		}
+	}
+	if strings.Contains(reason, "daemon stop") {
+		t.Errorf("blockSubprocess = %q, which points at a command that cannot reach the daemon", reason)
 	}
 }

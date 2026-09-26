@@ -1,7 +1,5 @@
 //go:build windows
 
-// Package ipc provides inter-process communication between the Windows service
-// and the GUI/tray application using named pipes.
 package ipc
 
 import (
@@ -11,8 +9,6 @@ import (
 	"fmt"
 	"net"
 	"time"
-
-	"github.com/Microsoft/go-winio"
 )
 
 // Client connects to the IPC server to send requests.
@@ -34,11 +30,15 @@ func (c *Client) SetTimeout(timeout time.Duration) {
 
 // connect establishes a connection to the named pipe.
 func (c *Client) connect(ctx context.Context) (net.Conn, error) {
+	name, err := UserPipeName(pipeBase)
+	if err != nil {
+		return nil, err
+	}
 	// Use context with timeout
 	dialCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
-	conn, err := winio.DialPipeContext(dialCtx, PipeName)
+	conn, err := DialUserPipe(dialCtx, name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to IPC server: %w", err)
 	}
@@ -204,12 +204,6 @@ func (c *Client) Shutdown(ctx context.Context) error {
 		return fmt.Errorf("server error: %s", resp.Error)
 	}
 	return nil
-}
-
-// GetSocketPath returns the named pipe path (for API compatibility with Unix).
-// On Windows, this returns the named pipe path rather than a socket path.
-func GetSocketPath() string {
-	return PipeName
 }
 
 // GetRecentLogs retrieves recent log entries from the daemon.

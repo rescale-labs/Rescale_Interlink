@@ -6,6 +6,16 @@ import "fmt"
 // once it has removed itself.
 const RemovedMessage = "Multi-user service mode is not available in this version, so this service has removed itself. Auto-download runs in each user's session from the Interlink app."
 
+// OldServiceRunning is what the app, the tray and the CLI say while a service
+// installed by an earlier version runs. It serves only the shared pipe this
+// version no longer uses, so nothing here can reach it.
+const OldServiceRunning = "A Windows service from an earlier version is running; remove it with Remove Old Service in the Interlink app"
+
+// EarlierDaemonRunning says how to end a daemon an earlier version started,
+// which listens on that shared pipe: neither the app nor 'rescale-int daemon
+// stop' can reach it.
+const EarlierDaemonRunning = "If an earlier version of Interlink started it, end the rescale-int process in Task Manager, or sign out and back in"
+
 // scmHost is what a service installed by an earlier version needs from
 // Windows when Windows starts it. windows_service.go supplies the real one; a
 // test stands in for it on any system.

@@ -139,6 +139,35 @@ jobs:
             grep -q -F -- "--- PASS: $test (" state.log || { echo "::error::$test did not run and pass"; exit 1; }
           done
 
+      - name: Check the Windows service, pipe and tray tests ran
+        if: ${{ !cancelled() }}
+        env:
+          # package:test for the Windows-only tests of the retired service, the
+          # per-user pipes, the tray and drive-relative scan roots.
+          PLATFORM_TESTS: >-
+            ./cmd/rescale-int-tray:TestFailedActionsReturn
+            ./cmd/rescale-int-tray:TestStartRefusalsAreShown
+            ./internal/cli:TestServiceStatusSaysNotInstalled
+            ./internal/ipc:TestDialUserPipe_RefusesAnotherUsersPipe
+            ./internal/ipc:TestEveryPath_UsesThePipeNamedForTheUser
+            ./internal/ipc:TestListenUserPipe_DoesNotJoinAnExistingPipe
+            ./internal/ipc:TestNoSID_NoPipe
+            ./internal/ipc:TestServer_ListensOnThisUsersPipe
+            ./internal/ratelimit/coordinator:TestEnsureCoordinator_NoProfileNoSpawn
+            ./internal/ratelimit/coordinator:TestListen_ServesThisUsersClient
+            ./internal/ratelimit/coordinator:TestSocketPath_OnePerUser
+            ./internal/service:TestBlockSubprocess_SaysHowToStopTheRunningDaemon
+            ./internal/service:TestServiceStateDecidesBlocking
+            ./internal/service:TestRetiredServiceReportsRunningThenStops
+            ./internal/util/multipart:TestScanDirectories_DriveRelativeRoots
+            ./internal/wailsapp:TestStartDaemonSaysWhyItCannotStart
+        run: |
+          for pt in $PLATFORM_TESTS; do
+            pkg=${pt%%:*} test=${pt#*:}
+            GOFIPS140=certified go test -tags fips -count=1 -v -run "^${test}\$" "$pkg" | tee test.log
+            grep -q -F -- "--- PASS: $test (" test.log || { echo "::error::$test did not run and pass"; exit 1; }
+          done
+
       - name: Save Go modules and build output
         if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6.1.0

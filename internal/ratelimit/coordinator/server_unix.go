@@ -7,21 +7,22 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+
+	"github.com/rescale/rescale-int/internal/ipc"
 )
 
-// SocketPath returns the path to the coordinator Unix domain socket.
-// On Mac/Linux: ~/.config/rescale/ratelimit-coordinator.sock
-func SocketPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/rescale-ratelimit-coordinator.sock"
-	}
-	return filepath.Join(home, ".config", "rescale", "ratelimit-coordinator.sock")
+// SocketPath returns this user's coordinator socket,
+// ~/.config/rescale/ratelimit-coordinator.sock.
+func SocketPath() (string, error) {
+	return ipc.UserSocketPath("ratelimit-coordinator.sock")
 }
 
 // Listen creates a Unix domain socket listener for the coordinator.
 func Listen() (net.Listener, error) {
-	sockPath := SocketPath()
+	sockPath, err := SocketPath()
+	if err != nil {
+		return nil, err
+	}
 
 	// Ensure socket directory exists
 	socketDir := filepath.Dir(sockPath)
@@ -51,5 +52,7 @@ func Listen() (net.Listener, error) {
 
 // CleanupSocket removes the socket file. Called on shutdown.
 func CleanupSocket() {
-	os.Remove(SocketPath())
+	if path, err := SocketPath(); err == nil {
+		os.Remove(path)
+	}
 }

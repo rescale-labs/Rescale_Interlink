@@ -25,18 +25,14 @@ type Client struct {
 	closed bool
 }
 
-// NewClient creates a coordinator client.
+// NewClient creates a coordinator client. Without this user's endpoint it
+// finds no coordinator; EnsureCoordinator says why.
 func NewClient() *Client {
-	return &Client{
-		clientID:   fmt.Sprintf("pid-%d", os.Getpid()),
-		timeout:    500 * time.Millisecond,
-		socketPath: SocketPath(),
-		leases:     make(map[string]*LeaseGrant),
-	}
+	path, _ := SocketPath()
+	return NewClientWithPath(path)
 }
 
-// NewClientWithPath creates a coordinator client with a custom socket path.
-// Used in tests.
+// NewClientWithPath creates a coordinator client for the endpoint at socketPath.
 func NewClientWithPath(socketPath string) *Client {
 	return &Client{
 		clientID:   fmt.Sprintf("pid-%d", os.Getpid()),

@@ -1,14 +1,37 @@
-// Package ipc provides inter-process communication between the Windows service
-// and the GUI/tray application using named pipes.
+// Package ipc carries requests between a user's auto-download daemon and that
+// user's app, tray and CLI: over a named pipe of the user's own on Windows, and
+// a socket in the user's home folder on macOS and Linux.
 package ipc
 
 import (
 	"encoding/json"
+	"errors"
 	"time"
 )
 
-// PipeName is the Windows named pipe path for IPC.
-const PipeName = `\\.\pipe\rescale-interlink`
+var errNoSID = errors.New("cannot name this user's pipe without their SID")
+
+// pipeBase is the daemon's pipe; each user's has their SID appended. A
+// variable so a test can listen on a pipe of its own.
+var pipeBase = "rescale-interlink"
+
+// pipeNameFor names the Windows pipe base of the user with this SID. Pipe
+// names are one namespace for the whole machine, so each user has their own,
+// as each has their own socket on macOS and Linux: several people signed in at
+// once each run auto-download and reach only their own processes.
+func pipeNameFor(base, sid string) (string, error) {
+	if sid == "" {
+		return "", errNoSID
+	}
+	return `\\.\pipe\` + base + "-" + sid, nil
+}
+
+// pipeSDDL admits only the user with this SID, and LocalSystem, to the pipe,
+// and makes the user its owner whatever the token's default owner, which is
+// Administrators for an elevated process.
+func pipeSDDL(sid string) string {
+	return "O:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)"
+}
 
 // MessageType identifies the type of IPC message.
 type MessageType string
@@ -28,8 +51,8 @@ const (
 	MsgGetTransferStatus MessageType = "GetTransferStatus"
 	// Plan 3: per-row cancel/retry actions on daemon-initiated transfers.
 	// Payload carries BatchID or TaskID via Request extension below.
-	MsgCancelDaemonBatch      MessageType = "CancelDaemonBatch"
-	MsgCancelDaemonTransfer   MessageType = "CancelDaemonTransfer"
+	MsgCancelDaemonBatch        MessageType = "CancelDaemonBatch"
+	MsgCancelDaemonTransfer     MessageType = "CancelDaemonTransfer"
 	MsgRetryFailedInDaemonBatch MessageType = "RetryFailedInDaemonBatch"
 
 	// Response types (server -> client)
@@ -190,21 +213,21 @@ type TransferTaskInfo struct {
 // BatchStatsInfo is the per-batch projection for IPC; mirrors the GUI's
 // transfer.BatchStats shape. Used by the unified Transfers tab.
 type BatchStatsInfo struct {
-	BatchID      string  `json:"batchId"`
-	BatchLabel   string  `json:"batchLabel"`
-	Direction    string  `json:"direction"` // "download"
-	SourceLabel  string  `json:"sourceLabel"` // "Daemon"
-	Total        int     `json:"total"`
-	Queued       int     `json:"queued"`
-	Active       int     `json:"active"`
-	Completed    int     `json:"completed"`
-	Failed       int     `json:"failed"`
-	Cancelled    int     `json:"cancelled"`
-	TotalBytes   int64   `json:"totalBytes"`
-	Progress     float64 `json:"progress"`
-	Speed        float64 `json:"speed"`
-	TotalKnown   bool    `json:"totalKnown"`
-	StartedAt    int64   `json:"startedAt,omitempty"`
+	BatchID     string  `json:"batchId"`
+	BatchLabel  string  `json:"batchLabel"`
+	Direction   string  `json:"direction"`   // "download"
+	SourceLabel string  `json:"sourceLabel"` // "Daemon"
+	Total       int     `json:"total"`
+	Queued      int     `json:"queued"`
+	Active      int     `json:"active"`
+	Completed   int     `json:"completed"`
+	Failed      int     `json:"failed"`
+	Cancelled   int     `json:"cancelled"`
+	TotalBytes  int64   `json:"totalBytes"`
+	Progress    float64 `json:"progress"`
+	Speed       float64 `json:"speed"`
+	TotalKnown  bool    `json:"totalKnown"`
+	StartedAt   int64   `json:"startedAt,omitempty"`
 }
 
 // DaemonTransferSnapshot is a point-in-time view of the daemon's transfer

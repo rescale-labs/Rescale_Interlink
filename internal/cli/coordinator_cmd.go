@@ -52,7 +52,7 @@ func newCoordinatorRunCmd() *cobra.Command {
 			srv := coordinator.NewServer()
 			srv.Start(listener)
 
-			log.Printf("Rate limit coordinator started (PID %d, socket %s)", os.Getpid(), coordinator.SocketPath())
+			log.Printf("Rate limit coordinator started (PID %d, socket %s)", os.Getpid(), listener.Addr())
 
 			// Wait for signal or idle timeout
 			sigChan := make(chan os.Signal, 1)

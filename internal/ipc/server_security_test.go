@@ -143,3 +143,18 @@ func TestSubprocessModeGetUserListUnfiltered(t *testing.T) {
 		t.Errorf("Expected 2 users (unfiltered), got %d", len(data.Users))
 	}
 }
+
+// The pipe's DACL keeps other users out; the owner check stays behind it.
+func TestAuthorizeModifyRequest_RefusesAllButTheOwner(t *testing.T) {
+	handler := &capturingHandler{}
+	server := newSubprocessModeServerForTest(handler)
+	server.ownerSID = testSID
+	for _, caller := range []string{otherTestSID, ""} {
+		if resp := server.handleRequest(NewRequestWithUser(MsgPauseUser, "u"), caller); resp.Success {
+			t.Errorf("caller %q paused the daemon of %s", caller, testSID)
+		}
+	}
+	if handler.lastPauseUserID != "" {
+		t.Error("the handler ran for a refused caller")
+	}
+}

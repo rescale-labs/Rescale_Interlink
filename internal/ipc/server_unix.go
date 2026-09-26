@@ -106,6 +106,9 @@ func NewServerWithPath(handler ServiceHandler, logger *logging.Logger, socketPat
 
 // Start begins listening for IPC connections.
 func (s *Server) Start() error {
+	if s.socketPath == "" {
+		return errNoHome
+	}
 	// Ensure socket directory exists
 	socketDir := filepath.Dir(s.socketPath)
 	if err := os.MkdirAll(socketDir, 0700); err != nil {
