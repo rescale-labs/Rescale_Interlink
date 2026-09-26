@@ -149,12 +149,14 @@ jobs:
             ./cmd/rescale-int-tray:TestFailedActionsReturn
             ./cmd/rescale-int-tray:TestStartRefusalsAreShown
             ./cmd/rescale-int-tray:TestStartupStartsOnlyWhenEnabledAndShowsWhy
+            ./cmd/rescale-int-tray:TestStartupWaitsForTheDownloadFolder
             ./internal/daemon:TestKillDaemon_EndsOnlyThisUsersDaemon
             ./internal/daemon:TestProcessInfo_ReadsAnotherProcesssCommandLine
             ./internal/ipc:TestDialUserPipe_RefusesAnotherUsersPipe
             ./internal/ipc:TestEveryPath_UsesThePipeNamedForTheUser
             ./internal/ipc:TestListenUserPipe_DoesNotJoinAnExistingPipe
             ./internal/ipc:TestNoSID_NoPipe
+            ./internal/ipc:TestPipeOwnedByAnotherUser
             ./internal/ipc:TestServer_ListensOnThisUsersPipe
             ./internal/ratelimit/coordinator:TestEnsureCoordinator_NoProfileNoSpawn
             ./internal/ratelimit/coordinator:TestListen_ServesThisUsersClient

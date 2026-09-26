@@ -1239,8 +1239,7 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 				n := skipCount.Add(1)
 				ts.GetQueue().IncrementBatchSkipped(enumID, 1)
 
-				msg := fmt.Sprintf("Skipped %s (isSymlink=%v isDir=%v; reparse point or unidentifiable target)",
-					entry.Path, entry.IsSymlink, entry.IsDir)
+				msg := skippedLinkMessage(entry)
 				switch {
 				case n <= 10:
 					a.logWarn("folder-upload", msg)
@@ -1365,6 +1364,12 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		TotalBytes:     0,
 		MergedInto:     mergedIntoFolder,
 	}
+}
+
+// skippedLinkMessage says which link a folder upload left out, and why, as
+// 'folders upload-dir' does.
+func skippedLinkMessage(entry localfs.FileEntry) string {
+	return fmt.Sprintf("Skipped link %s: %s", entry.Path, entry.SkipReason)
 }
 
 // LocalFileInfoDTO contains information about a local file or directory.

@@ -131,16 +131,13 @@ func TestServiceStateDecidesBlocking(t *testing.T) {
 }
 
 // A daemon from an earlier version listens where this version no longer looks,
-// so neither the app nor 'rescale-int daemon stop' can stop it; the refusal
-// says what can.
+// so the app cannot stop it; the refusal says what can: 'daemon stop --force',
+// which ends it by its process, or Task Manager.
 func TestBlockSubprocess_SaysHowToStopTheRunningDaemon(t *testing.T) {
 	blocked, reason := blockSubprocess(ServiceDetectionResult{SubprocessPID: 1234})
-	for _, want := range []string{"PID 1234", "Task Manager", "sign out and back in"} {
+	for _, want := range []string{"PID 1234", "'rescale-int daemon stop --force'", "Task Manager"} {
 		if !blocked || !strings.Contains(reason, want) {
 			t.Errorf("blockSubprocess = %v, %q; want a refusal naming %q", blocked, reason, want)
 		}
-	}
-	if strings.Contains(reason, "daemon stop") {
-		t.Errorf("blockSubprocess = %q, which points at a command that cannot reach the daemon", reason)
 	}
 }

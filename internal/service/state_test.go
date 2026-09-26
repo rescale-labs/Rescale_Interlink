@@ -282,7 +282,7 @@ func TestCompute(t *testing.T) {
 			name: "running user matched by SID",
 			now:  time.Unix(0, 0),
 			ipc: fakeIPC{
-				status: &ipc.StatusData{ServiceState: "running", ServiceMode: false},
+				status: &ipc.StatusData{ServiceState: "running"},
 				users: []ipc.UserStatus{
 					{Username: "other", SID: "S-1-0-0-1", State: "paused"},
 					{Username: "alice", SID: "S-1-0-0-2", State: "running", JobsDownloaded: 5},

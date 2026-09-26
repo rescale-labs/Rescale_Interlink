@@ -57,12 +57,19 @@ func DetectDaemon() ServiceDetectionResult {
 	if ipc.IsPipeInUse() {
 		result.PipeInUse = true
 		result.Error = "Daemon appears to be running but not responding (pipe exists)"
+		if ipc.PipeOwnedByAnotherUser() {
+			result.Error = PipeTaken
+		}
 		debugLog("Result: PipeInUse=true")
 	}
 
 	debugLog("Result: No daemon detected")
 	return result
 }
+
+// PipeTaken is why auto-download cannot start while another user holds the
+// name of this user's pipe.
+const PipeTaken = "Another user on this computer holds the name auto-download listens on; restart Windows, or ask your administrator"
 
 // ShouldBlockSubprocess returns true if subprocess spawn should be blocked.
 // Returns (blocked, reason). Only blocks when service is RUNNING, not just

@@ -268,3 +268,49 @@ func TestDialUserPipe_RefusesAnotherUsersPipe(t *testing.T) {
 		t.Errorf("the client sent %d bytes to another user's pipe", n)
 	}
 }
+
+// This user's daemon pipe, created first by another user, is told apart from
+// this user's own pipe and from none: only then can no daemon of this user
+// listen there. Another user's pipe may not admit this user at all.
+func TestPipeOwnedByAnotherUser(t *testing.T) {
+	orig := pipeBase
+	pipeBase = fmt.Sprintf("rescale-ipc-test-%d-owner", os.Getpid())
+	t.Cleanup(func() { pipeBase = orig })
+	if PipeOwnedByAnotherUser() {
+		t.Error("no pipe was taken for another user's")
+	}
+	name, err := UserPipeName(pipeBase)
+	if err != nil {
+		t.Fatalf("UserPipeName: %v", err)
+	}
+	closed, err := winio.ListenPipe(name, &winio.PipeConfig{SecurityDescriptor: "D:P(A;;GA;;;SY)"})
+	if err != nil {
+		t.Fatalf("listen on %s admitting only LocalSystem: %v", name, err)
+	}
+	if !PipeOwnedByAnotherUser() {
+		t.Error("a pipe that does not admit this user was not seen as another user's")
+	}
+	closed.Close()
+
+	l, err := ListenUserPipe(name, 4096)
+	if err != nil {
+		t.Fatalf("ListenUserPipe: %v", err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	if PipeOwnedByAnotherUser() {
+		t.Error("this user's own pipe was taken for another user's")
+	}
+	withPipeOwner(t, otherTestSID)
+	if !PipeOwnedByAnotherUser() {
+		t.Error("another user's pipe was not seen")
+	}
+}

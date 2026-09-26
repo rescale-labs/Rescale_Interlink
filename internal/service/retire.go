@@ -11,10 +11,12 @@ const RemovedMessage = "Multi-user service mode is not available in this version
 // version no longer uses, so nothing here can reach it.
 const OldServiceRunning = "A Windows service from an earlier version is running; restart Windows, or run 'rescale-int service uninstall' as administrator"
 
-// EarlierDaemonRunning says how to end a daemon an earlier version started,
-// which listens on that shared pipe: neither the app nor 'rescale-int daemon
-// stop' can reach it.
-const EarlierDaemonRunning = "If an earlier version of Interlink started it, end the rescale-int process in Task Manager, or sign out and back in"
+// EarlierDaemonRunning says how to end a daemon that is already running,
+// whether or not it answers on this user's pipe. One an earlier version started
+// listens on that shared pipe, where the app cannot reach it. 'daemon stop
+// --force' asks a daemon over IPC to stop, and ends by its process one that
+// cannot be asked or does not stop.
+const EarlierDaemonRunning = "To end it, including one an earlier version of Interlink started, run 'rescale-int daemon stop --force' or end the rescale-int process in Task Manager"
 
 // scmHost is what a service installed by an earlier version needs from
 // Windows when Windows starts it. windows_service.go supplies the real one; a

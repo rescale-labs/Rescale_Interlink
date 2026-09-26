@@ -140,15 +140,36 @@ func (a *trayApp) startupTasks() {
 		return
 	}
 
-	// Don't start a second daemon if one is already running for this user.
-	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+	// At logon a mapped drive can reconnect after the tray starts, so the
+	// download folder gets about a minute before Start reports it.
+	if daemonCfg != nil && filepath.IsAbs(daemonCfg.Daemon.DownloadFolder) {
+		for try := 1; try < folderTries && os.MkdirAll(daemonCfg.Daemon.DownloadFolder, 0755) != nil; try++ {
+			daemon.WriteStartupLog("Tray startup: download folder not available yet; trying again in %s", folderWait)
+			sleep(folderWait)
+		}
+	}
+
+	// Don't start a second daemon if one is already running for this user,
+	// including one started while startup waited. A pipe another user holds
+	// refuses every start, so that one is shown.
+	if blocked, reason := shouldBlockSubprocess(); blocked {
 		daemon.WriteStartupLog("Tray startup: not starting daemon: %s", reason)
+		if reason == service.PipeTaken {
+			a.fail(reason)
+		}
 		return
 	}
 
 	daemon.WriteStartupLog("Auto-download enabled — starting daemon on tray launch")
 	a.startService()
 }
+
+// folderTries is how often startup tries the download folder, folderWait
+// apart.
+const (
+	folderTries = 5
+	folderWait  = 15 * time.Second
+)
 
 func onExit() {
 	if app != nil {
@@ -259,8 +280,13 @@ func (a *trayApp) fail(why string) {
 	redraw(a)
 }
 
-// redraw is a variable so a test can run an action's failure without a tray.
-var redraw = (*trayApp).updateUI
+// redraw, shouldBlockSubprocess and sleep are variables so a test can run an
+// action without a tray, a daemon or the waits.
+var (
+	redraw                = (*trayApp).updateUI
+	shouldBlockSubprocess = service.ShouldBlockSubprocess
+	sleep                 = time.Sleep
+)
 
 // setMenuItem shows+enables or hides a systray menu item.
 func setMenuItem(mi *systray.MenuItem, enabled bool) {
@@ -316,7 +342,7 @@ func (a *trayApp) handleMenuClicks() {
 // startService starts the auto-download daemon if not already running.
 // Only blocks subprocess launch when a Windows Service is already running.
 func (a *trayApp) startService() {
-	if blocked, reason := service.ShouldBlockSubprocess(); blocked {
+	if blocked, reason := shouldBlockSubprocess(); blocked {
 		a.fail(reason)
 		return
 	}
@@ -334,6 +360,19 @@ func (a *trayApp) startService() {
 		a.fail(err.Error())
 		return
 	}
+
+	downloadDir := daemonCfg.Daemon.DownloadFolder
+	if downloadDir == "" {
+		downloadDir = config.DefaultDownloadFolder()
+	}
+
+	// Create download folder if it doesn't exist.
+	// The daemon also does MkdirAll, but pre-creating here gives better error messages.
+	if err := os.MkdirAll(downloadDir, 0755); err != nil {
+		a.fail(fmt.Sprintf("Cannot create download folder: %s", err))
+		return
+	}
+
 	// As the app's Start refuses: a daemon without a key could only fail.
 	if config.ResolveAPIKeyForCurrentUser("") == "" {
 		a.fail(ipc.CanonicalText[ipc.CodeNoAPIKey] + ". " + ipc.HintFor(ipc.CodeNoAPIKey))
@@ -353,18 +392,6 @@ func (a *trayApp) startService() {
 	// Check if CLI exists
 	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
 		a.fail(translateError(fmt.Errorf("CLI not found: rescale-int.exe")))
-		return
-	}
-
-	downloadDir := daemonCfg.Daemon.DownloadFolder
-	if downloadDir == "" {
-		downloadDir = config.DefaultDownloadFolder()
-	}
-
-	// Create download folder if it doesn't exist.
-	// The daemon also does MkdirAll, but pre-creating here gives better error messages.
-	if err := os.MkdirAll(downloadDir, 0755); err != nil {
-		a.fail(fmt.Sprintf("Cannot create download folder: %s", err))
 		return
 	}
 

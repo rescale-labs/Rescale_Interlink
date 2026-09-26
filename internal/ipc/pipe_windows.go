@@ -110,6 +110,24 @@ func IsPipeInUse() bool {
 	return err == nil && pipeInUse(name)
 }
 
+// PipeOwnedByAnotherUser reports whether this user's daemon pipe exists but
+// another user created it: another user owns it, or it does not admit this
+// user, as this user's own always does. No daemon of this user can listen
+// there until it is gone.
+func PipeOwnedByAnotherUser() bool {
+	name, err := UserPipeName(pipeBase)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	conn, err := DialUserPipe(ctx, name)
+	if err == nil {
+		conn.Close()
+	}
+	return errors.Is(err, errNotOurPipe) || errors.Is(err, ERROR_ACCESS_DENIED)
+}
+
 // pipeInUse checks if the named pipe exists (another daemon may own it).
 // Returns true if pipe exists (connected, busy, or access denied).
 // Returns false ONLY if pipe does not exist (ERROR_FILE_NOT_FOUND).

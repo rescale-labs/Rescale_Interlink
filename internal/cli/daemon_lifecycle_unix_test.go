@@ -394,8 +394,8 @@ func TestDaemonRunStopsOnSIGHUP(t *testing.T) {
 
 // On Windows, a daemon that holds the PID file but does not answer on this
 // version's pipe may be an earlier version's, which listens where this version
-// does not look: status and stop say how to end it, and do not send the user
-// to 'rescale-int daemon stop', which cannot reach it.
+// does not look: status and stop say how to end it, with 'daemon stop --force',
+// which ends it by its process.
 func TestDaemonStatusAndStopSayHowToEndAnEarlierVersionsDaemon(t *testing.T) {
 	isolateDaemonHome(t)
 	if err := daemon.WritePIDFile(); err != nil {
@@ -406,11 +406,10 @@ func TestDaemonStatusAndStopSayHowToEndAnEarlierVersionsDaemon(t *testing.T) {
 	onWindows = true
 	t.Cleanup(func() { onWindows = orig })
 
-	const want = "If an earlier version of Interlink started it, end the rescale-int process in Task Manager, or sign out and back in."
+	const want = "To end it, including one an earlier version of Interlink started, run 'rescale-int daemon stop --force' or end the rescale-int process in Task Manager."
 	for name, cmd := range map[string]*cobra.Command{"status": newDaemonStatusCmd(), "stop": newDaemonStopCmd()} {
-		out, err := runDaemonCommand(t, cmd)
-		if err != nil || !strings.Contains(out, want) || strings.Contains(out, "rescale-int daemon stop") {
-			t.Errorf("daemon %s: %v; want the line %q and no 'rescale-int daemon stop'\n%s", name, err, want, out)
+		if out, err := runDaemonCommand(t, cmd); err != nil || !strings.Contains(out, want) {
+			t.Errorf("daemon %s: %v; want the line %q\n%s", name, err, want, out)
 		}
 	}
 }

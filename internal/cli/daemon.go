@@ -1381,6 +1381,10 @@ Use 'daemon config edit' to modify an existing config.`,
 	}
 }
 
+// validateAutoDownloadSetup is the call 'daemon config validate' makes; a test
+// replaces it.
+var validateAutoDownloadSetup = (*api.Client).ValidateAutoDownloadSetup
+
 // newDaemonConfigValidateCmd creates the 'daemon config validate' command.
 func newDaemonConfigValidateCmd() *cobra.Command {
 	return &cobra.Command{
@@ -1433,9 +1437,14 @@ To create the custom field:
 
 			// Run validation
 			ctx := cmd.Context()
-			validation, err := apiClient.ValidateAutoDownloadSetup(ctx)
+			validation, err := validateAutoDownloadSetup(apiClient, ctx)
 			if err != nil {
 				return fmt.Errorf("validation failed: %w", err)
+			}
+			if !validation.CustomFieldsEnabled && len(validation.Errors) > 0 {
+				// The workspace could not be read. The platform's answer, such
+				// as a rejected key, decides whether that is reported.
+				return fmt.Errorf("validation failed: %s", validation.Errors[0])
 			}
 
 			// Display results
@@ -1477,8 +1486,10 @@ To create the custom field:
 			} else if len(validation.Errors) == 0 {
 				fmt.Println("✓ Workspace is configured for auto-download (with warnings).")
 			} else {
+				// What the workspace lacks is the user's to set up, not a
+				// failure to report.
 				fmt.Println("✗ Workspace needs configuration before auto-download can work.")
-				return fmt.Errorf("validation failed with %d error(s)", len(validation.Errors))
+				return reporting.UsageError(fmt.Errorf("validation failed with %d error(s)", len(validation.Errors)))
 			}
 
 			return nil

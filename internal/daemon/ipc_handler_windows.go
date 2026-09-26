@@ -68,7 +68,6 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 		ActiveDownloads: activeDownloads,
 		ActiveUsers:     1, // Single-user subprocess mode
 		Uptime:          uptime,
-		ServiceMode:     false,
 	}
 
 	// A daemon whose scans keep failing is running, not healthy. Report the
