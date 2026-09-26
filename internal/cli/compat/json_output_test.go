@@ -39,7 +39,7 @@ func TestFormatRescaleTime_ConvertsToUTC(t *testing.T) {
 
 func TestToCompatFileEntry_FixtureFields(t *testing.T) {
 	cf := &models.CloudFile{
-		ID:                   "qpOdrb",
+		ID:                   "HiJkLm",
 		Name:                 "test.txt",
 		TypeID:               1,
 		IsUploaded:           true,
@@ -49,7 +49,7 @@ func TestToCompatFileEntry_FixtureFields(t *testing.T) {
 		IV:                   "should-be-excluded",
 		PathParts:            &models.CloudFilePathParts{Container: "bucket", Path: "user/file.txt"},
 		Storage: &models.CloudFileStorage{
-			ID:             "pCTMk",
+			ID:             "PpQqR",
 			StorageType:    "S3Storage",
 			EncryptionType: "default",
 		},

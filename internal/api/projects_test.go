@@ -28,13 +28,13 @@ func projectsHandler() http.HandlerFunc {
 			"previous": nil,
 			"results": []map[string]interface{}{
 				{
-					"id":               "pCTMk",
+					"id":               "PpQqR",
 					"isDefault":        true,
 					"name":             "Project without a budget",
 					"remainingAmounts": []string{"(no budget)"},
 				},
 				{
-					"id":               "BNTMk",
+					"id":               "SsTtU",
 					"isDefault":        false,
 					"name":             "Project with a budget",
 					"remainingAmounts": []string{"All: My budget ($100.00 available)"},
@@ -57,7 +57,7 @@ func TestListProjects(t *testing.T) {
 		if len(projects) != 2 {
 			t.Fatalf("got %d projects, want 2", len(projects))
 		}
-		if projects[0].ID != "pCTMk" || projects[0].Name != "Project without a budget" || !projects[0].IsDefault {
+		if projects[0].ID != "PpQqR" || projects[0].Name != "Project without a budget" || !projects[0].IsDefault {
 			t.Errorf("first project = %+v", projects[0])
 		}
 		if projects[1].IsDefault {
@@ -145,7 +145,7 @@ func TestListProjects_PageLimitIsAnError(t *testing.T) {
 			"count": 1,
 			"next":  "/api/v2/users/me/projects/?page=next",
 			"results": []map[string]interface{}{
-				{"id": "pCTMk", "name": "one of very many"},
+				{"id": "PpQqR", "name": "one of very many"},
 			},
 		})
 	}))
@@ -295,8 +295,8 @@ func TestAssignProjectToJob_OrgCode(t *testing.T) {
 			assignedPath = r.URL.Path
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
-			if body["projectId"] != "pCTMk" {
-				t.Errorf("projectId = %q, want pCTMk", body["projectId"])
+			if body["projectId"] != "PpQqR" {
+				t.Errorf("projectId = %q, want PpQqR", body["projectId"])
 			}
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -321,7 +321,7 @@ func TestAssignProjectToJob_OrgCode(t *testing.T) {
 			assignedPath, profileCalls = "", 0
 			client := newTestClient(t, server.URL)
 
-			if err := client.AssignProjectToJob(context.Background(), tt.orgCode, "job123", "pCTMk"); err != nil {
+			if err := client.AssignProjectToJob(context.Background(), tt.orgCode, "job123", "PpQqR"); err != nil {
 				t.Fatalf("AssignProjectToJob: %v", err)
 			}
 			if assignedPath != tt.wantPath {

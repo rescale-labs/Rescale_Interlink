@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// TestAzureCredentialsUnmarshal_SharedFile tests parsing a real API response
+// TestAzureCredentialsUnmarshal_SharedFile tests parsing the API response
 // for shared file credentials where paths contains objects with per-file SAS tokens.
 func TestAzureCredentialsUnmarshal_SharedFile(t *testing.T) {
-	// Real API response format for shared-file credential requests
+	// The API's response format for shared-file credential requests
 	jsonData := `{
 		"storageType": "AzureStorage",
 		"storageDir": "user/abc123/",
@@ -18,7 +18,7 @@ func TestAzureCredentialsUnmarshal_SharedFile(t *testing.T) {
 			{
 				"path": "user/abc123/output/results.dat",
 				"pathParts": {
-					"container": "rescale-files",
+					"container": "example-container",
 					"path": "user/abc123/output/results.dat"
 				},
 				"sasToken": "sv=2021-06-08&sr=b&sp=r&se=2026-01-01T00:00:00Z&sig=per-file-sig"
@@ -52,8 +52,8 @@ func TestAzureCredentialsUnmarshal_SharedFile(t *testing.T) {
 	if p.PathParts == nil {
 		t.Fatal("Paths[0].PathParts should not be nil")
 	}
-	if p.PathParts.Container != "rescale-files" {
-		t.Errorf("PathParts.Container = %q, want %q", p.PathParts.Container, "rescale-files")
+	if p.PathParts.Container != "example-container" {
+		t.Errorf("PathParts.Container = %q, want %q", p.PathParts.Container, "example-container")
 	}
 	if p.PathParts.Path != "user/abc123/output/results.dat" {
 		t.Errorf("PathParts.Path = %q, want %q", p.PathParts.Path, "user/abc123/output/results.dat")
@@ -108,12 +108,12 @@ func TestAzureCredentialsUnmarshal_MultiplePaths(t *testing.T) {
 		"paths": [
 			{
 				"path": "user/abc123/file1.dat",
-				"pathParts": {"container": "rescale-files", "path": "user/abc123/file1.dat"},
+				"pathParts": {"container": "example-container", "path": "user/abc123/file1.dat"},
 				"sasToken": "sas-for-file1"
 			},
 			{
 				"path": "user/abc123/file2.dat",
-				"pathParts": {"container": "rescale-files", "path": "user/abc123/file2.dat"},
+				"pathParts": {"container": "example-container", "path": "user/abc123/file2.dat"},
 				"sasToken": "sas-for-file2"
 			}
 		]

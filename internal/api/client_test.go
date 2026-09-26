@@ -345,7 +345,7 @@ func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
 			t.Errorf("page_size = %q, want 50", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		// Mirrors a real captured trash-bin response: filesymlink entries carry
+		// The trash-bin response shape this pins: filesymlink entries carry
 		// only {type, item} with no top-level id. The id used for recover/delete
 		// (SymlinkID) is item.id.
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -353,7 +353,7 @@ func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
 				{
 					"type": "filesymlink",
 					"item": map[string]interface{}{
-						"id":            "tqmdnn",
+						"id":            "uvwxyz",
 						"name":          "result.dat",
 						"decryptedSize": "12345",
 						"dateInserted":  "2026-05-01T12:00:00Z",
@@ -381,11 +381,11 @@ func TestListTrashBinPage_ParsesFilesymlinkID(t *testing.T) {
 	if len(contents.Files) != 1 {
 		t.Fatalf("len(Files) = %d, want 1", len(contents.Files))
 	}
-	if contents.Files[0].ID != "tqmdnn" {
-		t.Errorf("Files[0].ID = %q, want tqmdnn", contents.Files[0].ID)
+	if contents.Files[0].ID != "uvwxyz" {
+		t.Errorf("Files[0].ID = %q, want uvwxyz", contents.Files[0].ID)
 	}
-	if contents.Files[0].SymlinkID != "tqmdnn" {
-		t.Errorf("Files[0].SymlinkID = %q, want tqmdnn", contents.Files[0].SymlinkID)
+	if contents.Files[0].SymlinkID != "uvwxyz" {
+		t.Errorf("Files[0].SymlinkID = %q, want uvwxyz", contents.Files[0].SymlinkID)
 	}
 	if len(contents.Folders) != 1 || contents.Folders[0].ID != "folder-789" {
 		t.Fatalf("Folders = %#v, want folder-789", contents.Folders)
@@ -457,7 +457,7 @@ func TestGetStorageCredentials_AzureSharedFile(t *testing.T) {
 				{
 					"path": "user/abc123/output/results.dat",
 					"pathParts": map[string]string{
-						"container": "rescale-files",
+						"container": "example-container",
 						"path":      "user/abc123/output/results.dat",
 					},
 					"sasToken": "per-file-sas-token",
@@ -478,7 +478,7 @@ func TestGetStorageCredentials_AzureSharedFile(t *testing.T) {
 			StorageType: "AzureStorage",
 		},
 		PathParts: &models.CloudFilePathParts{
-			Container: "rescale-files",
+			Container: "example-container",
 			Path:      "user/abc123/output/results.dat",
 		},
 	}
@@ -830,11 +830,11 @@ func TestArchiveContents_PostsCorrectURLAndBody(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	err := client.ArchiveContents(context.Background(), "QWGjp", []string{"f1", "f2"}, []string{"d1"})
+	err := client.ArchiveContents(context.Background(), "MmNnO", []string{"f1", "f2"}, []string{"d1"})
 	if err != nil {
 		t.Fatalf("ArchiveContents() error = %v", err)
 	}
-	if gotPath != "/api/v3/folders/QWGjp/contents/archive/" {
+	if gotPath != "/api/v3/folders/MmNnO/contents/archive/" {
 		t.Errorf("path = %q, want folder-scoped archive endpoint", gotPath)
 	}
 	if len(gotBody["fileIds"]) != 2 || gotBody["fileIds"][0] != "f1" {
@@ -862,7 +862,7 @@ func TestArchiveContents_EncodesEmptyListsNotNull(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	if err := client.ArchiveContents(context.Background(), "QWGjp", []string{"f1"}, nil); err != nil {
+	if err := client.ArchiveContents(context.Background(), "MmNnO", []string{"f1"}, nil); err != nil {
 		t.Fatalf("ArchiveContents() error = %v", err)
 	}
 	if strings.Contains(raw, "null") {

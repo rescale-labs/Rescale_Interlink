@@ -151,7 +151,7 @@ func TestResolvePathInDirectory(t *testing.T) {
 // Job and file IDs from the server end up in local paths (collision suffixes,
 // per-job folders), so anything beyond the ID charset is refused.
 func TestValidateID(t *testing.T) {
-	for _, id := range []string{"WgbDnb", "abc123", "A", "job-1_b"} {
+	for _, id := range []string{"NoPqRs", "abc123", "A", "job-1_b"} {
 		if err := ValidateID(id); err != nil {
 			t.Errorf("ValidateID(%q) = %v, want nil", id, err)
 		}

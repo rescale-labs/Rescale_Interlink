@@ -121,7 +121,7 @@ func TestJobAutomationRequest_NilEnvVarsSerializesToNull(t *testing.T) {
 func TestJobAutomationRequest_NestedAutomationFormat(t *testing.T) {
 	// Verify the automation field serializes as nested {"id": "..."} not flat string
 	req := JobAutomationRequest{
-		Automation:           AutomationRef{ID: "YYnVk"},
+		Automation:           AutomationRef{ID: "JjKkL"},
 		EnvironmentVariables: map[string]string{},
 	}
 	data, err := json.Marshal(req)
@@ -129,7 +129,7 @@ func TestJobAutomationRequest_NestedAutomationFormat(t *testing.T) {
 		t.Fatalf("failed to marshal: %v", err)
 	}
 	s := string(data)
-	if !strings.Contains(s, `"automation":{"id":"YYnVk"}`) {
+	if !strings.Contains(s, `"automation":{"id":"JjKkL"}`) {
 		t.Errorf("expected nested automation format, got: %s", s)
 	}
 }

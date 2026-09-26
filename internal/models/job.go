@@ -29,7 +29,7 @@ type JobSpec struct {
 
 	// LicenseFeatureName and LicensesPerJob describe one user-defined license
 	// feature: the job checks out LicensesPerJob seats of LicenseFeatureName from
-	// the customer's own license server. Optional, and only meaningful together —
+	// the user's own license server. Optional, and only meaningful together —
 	// see NewUserDefinedLicense for the payload they produce.
 	LicenseFeatureName string
 	LicensesPerJob     int
@@ -170,7 +170,7 @@ type JobAnalysisRequest struct {
 const UserSpecifiedFeatureSetName = "USER_SPECIFIED_0"
 
 // UserDefinedLicense is the userDefinedLicenseSettings payload for a job that
-// checks licenses out of the customer's own license server.
+// checks licenses out of the user's own license server.
 type UserDefinedLicense struct {
 	FeatureSets []LicenseFeatureSet `json:"featureSets"`
 }

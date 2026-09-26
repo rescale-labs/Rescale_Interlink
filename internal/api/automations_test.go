@@ -9,8 +9,8 @@ import (
 
 // TestListAutomations_DecodesObjectEnvironmentVariables verifies that the
 // automations array decodes when environmentVariables is an array of objects
-// ({name, defaultValue}) rather than strings. This mirrors a real captured
-// response that previously failed to decode (defaultValue may be null).
+// ({name, defaultValue}) rather than strings: the response shape that
+// previously failed to decode (defaultValue may be null).
 func TestListAutomations_DecodesObjectEnvironmentVariables(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v3/automations/" {
@@ -21,8 +21,8 @@ func TestListAutomations_DecodesObjectEnvironmentVariables(t *testing.T) {
 		// Bare array (not paginated), with object-shaped environmentVariables.
 		w.Write([]byte(`[
 			{
-				"id": "ejoVk",
-				"name": "Metadata Extraction Automator",
+				"id": "VvWwX",
+				"name": "Example Automation",
 				"executeOn": "post",
 				"scriptName": "extract.sh",
 				"executionFrequency": 0,

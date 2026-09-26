@@ -508,10 +508,10 @@ func newFilesTagsCmd() *cobra.Command {
 Tags help organize and categorize files for easier discovery.
 
 Examples:
-  rescale-int files tags list BZRKLj
-  rescale-int files tags add BZRKLj simulation cfd v2
-  rescale-int files tags remove BZRKLj draft
-  rescale-int files tags set BZRKLj final production`,
+  rescale-int files tags list TuVwXy
+  rescale-int files tags add TuVwXy simulation cfd v2
+  rescale-int files tags remove TuVwXy draft
+  rescale-int files tags set TuVwXy final production`,
 	}
 
 	tagsCmd.AddCommand(newFilesTagsListCmd())

@@ -57,10 +57,10 @@ func TestClassify_Nil(t *testing.T) {
 	}
 }
 
-// s3InternalError is a genuine S3 500 on uploading a file in dir.
+// s3InternalError is an S3 500 on uploading a file in dir, in the SDK's wording.
 func s3InternalError(dir string) string {
 	return "failed to upload /Users/jd/sweep/" + dir + "/in.dat: operation error S3: PutObject, https response error " +
-		"StatusCode: 500, RequestID: 8Q4NVDC1TMR1JS4Q, HostID: 7Zk0c2VkXhQ=, api error InternalError: " +
+		"StatusCode: 500, RequestID: EXAMPLEREQUESTID, HostID: EXAMPLEHOSTID=, api error InternalError: " +
 		"We encountered an internal error. Please try again."
 }
 
@@ -138,8 +138,8 @@ func TestClassifyErrorClass(t *testing.T) {
 		// A stated status with no class of its own is not left to a path's words.
 		{conflictUnder("network_model"), ClassInternal},
 		// A 504 is a timeout where its response says so, as S3's and Azure's do; its path never makes it one.
-		{"operation error S3: PutObject, https response error StatusCode: 504, RequestID: 8Q4NVDC1TMR1JS4Q, " +
-			"HostID: 7Zk0c2VkXhQ=, api error GatewayTimeout: Gateway Timeout", ClassTimeout},
+		{"operation error S3: PutObject, https response error StatusCode: 504, RequestID: EXAMPLEREQUESTID, " +
+			"HostID: EXAMPLEHOSTID=, api error GatewayTimeout: Gateway Timeout", ClassTimeout},
 		{"failed to stage block 0: PUT https://acct.blob.core.windows.net/c/run_1/in.dat\n---\n" +
 			"RESPONSE 504: 504 Gateway Timeout\nERROR CODE UNAVAILABLE", ClassTimeout},
 		{"failed to upload /Users/jd/sweep/timeout_study/in.dat: register file failed: status 504: " +
@@ -156,14 +156,14 @@ func TestClassifyErrorClass(t *testing.T) {
 	// never makes one: S3's RequestTimeout (a 400), an S3 body that timed out
 	// after its 200, and the API's 408 and 504.
 	for msg, want := range map[string]ErrorClass{
-		"operation error S3: UploadPart, https response error StatusCode: 400, RequestID: 8Q4NVDC1TMR1JS4Q, HostID: 7Zk0c2VkXhQ=, " +
+		"operation error S3: UploadPart, https response error StatusCode: 400, RequestID: EXAMPLEREQUESTID, HostID: EXAMPLEHOSTID=, " +
 			"api error RequestTimeout: Your socket connection to the server was not read from or written to within the timeout period.": ClassTimeout,
-		"operation error S3: CompleteMultipartUpload, https response error StatusCode: 200, RequestID: 8Q4NVDC1TMR1JS4Q, " +
-			"HostID: 7Zk0c2VkXhQ=, context deadline exceeded": ClassTimeout,
+		"operation error S3: CompleteMultipartUpload, https response error StatusCode: 200, RequestID: EXAMPLEREQUESTID, " +
+			"HostID: EXAMPLEHOSTID=, context deadline exceeded": ClassTimeout,
 		"register file failed: status 408: 408 Request Timeout":      ClassTimeout,
 		"register file failed: status 504: upstream request timeout": ClassTimeout,
-		"operation error S3: CreateMultipartUpload, https response error StatusCode: 200, RequestID: 8Q4NVDC1TMR1JS4Q, " +
-			"HostID: 7Zk0c2VkXhQ=, deserialization failed, failed to decode response body, unexpected EOF": ClassInternal,
+		"operation error S3: CreateMultipartUpload, https response error StatusCode: 200, RequestID: EXAMPLEREQUESTID, " +
+			"HostID: EXAMPLEHOSTID=, deserialization failed, failed to decode response body, unexpected EOF": ClassInternal,
 		`register file failed: status 400: {"name": ["This field is required."]}`: ClassClientError,
 	} {
 		for _, at := range []string{"", "failed to upload /Users/jd/sweep/network_model/in.dat: ", "failed to upload /Users/jd/sweep/timeout_study/in.dat: "} {

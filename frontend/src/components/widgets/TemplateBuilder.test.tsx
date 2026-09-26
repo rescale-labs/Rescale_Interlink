@@ -302,14 +302,14 @@ describe('TemplateBuilder cores stepper', () => {
 })
 
 const NO_BUDGET: Project = {
-  id: 'pCTMk',
+  id: 'PpQqR',
   name: 'Zebra project',
   isDefault: true,
   remainingAmounts: ['(no budget)'],
 }
 
 const WITH_BUDGET: Project = {
-  id: 'BNTMk',
+  id: 'SsTtU',
   name: 'Alpha project',
   isDefault: false,
   remainingAmounts: ['All: My budget ($100.00 available)'],

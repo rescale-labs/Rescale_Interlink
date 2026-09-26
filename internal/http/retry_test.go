@@ -107,7 +107,7 @@ func TestClassifyError(t *testing.T) {
 		{"dns temporary", &net.DNSError{Err: "server misbehaving", Name: "api.rescale.com", IsTemporary: true}, ErrorTypeNetwork},
 
 		// DNS errors — string fallbacks (SDK-wrapped)
-		{"dns no such host string", fmt.Errorf("dial tcp: lookup prod-rescale-platform.s3.us-east-1.amazonaws.com: no such host"), ErrorTypeNetwork},
+		{"dns no such host string", fmt.Errorf("dial tcp: lookup example-bucket.s3.us-east-1.amazonaws.com: no such host"), ErrorTypeNetwork},
 		{"dns temporary failure string", fmt.Errorf("temporary failure in name resolution"), ErrorTypeNetwork},
 		{"dns server misbehaving string", fmt.Errorf("lookup api.rescale.com: server misbehaving"), ErrorTypeNetwork},
 		{"dns nodename macOS string", fmt.Errorf("nodename nor servname provided, or not known"), ErrorTypeNetwork},
@@ -181,7 +181,7 @@ func TestExecuteWithRetry_DNSError(t *testing.T) {
 	err := ExecuteWithRetry(ctx, cfg, func() error {
 		calls++
 		if calls == 1 {
-			return &net.DNSError{Err: "no such host", Name: "prod-rescale-platform.s3.us-east-1.amazonaws.com"}
+			return &net.DNSError{Err: "no such host", Name: "example-bucket.s3.us-east-1.amazonaws.com"}
 		}
 		return nil // Success on second attempt
 	})

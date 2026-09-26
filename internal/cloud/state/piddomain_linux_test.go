@@ -45,7 +45,7 @@ func writeMachineID(t *testing.T, contents string) string {
 // tree, and number their processes independently — so the machine alone would
 // put them in one domain and let each read the other's live PIDs as dead.
 func TestReadPIDDomain_TellsTwoNamespacesOfOneMachineApart(t *testing.T) {
-	machine := writeMachineID(t, "1cd67aa9d1b04b8f9a2c0e5f6b7d8e90\n")
+	machine := writeMachineID(t, "0123456789abcdef0123456789abcdef\n")
 	withMachineIDFiles(t, machine)
 
 	withPIDNamespaceLink(t, "pid:[4026531836]")
@@ -63,7 +63,7 @@ func TestReadPIDDomain_TellsTwoNamespacesOfOneMachineApart(t *testing.T) {
 	if container == host {
 		t.Errorf("two PID namespaces of one machine report one domain %q", host)
 	}
-	if !strings.Contains(host, "1cd67aa9d1b04b8f9a2c0e5f6b7d8e90") {
+	if !strings.Contains(host, "0123456789abcdef0123456789abcdef") {
 		t.Errorf("the domain %q does not carry the machine identifier; two machines could then answer to one namespace number", host)
 	}
 }
@@ -74,7 +74,7 @@ func TestReadPIDDomain_TellsTwoNamespacesOfOneMachineApart(t *testing.T) {
 // cross exactly the boundary this is for.
 func TestReadPIDDomain_WithoutTheParts(t *testing.T) {
 	t.Run("no readable namespace", func(t *testing.T) {
-		withMachineIDFiles(t, writeMachineID(t, "1cd67aa9d1b04b8f9a2c0e5f6b7d8e90"))
+		withMachineIDFiles(t, writeMachineID(t, "0123456789abcdef0123456789abcdef"))
 		withPIDNamespaceLink(t, "")
 
 		if domain, err := readPIDDomain(); err == nil {
@@ -116,10 +116,10 @@ func TestReadPIDDomain_RefusesAMachineIDThatIsNotOne(t *testing.T) {
 	}{
 		{"the systemd uninitialized marker", "uninitialized\n"},
 		{"all zeros", "00000000000000000000000000000000\n"},
-		{"a truncated identifier", "1cd67aa9d1b04b8f9a2c\n"},
+		{"a truncated identifier", "0123456789abcdef0123\n"},
 		{"not hexadecimal at all", "not-hex-at-all\n"},
-		{"upper case, which systemd never writes", "1CD67AA9D1B04B8F9A2C0E5F6B7D8E90\n"},
-		{"an identifier with something after it", "1cd67aa9d1b04b8f9a2c0e5f6b7d8e90 stale\n"},
+		{"upper case, which systemd never writes", "0123456789ABCDEF0123456789ABCDEF\n"},
+		{"an identifier with something after it", "0123456789abcdef0123456789abcdef stale\n"},
 	}
 
 	for _, testCase := range cases {
@@ -140,14 +140,14 @@ func TestReadPIDDomain_RefusesAMachineIDThatIsNotOne(t *testing.T) {
 func TestReadPIDDomain_PassesAnInvalidMachineIDForTheFallback(t *testing.T) {
 	withMachineIDFiles(t,
 		writeMachineID(t, "uninitialized\n"),
-		writeMachineID(t, "8f0142bc5e3a47d1b6c9a0f2e4d7c531\n"))
+		writeMachineID(t, "fedcba9876543210fedcba9876543210\n"))
 	withPIDNamespaceLink(t, "pid:[4026531836]")
 
 	domain, err := readPIDDomain()
 	if err != nil {
 		t.Fatalf("readPIDDomain failed with a valid identifier behind an invalid one: %v", err)
 	}
-	if !strings.Contains(domain, "8f0142bc5e3a47d1b6c9a0f2e4d7c531") {
+	if !strings.Contains(domain, "fedcba9876543210fedcba9876543210") {
 		t.Errorf("the domain %q does not carry the identifier the fallback file holds", domain)
 	}
 	if strings.Contains(domain, "uninitialized") {
@@ -158,7 +158,7 @@ func TestReadPIDDomain_PassesAnInvalidMachineIDForTheFallback(t *testing.T) {
 // TestReadPIDDomain_FallsBackToTheSecondMachineIDFile covers the systems that
 // keep the identifier only where D-Bus put it.
 func TestReadPIDDomain_FallsBackToTheSecondMachineIDFile(t *testing.T) {
-	dbus := writeMachineID(t, "8f0142bc5e3a47d1b6c9a0f2e4d7c531")
+	dbus := writeMachineID(t, "fedcba9876543210fedcba9876543210")
 	withMachineIDFiles(t, filepath.Join(t.TempDir(), "absent"), dbus)
 	withPIDNamespaceLink(t, "pid:[4026531836]")
 
@@ -166,7 +166,7 @@ func TestReadPIDDomain_FallsBackToTheSecondMachineIDFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readPIDDomain failed with only the fallback file: %v", err)
 	}
-	if !strings.Contains(domain, "8f0142bc5e3a47d1b6c9a0f2e4d7c531") {
+	if !strings.Contains(domain, "fedcba9876543210fedcba9876543210") {
 		t.Errorf("the domain %q does not carry the identifier the fallback file holds", domain)
 	}
 }

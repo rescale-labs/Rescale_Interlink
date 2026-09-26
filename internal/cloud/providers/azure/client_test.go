@@ -38,7 +38,7 @@ func credsWithPath(containerSAS, path, perFileSAS string) *models.AzureCredentia
 		Paths: []models.AzureCredentialPath{
 			{
 				Path:      path,
-				PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: path},
+				PathParts: &models.CloudFilePathParts{Container: "example-container", Path: path},
 				SASToken:  perFileSAS,
 			},
 		},
@@ -88,7 +88,7 @@ func TestBuildSASURL(t *testing.T) {
 			accountName: "sharedaccount",
 			creds:       credsWithPath("container-level-sas", "user/abc/shared-output.dat", "per-file-sas-for-shared"),
 			fileInfo: &models.CloudFile{
-				PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: "user/abc/shared-output.dat"},
+				PathParts: &models.CloudFilePathParts{Container: "example-container", Path: "user/abc/shared-output.dat"},
 			},
 			wantSubstr: []string{"per-file-sas-for-shared"},
 			wantAbsent: []string{"container-level-sas"},
@@ -98,7 +98,7 @@ func TestBuildSASURL(t *testing.T) {
 			accountName: "myaccount",
 			creds:       credsWithPath("container-level-sas", "user/abc/different-file.dat", "per-file-sas-other"),
 			fileInfo: &models.CloudFile{
-				PathParts: &models.CloudFilePathParts{Container: "rescale-files", Path: "user/abc/wanted-file.dat"},
+				PathParts: &models.CloudFilePathParts{Container: "example-container", Path: "user/abc/wanted-file.dat"},
 			},
 			wantSubstr: []string{"container-level-sas"},
 		},

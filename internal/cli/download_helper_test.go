@@ -117,7 +117,7 @@ func TestFormatDownloadError(t *testing.T) {
 				fileID = "abc123"
 			}
 			if jobID == "" && !tt.noJobID {
-				jobID = "BWuHag"
+				jobID = "BcDeFg"
 			}
 			storageType := tt.storageType
 			if storageType == "" {

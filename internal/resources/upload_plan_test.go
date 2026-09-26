@@ -188,7 +188,7 @@ func TestPlanUploadMultipartThresholdUnaffected(t *testing.T) {
 	}
 }
 
-// TestPlanUploadPartCountWithinLimit is the property the customer bug was about:
+// TestPlanUploadPartCountWithinLimit is the property the part-count bug was about:
 // whatever the file size and whatever the machine, the resulting part count fits
 // the backend and the pipeline fits the budget.
 func TestPlanUploadPartCountWithinLimit(t *testing.T) {
@@ -570,7 +570,7 @@ func TestPlanUploadWorkerFloor(t *testing.T) {
 	})
 
 	t.Run("the floor gives way before an upload is refused", func(t *testing.T) {
-		// The largest file each backend supports, and the customer's 4.2 TB, are
+		// The largest file each backend supports, and a user's 4.2 TB file, are
 		// decided by the one-worker minimum. A wider floor would shrink both.
 		for _, limits := range []UploadLimits{s3Limits, azureLimits} {
 			mgr := planTestManager(t, 64*gib)

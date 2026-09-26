@@ -5,8 +5,8 @@
 // Routes file/folder picker calls through the freedesktop portal service
 // over the user session D-Bus, bypassing Wails/WebKit's embedded GTK file
 // chooser entirely. Fixes the Linux #41 SIGTRAP crash on hosts whose GTK
-// GSettings schema is missing the 'show-type-column' key (the customer's
-// RHEL 9 VDI case).
+// GSettings schema is missing the 'show-type-column' key (as on a
+// RHEL 9 VDI host).
 //
 // xdg-desktop-portal ships as a platform default on RHEL 9 GNOME sessions
 // (xdg-desktop-portal + xdg-desktop-portal-gtk RPMs). Minimal WMs without

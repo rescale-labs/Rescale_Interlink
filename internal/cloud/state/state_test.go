@@ -820,7 +820,7 @@ func TestAcquireUploadLock_RefusesReclamationWithoutAPIDDomain(t *testing.T) {
 			AcquiredAt: time.Now(),
 			LocalPath:  localPath,
 		})
-		withPIDDomain(t, "machine-1cd67aa9 pid:[4026531836]")
+		withPIDDomain(t, "machine-01234567 pid:[4026531836]")
 
 		lock, err := AcquireUploadLock(localPath)
 		if err == nil {
@@ -1429,8 +1429,8 @@ func TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain(t *testing.T) {
 	const deadPID = 424260
 	// This machine, as the operating system named it, and the same machine
 	// running the containers that share it.
-	const thisDomain = "machine-1cd67aa9 pid:[4026531836]"
-	const anotherNamespaceHere = "machine-1cd67aa9 pid:[4026532210]"
+	const thisDomain = "machine-01234567 pid:[4026531836]"
+	const anotherNamespaceHere = "machine-01234567 pid:[4026532210]"
 	acquired := time.Now().Add(-time.Hour).Round(time.Second)
 
 	cases := []struct {
@@ -1448,7 +1448,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain(t *testing.T) {
 				writeLockFile(t, localPath, uploadLockState{
 					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
 					Host: lockHost, Owner: lockOwner,
-					PIDDomain:  "machine-8f0142bc pid:[4026531836]",
+					PIDDomain:  "machine-fedcba98 pid:[4026531836]",
 					AcquiredAt: acquired, LocalPath: localPath,
 				})
 			},
@@ -1474,7 +1474,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain(t *testing.T) {
 				writeLockFile(t, localPath, uploadLockState{
 					ProcessID: deadPID, OwnerToken: "owner-elsewhere",
 					Host: "another-host", Owner: lockOwner + "-someone-else",
-					PIDDomain:  "machine-8f0142bc pid:[4026531836]",
+					PIDDomain:  "machine-fedcba98 pid:[4026531836]",
 					AcquiredAt: acquired, LocalPath: localPath,
 				})
 			},
@@ -1490,7 +1490,7 @@ func TestAcquireUploadLock_RefusesALockFromAnotherPIDDomain(t *testing.T) {
 				// that wrote one was released.
 				interim := fmt.Sprintf("{\n  \"process_id\": %d,\n  \"owner_token\": %q,\n  \"host\": %q,\n  \"owner\": %q,\n  \"install_id\": %q,\n  \"acquired_at\": %q,\n  \"local_path\": %q\n}",
 					deadPID, "owner-elsewhere", lockHost, lockOwner,
-					"c9d2f0a17b4e6538c9d2f0a17b4e6538",
+					"00112233445566778899aabbccddeeff",
 					acquired.Format(time.RFC3339Nano), localPath)
 				if err := os.WriteFile(localPath+".upload.lock", []byte(interim), 0600); err != nil {
 					t.Fatalf("plant an interim-format lock: %v", err)

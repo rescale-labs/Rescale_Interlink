@@ -136,7 +136,7 @@ type StorageInfo struct {
 type ConnectionSettings struct {
 	Region         string `json:"region"`         // AWS region (S3)
 	Container      string `json:"container"`      // S3 bucket or Azure container
-	PathBase       string `json:"pathBase"`       // Base path for blob storage (Azure: "ag9web", S3: folder prefix)
+	PathBase       string `json:"pathBase"`       // Base path for blob storage (Azure: "example", S3: folder prefix)
 	PathPartsBase  string `json:"pathPartsBase"`  // Base path for pathParts.path in API (Azure: "", S3: same as PathBase)
 	StorageAccount string `json:"storageAccount"` // Legacy field name
 	AccountName    string `json:"accountName"`    // Azure storage account name (Azure only) - CORRECT FIELD!

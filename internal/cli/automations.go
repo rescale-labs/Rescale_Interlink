@@ -105,10 +105,10 @@ func newAutomationsGetCmd() *cobra.Command {
 
 Examples:
   # Get automation details
-  rescale-int automations get --id YYnVk
+  rescale-int automations get --id JjKkL
 
   # Get JSON output
-  rescale-int automations get --id YYnVk --json`,
+  rescale-int automations get --id JjKkL --json`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if automationID == "" {
 				return fmt.Errorf("--id is required")
