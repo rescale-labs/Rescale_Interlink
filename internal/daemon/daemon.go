@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -139,6 +140,10 @@ type Daemon struct {
 
 	// Prevents concurrent poll() execution (Start, pollLoop, TriggerPoll can all invoke)
 	polling atomic.Bool
+
+	// lastChecked is when each job the last poll found was last checked, so
+	// a poll checks first the jobs checked longest ago. Only poll uses it.
+	lastChecked map[string]time.Time
 
 	// Lifecycle context — created in Start(), cancelled in Stop()
 	cancelFunc   context.CancelFunc
@@ -319,6 +324,7 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 	} else {
 		monitor = NewMonitor(apiClient, state, daemonCfg.Filter, logger)
 	}
+	monitor.flatten = daemonCfg.FlattenFolderStructure
 
 	// Daemon-scoped EventBus + TransferService. EventBus drives the shared
 	// transfer.Queue; IPC serializes from that queue on demand. No external
@@ -590,6 +596,12 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	// Find completed jobs that need downloading
 	result, err := d.monitor.FindCompletedJobs(scanCtx, pendingSet)
+	if ctx.Err() != nil {
+		// Daemon shutting down, not a failure.
+		d.logger.Info().Msg("Scan interrupted by context cancellation")
+		d.emitScanSummary(&ScanSummary{}, time.Since(scanStart), true, nil)
+		return
+	}
 	if err != nil {
 		if scanCtx.Err() == context.DeadlineExceeded {
 			d.logger.Error().Dur("duration", time.Since(scanStart)).Dur("budget", scanBudget).Msg("Scan timed out")
@@ -618,6 +630,21 @@ func (d *Daemon) poll(ctx context.Context) {
 
 	completed := result.Candidates
 
+	// New jobs first, then those checked longest ago: a poll that runs out
+	// of budget leaves the rest to the next, and this way every job gets its
+	// turn however many there are.
+	checked := make(map[string]time.Time, len(completed))
+	if result.WorkspaceErr != nil {
+		// Jobs in workspace folders that could not be listed went unlisted,
+		// not away: they keep their turns.
+		maps.Copy(checked, d.lastChecked)
+	}
+	for _, job := range completed {
+		checked[job.ID] = d.lastChecked[job.ID]
+	}
+	d.lastChecked = checked
+	slices.SortStableFunc(completed, func(a, b *CompletedJob) int { return checked[a.ID].Compare(checked[b.ID]) })
+
 	if len(completed) > 0 {
 		d.logger.Info().Msgf("Checking %d potential jobs...", len(completed))
 	}
@@ -633,7 +660,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	// poll that worked perfectly into a standing "scan failed" error, which is
 	// exactly the false alarm that makes a real one easy to ignore.
 	var totalDownloadTime time.Duration
-	for _, job := range completed {
+	for i, job := range completed {
 		select {
 		case <-ctx.Done():
 			// Daemon shutting down, not a failure.
@@ -648,24 +675,15 @@ func (d *Daemon) poll(ctx context.Context) {
 		default:
 		}
 
-		// The scan phase outrunning its budget is a health problem the user
-		// needs to see: before it was recorded, this path froze LastScanTime
-		// while the daemon still reported "running". Note this is measured on
-		// scan work only — see totalDownloadTime above.
-		if scanBudgetExceeded(time.Since(scanStart), totalDownloadTime, scanBudget) {
-			budgetErr := fmt.Errorf("scan did not finish within %s", scanBudget)
-			d.logger.Warn().
-				Dur("budget", scanBudget).
-				Dur("download_time", totalDownloadTime).
-				Msg("Scan budget exhausted; remaining jobs wait for the next poll")
-			d.recordScanError(budgetErr)
-			d.emitScanSummary(summary, time.Since(scanStart), true, budgetErr)
-			// This poll did real work — jobs were checked and possibly
-			// downloaded — so its progress is persisted and its timestamp
-			// advances. The recorded error is what says it was cut short.
-			d.persistPollProgress(summary)
-			return
+		// Out of budget, here or while the scan looked jobs up: the jobs left
+		// wait for the next poll, which checks them first. The poll is partial,
+		// not failed, and says how many it left. The budget is measured on scan
+		// work only — see totalDownloadTime above.
+		if summary.Unchecked > 0 || scanBudgetExceeded(time.Since(scanStart), totalDownloadTime, scanBudget) {
+			summary.Unchecked += len(completed) - i
+			break
 		}
+		checked[job.ID] = time.Now()
 
 		if d.cfg.Eligibility != nil {
 			// Per-call timeout prevents a single slow eligibility check from
@@ -683,6 +701,12 @@ func (d *Daemon) poll(ctx context.Context) {
 			// is written for it.
 			reason, eligible := eligResult.Reason, eligResult.EligibleForDownload
 			if eligible {
+				// Where the job lands is settled before it is claimed, so one
+				// that cannot land anywhere is refused with no tag put on it.
+				if _, err := d.jobBaseDir(ctx, job); err != nil {
+					d.countOutcome(summary, job, d.refuse(ctx, job, err))
+					continue
+				}
 				claimStart := time.Now()
 				reason, eligible = d.claim(ctx, job)
 				totalDownloadTime += time.Since(claimStart)
@@ -714,14 +738,17 @@ func (d *Daemon) poll(ctx context.Context) {
 		downloadStart := time.Now()
 		outcome := d.downloadJob(ctx, job)
 		totalDownloadTime += time.Since(downloadStart)
-		summary.AddOutcome(string(outcome))
-		if d.state.AttemptCount(job.ID) >= MaxDownloadAttempts {
-			d.logger.Warn().Msgf("GAVE UP: %s [%s] - %d download attempts failed; run 'rescale-int daemon retry --job-id %s' to try again",
-				job.Name, job.ID, MaxDownloadAttempts, job.ID)
-		}
+		d.countOutcome(summary, job, outcome)
 	}
 
-	d.emitScanSummary(summary, time.Since(scanStart), false, nil)
+	if summary.Unchecked > 0 {
+		d.logger.Warn().
+			Dur("budget", scanBudget).
+			Dur("download_time", totalDownloadTime).
+			Int("unchecked", summary.Unchecked).
+			Msg("Scan budget used up; the jobs left unchecked wait for the next poll")
+	}
+	d.emitScanSummary(summary, time.Since(scanStart), summary.Unchecked > 0, nil)
 	d.checkAllUnsetWarning(summary)
 
 	// Workspace folders that could not be listed went unscanned, which the
@@ -749,11 +776,21 @@ func scanBudgetExceeded(elapsed, downloadTime, budget time.Duration) bool {
 	return scanTime > budget
 }
 
+// countOutcome counts a download attempt's outcome, and says so when the job
+// has used up its attempts.
+func (d *Daemon) countOutcome(s *ScanSummary, job *CompletedJob, outcome DownloadOutcome) {
+	s.AddOutcome(string(outcome))
+	if d.state.AttemptCount(job.ID) >= MaxDownloadAttempts {
+		d.logger.Warn().Msgf("GAVE UP: %s [%s] - %d download attempts failed; run 'rescale-int daemon retry --job-id %s' to try again",
+			job.Name, job.ID, MaxDownloadAttempts, job.ID)
+	}
+}
+
 // persistPollProgress stamps the poll time, with how many jobs the poll left to
 // other clients, and writes state to disk. Called by every poll that ran to
 // completion or did partial work before being cut short.
 func (d *Daemon) persistPollProgress(s *ScanSummary) {
-	d.state.UpdateLastPoll(s.SkipBuckets[ReasonHasStartedTag])
+	d.state.UpdateLastPoll(s)
 	if err := d.state.Save(); err != nil {
 		d.logger.Error().Err(err).Msg("Failed to save state after poll")
 	}
@@ -764,9 +801,8 @@ func (d *Daemon) persistPollProgress(s *ScanSummary) {
 //
 //   - Complete: no markers, and the buckets sum to TotalScanned.
 //   - Interrupted: interrupted=true with partial counts, so the buckets may sum
-//     to less than TotalScanned. Ends a poll cut short by shutdown.
-//   - Interrupted and failed: interrupted=true plus a quoted error, again with
-//     partial counts. Ends a poll whose scan phase outran its budget.
+//     to less than TotalScanned. Ends a poll cut short by shutdown, or by its
+//     scan budget, when unchecked counts the jobs it left for the next poll.
 //   - Failed outright: a quoted error with every count zero. The scan never got
 //     past listing jobs.
 func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interrupted bool, scanErr error) {
@@ -825,7 +861,7 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 	}
 
 	d.logger.Info().Msgf(
-		"Poll complete: scanned=%d, eligibility-checked=%d, downloaded=%d, no_files=%d, failed=%d (partial=%d, list-failed=%d, dir-failed=%d), interrupted-jobs=%d, silent-skipped=%d (%s), logged-skipped=%d (%s)%s, duration=%.1fs%s",
+		"Poll complete: scanned=%d, eligibility-checked=%d, downloaded=%d, no_files=%d, failed=%d (partial=%d, list-failed=%d, dir-failed=%d), interrupted-jobs=%d, silent-skipped=%d (%s), logged-skipped=%d (%s), skipped-folders=%d, unchecked=%d%s, duration=%.1fs%s",
 		s.TotalScanned,
 		s.EligibilityChecked,
 		downloaded,
@@ -835,6 +871,8 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 		interruptedJobs,
 		silentTotal, silentBreakdown,
 		loggedTotal, loggedBreakdown,
+		s.SkippedFolders,
+		s.Unchecked,
 		interruptedTag,
 		duration.Seconds(),
 		errorTag,
@@ -958,70 +996,11 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
-	// The job's folder is named after its ID, which comes from the server.
-	if err := validation.ValidateID(job.ID); err != nil {
-		err = fmt.Errorf("invalid job ID: %w", err)
-		d.logger.Error().Err(err).Msg("Refusing to download job")
-		d.markFailed(ctx, job, "", err)
-		return OutcomeOutputDirCreateFailed
-	}
-
-	// Base directory. For jobs that live in a workspace folder, mirror the
-	// folder structure under DownloadDir unless flattening is enabled. The
-	// folder names come from the server, so each is held to the rules for
-	// every other server name, and the path must stay within DownloadDir. A
-	// path that cannot be mirrored fails the job, unless the job's own
-	// download path applies.
-	baseDir := d.cfg.DownloadDir
-	var mirrorErr error
-	if len(job.FolderPath) > 0 && !d.cfg.FlattenFolderStructure {
-		var dir string
-		if dir, mirrorErr = mirrorDir(d.cfg.DownloadDir, job.FolderPath); mirrorErr == nil {
-			baseDir = dir
-		}
-	}
-
-	// Check for custom download path from eligibility config. A per-job
-	// "Auto Download Path" override takes precedence over folder mirroring and
-	// must resolve to within DownloadDir.
-	if d.cfg.Eligibility != nil {
-		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
-			// Custom path must resolve to within DownloadDir to prevent
-			// arbitrary filesystem writes even when daemon runs as SYSTEM.
-			candidate := customPath
-			if !filepath.IsAbs(candidate) {
-				candidate = filepath.Join(d.cfg.DownloadDir, candidate)
-			}
-			candidate = filepath.Clean(candidate)
-
-			// Resolve symlinks on both paths to prevent symlink-based escapes.
-			realDownloadDir, err := filepath.EvalSymlinks(d.cfg.DownloadDir)
-			if err != nil {
-				realDownloadDir = filepath.Clean(d.cfg.DownloadDir)
-			}
-			realCandidate := resolvePathWithSymlinks(candidate)
-
-			if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
-				d.logger.Warn().
-					Str("job_id", job.ID).
-					Str("custom_path", customPath).
-					Str("download_dir", d.cfg.DownloadDir).
-					Err(err).
-					Msg("Rejecting custom download path: escapes download directory")
-			} else {
-				d.logger.Debug().
-					Str("job_id", job.ID).
-					Str("custom_path", customPath).
-					Str("resolved", realCandidate).
-					Msg("Using custom download path (validated under download directory)")
-				baseDir, mirrorErr = realCandidate, nil
-			}
-		}
-	}
-	if mirrorErr != nil {
-		d.logger.Error().Err(mirrorErr).Str("job_id", job.ID).Msg("Refusing to download job")
-		d.markFailed(ctx, job, "", mirrorErr)
-		return OutcomeOutputDirCreateFailed
+	// Settled again here, just before anything is written: poll settled it
+	// before claiming the job, and other callers do not.
+	baseDir, err := d.jobBaseDir(ctx, job)
+	if err != nil {
+		return d.refuse(ctx, job, err)
 	}
 
 	outputDir := ComputeOutputDir(baseDir, job.ID, job.Name, d.cfg.UseJobNameDir)
@@ -1503,6 +1482,77 @@ func (d *Daemon) releaseStarted(jobID string) bool {
 		d.logger.Error().Err(err).Msg("Failed to persist state")
 	}
 	return true
+}
+
+// jobBaseDir returns the folder a job's own folder goes in. That is the job's
+// own "Auto Download Path" when that lies within DownloadDir; otherwise, for a
+// job in a workspace folder, the mirror of that folder under DownloadDir,
+// unless flattening is enabled; otherwise DownloadDir. The folder names come
+// from the server, so each is held to the rules for every other server name,
+// and the path must stay within DownloadDir: a path that cannot be mirrored is
+// an error, unless the job's own download path applies. So is a job ID that is
+// not one, as the job's folder is named after it.
+func (d *Daemon) jobBaseDir(ctx context.Context, job *CompletedJob) (string, error) {
+	if err := validation.ValidateID(job.ID); err != nil {
+		return "", fmt.Errorf("invalid job ID: %w", err)
+	}
+	baseDir := d.cfg.DownloadDir
+	var mirrorErr error
+	if len(job.FolderPath) > 0 && !d.cfg.FlattenFolderStructure {
+		var dir string
+		if dir, mirrorErr = mirrorDir(d.cfg.DownloadDir, job.FolderPath); mirrorErr == nil {
+			baseDir = dir
+		}
+	}
+
+	// Check for custom download path from eligibility config. A per-job
+	// "Auto Download Path" override takes precedence over folder mirroring and
+	// must resolve to within DownloadDir.
+	if d.cfg.Eligibility != nil {
+		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
+			// Custom path must resolve to within DownloadDir to prevent
+			// arbitrary filesystem writes even when daemon runs as SYSTEM.
+			candidate := customPath
+			if !filepath.IsAbs(candidate) {
+				candidate = filepath.Join(d.cfg.DownloadDir, candidate)
+			}
+			candidate = filepath.Clean(candidate)
+
+			// Resolve symlinks on both paths to prevent symlink-based escapes.
+			realDownloadDir, err := filepath.EvalSymlinks(d.cfg.DownloadDir)
+			if err != nil {
+				realDownloadDir = filepath.Clean(d.cfg.DownloadDir)
+			}
+			realCandidate := resolvePathWithSymlinks(candidate)
+
+			if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
+				d.logger.Warn().
+					Str("job_id", job.ID).
+					Str("custom_path", customPath).
+					Str("download_dir", d.cfg.DownloadDir).
+					Err(err).
+					Msg("Rejecting custom download path: escapes download directory")
+			} else {
+				d.logger.Debug().
+					Str("job_id", job.ID).
+					Str("custom_path", customPath).
+					Str("resolved", realCandidate).
+					Msg("Using custom download path (validated under download directory)")
+				baseDir, mirrorErr = realCandidate, nil
+			}
+		}
+	}
+	if mirrorErr != nil {
+		return "", mirrorErr
+	}
+	return baseDir, nil
+}
+
+// refuse fails a job that cannot be downloaded, with the reason.
+func (d *Daemon) refuse(ctx context.Context, job *CompletedJob, err error) DownloadOutcome {
+	d.logger.Error().Err(err).Str("job_id", job.ID).Msg("Refusing to download job")
+	d.markFailed(ctx, job, "", err)
+	return OutcomeOutputDirCreateFailed
 }
 
 // mirrorDir returns the folder under downloadDir that mirrors a job's

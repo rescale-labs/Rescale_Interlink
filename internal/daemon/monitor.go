@@ -4,8 +4,10 @@ package daemon
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -201,7 +203,22 @@ type Monitor struct {
 	filter      *JobFilter
 	eligibility *EligibilityConfig
 	logger      *logging.Logger
+
+	// flatten is Config.FlattenFolderStructure: no workspace folder is then
+	// mirrored, so a folder's name is no reason to count it skipped.
+	flatten bool
+
+	// completedAt holds what the scans found of when the jobs they listed
+	// completed. A completed job's completion time never changes, so a scan
+	// cut short by its budget carries on where it stopped instead of starting
+	// over; and a lookup that failed is not repeated for lookupRetryAfter, so
+	// lookups that keep failing cannot spend the budget at every poll.
+	completedAt map[string]completion
 }
+
+// completion is when a job completed, or, the time zero, when looking that up
+// failed.
+type completion struct{ at, failed time.Time }
 
 // NewMonitor creates a new job monitor.
 func NewMonitor(client *api.Client, state *State, filter *JobFilter, logger *logging.Logger) *Monitor {
@@ -440,15 +457,36 @@ type CompletedJob struct {
 	FolderPath []string
 }
 
-// getJobCompletionTime retrieves the actual completion time from job status history.
+// getJobCompletionTime retrieves the actual completion time from job status history,
+// or from m.completedAt when an earlier scan did.
 // Uses completion time (not creation time) for accurate lookback filtering.
-// Retries once on failure (500ms delay) before returning error.
+// Retries once on failure (500ms delay) before returning error, unless ctx has
+// ended, which the retry could not outlast. A failure is returned again, with
+// no request, until lookupRetryAfter has passed.
 func (m *Monitor) getJobCompletionTime(ctx context.Context, jobID string) (time.Time, error) {
+	if c, ok := m.completedAt[jobID]; ok {
+		switch {
+		case !c.at.IsZero():
+			return c.at, nil
+		case time.Since(c.failed) < lookupRetryAfter:
+			return time.Time{}, errors.New("its completion time could not be looked up recently")
+		}
+	}
 	completionTime, err := m.getJobCompletionTimeOnce(ctx, jobID)
-	if err != nil {
+	if err != nil && ctx.Err() == nil {
 		// Retry once after 500ms
 		time.Sleep(500 * time.Millisecond)
 		completionTime, err = m.getJobCompletionTimeOnce(ctx, jobID)
+	}
+	if err == nil || ctx.Err() == nil {
+		if m.completedAt == nil {
+			m.completedAt = make(map[string]completion)
+		}
+		c := completion{at: completionTime}
+		if err != nil {
+			c.failed = time.Now()
+		}
+		m.completedAt[jobID] = c
 	}
 	return completionTime, err
 }
@@ -492,6 +530,14 @@ type ScanSummary struct {
 	// TotalScanned is the raw number of jobs returned by the API for this
 	// scan (before any filtering).
 	TotalScanned int
+
+	// SkippedFolders is how many workspace folders the scan skipped; see
+	// collectWorkspaceJobs.
+	SkippedFolders int
+
+	// Unchecked is how many jobs the scan left for the next poll when its
+	// budget ran out.
+	Unchecked int
 
 	// EligibilityChecked is the number of jobs that actually reached the
 	// CheckEligibility call — i.e., they passed Completed + not-already-
@@ -549,6 +595,10 @@ type jobWithPath struct {
 	folderPath []string
 }
 
+// lookupRetryAfter is how long a completion time that could not be looked up
+// is not asked for again. A variable so a test can shorten it.
+var lookupRetryAfter = time.Hour
+
 // maxWorkspaceFolderDepth bounds the recursive folder walk as a safety net
 // against cycles or pathological trees.
 const maxWorkspaceFolderDepth = 20
@@ -565,16 +615,21 @@ const maxWorkspaceFolderDepth = 20
 //  2. query the root once and map each job to its folder's path.
 //
 // A job whose folder is not in the map (e.g. an archived folder) is skipped.
-func (m *Monitor) collectWorkspaceJobs(ctx context.Context, creationCutoff time.Time) ([]jobWithPath, error) {
+//
+// It also returns how many folders it skipped: those buildFolderPaths leaves
+// out, and, unless the structure is flattened, those whose name cannot name a
+// folder here. The jobs in these last are kept: each fails with the reason,
+// unless it has its own download path.
+func (m *Monitor) collectWorkspaceJobs(ctx context.Context, creationCutoff time.Time) ([]jobWithPath, int, error) {
 	meta, err := m.apiClient.GetMetaFolders(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get workspace folders: %w", err)
+		return nil, 0, fmt.Errorf("failed to get workspace folders: %w", err)
 	}
 
 	root := meta.SharedWithWorkspace
 	if root.ID == "" {
 		m.logger.Debug().Msg("No sharedWithWorkspace root; skipping workspace folder scan")
-		return nil, nil
+		return nil, 0, nil
 	}
 
 	// Build folder-id -> folder path. The root maps to an empty path (jobs
@@ -582,12 +637,17 @@ func (m *Monitor) collectWorkspaceJobs(ctx context.Context, creationCutoff time.
 	// Archived folders and their descendants are omitted so their jobs are
 	// skipped.
 	pathByFolder := map[string][]string{root.ID: nil}
-	buildFolderPaths(root.Children, nil, pathByFolder, 1)
+	skipped := buildFolderPaths(root.Children, nil, pathByFolder, 1)
+	for _, path := range pathByFolder {
+		if !m.flatten && len(path) > 0 && validation.ValidateFilename(path[len(path)-1]) != nil {
+			skipped++
+		}
+	}
 
 	// One query for all jobs under the shared root.
 	jobs, err := m.apiClient.ListJobsInFolder(ctx, root.ID, creationCutoff)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list workspace jobs: %w", err)
+		return nil, 0, fmt.Errorf("failed to list workspace jobs: %w", err)
 	}
 
 	out := make([]jobWithPath, 0, len(jobs))
@@ -607,24 +667,28 @@ func (m *Monitor) collectWorkspaceJobs(ctx context.Context, creationCutoff time.
 		}
 		out = append(out, jobWithPath{job: jobs[i], folderPath: folderPath})
 	}
-	return out, nil
+	return out, skipped, nil
 }
 
 // buildFolderPaths fills pathByFolder with folder-id -> path-relative-to-shared-root
 // for each folder in the meta tree, appending the folder name to its parent's
-// path. Archived folders (and their descendants) are skipped.
-func buildFolderPaths(folders []models.MetaFolder, parentPath []string, pathByFolder map[string][]string, depth int) {
+// path. Archived folders and those below maxWorkspaceFolderDepth are skipped,
+// with their descendants; it returns how many it skipped, not counting those
+// descendants.
+func buildFolderPaths(folders []models.MetaFolder, parentPath []string, pathByFolder map[string][]string, depth int) (skipped int) {
 	if depth > maxWorkspaceFolderDepth {
-		return
+		return len(folders)
 	}
 	for _, f := range folders {
 		if f.IsArchived {
+			skipped++
 			continue
 		}
 		folderPath := append(slices.Clip(parentPath), f.Name)
 		pathByFolder[f.ID] = folderPath
-		buildFolderPaths(f.Children, folderPath, pathByFolder, depth+1)
+		skipped += buildFolderPaths(f.Children, folderPath, pathByFolder, depth+1)
 	}
+	return skipped
 }
 
 // FindCompletedJobs returns jobs that are completed and warrant an
@@ -682,9 +746,10 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 	worklist := make([]jobWithPath, 0, len(jobs))
 	seen := make(map[string]struct{}, len(jobs))
 	var wsErr error
+	var skippedFolders int
 	if m.eligibility != nil && m.eligibility.IncludeWorkspaceFolders {
 		var wsJobs []jobWithPath
-		wsJobs, wsErr = m.collectWorkspaceJobs(ctx, creationCutoff)
+		wsJobs, skippedFolders, wsErr = m.collectWorkspaceJobs(ctx, creationCutoff)
 		if wsErr != nil {
 			// Non-fatal: log and continue with personal jobs so a folder API
 			// hiccup does not stall the whole scan.
@@ -709,18 +774,28 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		worklist = append(worklist, jobWithPath{job: jobs[i]})
 	}
 
+	// Forget what the scans found of jobs no longer listed. Jobs in workspace
+	// folders that could not be listed went unlisted, not away.
+	if wsErr == nil {
+		maps.DeleteFunc(m.completedAt, func(id string, _ completion) bool {
+			_, listed := seen[id]
+			return !listed
+		})
+	}
+
 	// Debug-level only — verbose stats not useful in GUI
 	m.logger.Debug().Int("jobs_to_scan", len(worklist)).Msg("Scanning jobs from API")
 
 	var completed []*CompletedJob
 	summary := &ScanSummary{
 		TotalScanned:     len(worklist),
+		SkippedFolders:   skippedFolders,
 		SkipBuckets:      make(map[SkipReasonCode]int),
 		DownloadOutcomes: make(map[string]int),
 	}
 
 	now := time.Now()
-	for _, item := range worklist {
+	for i, item := range worklist {
 		job := item.job
 		// Check if job status is "Completed"
 		if job.JobStatus.Status != "Completed" {
@@ -780,6 +855,12 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		if !lookbackCutoff.IsZero() {
 			var err error
 			completedAt, err = m.getJobCompletionTime(ctx, job.ID)
+			if err != nil && ctx.Err() != nil {
+				// Stopping, or out of budget: every lookup left would fail, so
+				// the jobs from this one on are left for the next poll.
+				summary.Unchecked = len(worklist) - i
+				break
+			}
 			if err != nil {
 				summary.AddSkip(ReasonCompletionTimeAPIError)
 				m.logger.Debug().

@@ -647,6 +647,9 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 						fmt.Printf("    Download Folder: %s\n", user.DownloadFolder)
 						fmt.Printf("    Jobs Downloaded: %d\n", user.JobsDownloaded)
 						fmt.Printf("    Jobs Other Clients Are Downloading (last scan): %d\n", user.JobsHeldElsewhere)
+						fmt.Printf("    Workspace Folders Skipped (last scan): %d\n", user.WorkspaceFoldersSkipped)
+						fmt.Printf("    Jobs Outside the Lookback Window (last scan): %d\n", user.JobsOutsideLookback)
+						fmt.Printf("    Jobs Left Unchecked (last scan): %d\n", user.JobsUnchecked)
 					}
 				}
 
@@ -699,6 +702,10 @@ If no daemon is running (or IPC is not enabled), shows the state file with:
 			fmt.Printf("Downloaded Jobs: %d\n", state.GetDownloadedCount())
 			fmt.Printf("Failed Jobs: %d\n", state.GetFailedCount())
 			fmt.Printf("Jobs Other Clients Are Downloading (last poll): %d\n", state.GetHeldElsewhere())
+			folders, outsideLookback, unchecked := state.GetLeftOut()
+			fmt.Printf("Workspace Folders Skipped (last poll): %d\n", folders)
+			fmt.Printf("Jobs Outside the Lookback Window (last poll): %d\n", outsideLookback)
+			fmt.Printf("Jobs Left Unchecked (last poll): %d\n", unchecked)
 
 			// Show recent downloads
 			recent := state.GetRecentDownloads(5)

@@ -1553,12 +1553,19 @@ func (c *Client) ListJobsPage(ctx context.Context, page, pageSize int) ([]models
 func (c *Client) ListJobsWithCutoff(ctx context.Context, cutoff time.Time) ([]models.JobResponse, error) {
 	log.Printf("Daemon scan: Fetching jobs (cutoff: %s)", cutoff.Format("2006-01-02"))
 	// Order by dateInserted descending (newest first) for early termination
-	return c.listJobsSince(ctx, "/api/v3/jobs/?ordering=-dateInserted", cutoff)
+	return c.listJobsSince(ctx, "/api/v3/jobs/?ordering=-dateInserted", cutoff, 0)
 }
 
+// workspaceJobsPageSize is how many jobs a page of a workspace listing asks
+// for: few requests for thousands of jobs, while the page the listing stops on,
+// the first all older than the cutoff, brings few jobs back for nothing.
+const workspaceJobsPageSize = 200
+
 // listJobsSince pages through a jobs listing ordered newest first, stopping at
-// the first page whose jobs all predate the cutoff.
-func (c *Client) listJobsSince(ctx context.Context, nextURL string, cutoff time.Time) ([]models.JobResponse, error) {
+// the first page whose jobs all predate the cutoff. A pageSize above zero is
+// asked for on every page, since the server's next link is not relied on to
+// keep it.
+func (c *Client) listJobsSince(ctx context.Context, nextURL string, cutoff time.Time, pageSize int) ([]models.JobResponse, error) {
 	var allJobs []models.JobResponse
 	pageCount := 0
 
@@ -1566,6 +1573,12 @@ func (c *Client) listJobsSince(ctx context.Context, nextURL string, cutoff time.
 		pageCount++
 		if pageCount > constants.MaxPaginationPages {
 			return nil, fmt.Errorf("jobs listing incomplete after %d pages", constants.MaxPaginationPages)
+		}
+		if u, err := neturl.Parse(nextURL); err == nil && pageSize > 0 {
+			q := u.Query()
+			q.Set("page_size", strconv.Itoa(pageSize))
+			u.RawQuery = q.Encode()
+			nextURL = u.RequestURI()
 		}
 
 		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
@@ -1663,9 +1676,11 @@ func (c *Client) GetMetaFolders(ctx context.Context) (*models.MetaFolders, error
 //
 // f=0 means "all jobs in the folder" rather than the default "only my jobs"
 // (f=1). This is required for workspace-folder auto-download to see jobs owned
-// by other users that live in shared folders.
+// by other users that live in shared folders. Pages are larger than the
+// server's default: a workspace can hold thousands of jobs, and every page is a
+// request against the rate limit.
 func (c *Client) ListJobsInFolder(ctx context.Context, folderID string, cutoff time.Time) ([]models.JobResponse, error) {
-	return c.listJobsSince(ctx, fmt.Sprintf("/api/v3/jobs/?q=folder:%s&f=0&ordering=-dateInserted", neturl.QueryEscape(folderID)), cutoff)
+	return c.listJobsSince(ctx, fmt.Sprintf("/api/v3/jobs/?q=folder:%s&f=0&ordering=-dateInserted", neturl.QueryEscape(folderID)), cutoff, workspaceJobsPageSize)
 }
 
 // GetCoreTypes retrieves available hardware core types from the Rescale API.

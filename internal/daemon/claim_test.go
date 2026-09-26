@@ -606,6 +606,9 @@ func TestPoll_ClaimingIsNotChargedToTheScanBudget(t *testing.T) {
 	if msg, _ := d.LastScanError(); msg != "" {
 		t.Errorf("the poll recorded a scan error: %s", msg)
 	}
+	if _, _, unchecked := d.state.GetLeftOut(); unchecked != 0 {
+		t.Errorf("the poll ran out of budget, leaving %d jobs unchecked", unchecked)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	for _, id := range []string{"job1", "job2"} {

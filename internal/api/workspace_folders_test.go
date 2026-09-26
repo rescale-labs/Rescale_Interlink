@@ -12,8 +12,9 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 )
 
-// A folder's jobs are listed for every owner, newest first, and a "next" link
-// is followed on the configured host whatever host it names.
+// A folder's jobs are listed for every owner, newest first, 200 to a page, and
+// a "next" link is followed on the configured host whatever host it names,
+// still asking for pages of 200.
 func TestListJobsInFolder_FollowsNextOnTheConfiguredHost(t *testing.T) {
 	var queries []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -21,7 +22,7 @@ func TestListJobsInFolder_FollowsNextOnTheConfiguredHost(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		queries = append(queries, r.URL.RawQuery)
+		queries = append(queries, r.URL.Query().Encode())
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Query().Get("page") == "2" {
 			json.NewEncoder(w).Encode(map[string]any{"next": nil, "results": []map[string]any{
@@ -43,8 +44,8 @@ func TestListJobsInFolder_FollowsNextOnTheConfiguredHost(t *testing.T) {
 	if len(jobs) != 2 || jobs[1].ID != "job2" || jobs[1].Folder == nil || jobs[1].Folder.ID != "sub" || jobs[1].Folder.ParentID != "root" {
 		t.Errorf("jobs = %+v, want job1 and job2 with job2's folder", jobs)
 	}
-	if len(queries) != 2 || queries[0] != "q=folder:root&f=0&ordering=-dateInserted" || queries[1] != "page=2" {
-		t.Errorf("queries = %q, want the folder's jobs for every owner, newest first, then page 2 here", queries)
+	if len(queries) != 2 || queries[0] != "f=0&ordering=-dateInserted&page_size=200&q=folder%3Aroot" || queries[1] != "page=2&page_size=200" {
+		t.Errorf("queries = %q, want the folder's jobs for every owner, newest first, 200 a page, then page 2 here", queries)
 	}
 }
 

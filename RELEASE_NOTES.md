@@ -348,10 +348,16 @@ job in `Shared/ExampleFolder/Subfolder` lands in
 folder structure** (off by default), downloads everything directly into the
 download folder instead. Jobs in archived folders are skipped. A folder whose
 name cannot be used for a folder here (a name containing `:`, for example) is
-not mirrored: the job's download fails with the reason, shown by
-`daemon list --failed`, unless the structure is flattened or the job has its
+not mirrored: the job fails with the reason, shown by `daemon list --failed`,
+without being claimed from other clients, unless the structure is flattened or the job has its
 own "Auto Download Path". If the workspace folders cannot be listed, your own
 jobs are still downloaded and the failure is shown as the last scan error.
+`daemon status` shows how many workspace folders the last poll skipped
+(archived, or with a name that cannot be used for a folder here) and how many
+jobs it left out as older than the lookback window. A workspace with more jobs
+in the window than one poll can check is checked over several polls, each
+carrying on where the last stopped; such a poll is reported as partial, with
+the number of jobs it left unchecked, not as a failed scan.
 Configure both options in the GUI Setup tab or via
 `daemon config set include_workspace_folders true` /
 `daemon config set flatten_folder_structure true`.

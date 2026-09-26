@@ -96,14 +96,18 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 		lastPollPtr = &lastPoll
 	}
 
+	folders, outsideLookback, unchecked := h.daemon.state.GetLeftOut()
 	return []ipc.UserStatus{
 		{
-			Username:          username,
-			State:             state,
-			DownloadFolder:    h.daemon.cfg.DownloadDir,
-			LastScanTime:      lastPollPtr,
-			JobsDownloaded:    h.daemon.GetDownloadedCount(),
-			JobsHeldElsewhere: h.daemon.state.GetHeldElsewhere(),
+			Username:                username,
+			State:                   state,
+			DownloadFolder:          h.daemon.cfg.DownloadDir,
+			LastScanTime:            lastPollPtr,
+			JobsDownloaded:          h.daemon.GetDownloadedCount(),
+			JobsHeldElsewhere:       h.daemon.state.GetHeldElsewhere(),
+			WorkspaceFoldersSkipped: folders,
+			JobsOutsideLookback:     outsideLookback,
+			JobsUnchecked:           unchecked,
 		},
 	}
 }

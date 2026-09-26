@@ -305,11 +305,16 @@ func TestState_LastPoll(t *testing.T) {
 	}
 
 	// Update
-	state.UpdateLastPoll(0)
+	state.UpdateLastPoll(&ScanSummary{SkippedFolders: 2, Unchecked: 5, SkipBuckets: map[SkipReasonCode]int{
+		ReasonHasStartedTag: 1, ReasonTooOldCreationPrefilter: 3, ReasonOutsideLookbackWindow: 4}})
 
 	lastPoll := state.GetLastPoll()
 	if lastPoll.IsZero() {
 		t.Error("LastPoll should not be zero after update")
+	}
+	if folders, lookback, unchecked := state.GetLeftOut(); state.GetHeldElsewhere() != 1 || folders != 2 || lookback != 7 || unchecked != 5 {
+		t.Errorf("the last poll left %d jobs to others, %d folders and %d jobs out, %d unchecked; want 1, 2, 7 and 5",
+			state.GetHeldElsewhere(), folders, lookback, unchecked)
 	}
 
 	// Should be recent

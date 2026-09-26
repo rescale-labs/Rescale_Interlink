@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,19 +23,23 @@ import (
 )
 
 // Archived folders and everything under them are left out, folders with the
-// same name share a path, and the walk stops at maxWorkspaceFolderDepth.
+// same name share a path, and the walk stops at maxWorkspaceFolderDepth. Each
+// folder the walk stops at is counted.
 func TestBuildFolderPaths(t *testing.T) {
 	deep := models.MetaFolder{ID: fmt.Sprint(maxWorkspaceFolderDepth + 1), Name: "L"}
 	for level := maxWorkspaceFolderDepth; level >= 1; level-- {
 		deep = models.MetaFolder{ID: fmt.Sprint(level), Name: "L", Children: []models.MetaFolder{deep}}
 	}
 	got := map[string][]string{}
-	buildFolderPaths([]models.MetaFolder{
+	skipped := buildFolderPaths([]models.MetaFolder{
 		{ID: "a", Name: "A", Children: []models.MetaFolder{{ID: "a1", Name: "One"}, {ID: "a2", Name: "Two"}}},
 		{ID: "dup", Name: "A"},
 		{ID: "old", Name: "Old", IsArchived: true, Children: []models.MetaFolder{{ID: "old1", Name: "Kept?"}}},
 		deep,
 	}, nil, got, 1)
+	if skipped != 2 {
+		t.Errorf("%d folders skipped, want 2: the archived one and the first below the depth limit", skipped)
+	}
 
 	for id, want := range map[string][]string{"a": {"A"}, "a1": {"A", "One"}, "a2": {"A", "Two"}, "dup": {"A"}} {
 		if !slices.Equal(got[id], want) {
@@ -51,12 +57,20 @@ func TestBuildFolderPaths(t *testing.T) {
 }
 
 // workspaceServer serves the user's own jobs, the workspace folder tree and the
-// jobs under its shared root; a nil tree answers the tree request with a refusal.
+// jobs under its shared root, each completed a minute after it was created; a
+// nil tree answers the tree request with a refusal.
 func workspaceServer(t *testing.T, own, shared []map[string]any, tree any) string {
 	t.Helper()
+	created := map[string]string{}
+	for _, j := range append(slices.Clone(own), shared...) {
+		created[fmt.Sprint(j["id"])], _ = j["dateInserted"].(string)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body any
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/statuses/"):
+			at, _ := time.Parse(time.RFC3339, created[strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v3/jobs/"), "/")[0]])
+			body = map[string]any{"results": []models.JobStatusEntry{{Status: "Completed", StatusDate: at.Add(time.Minute).Format(time.RFC3339)}}}
 		case r.URL.Path == "/api/v3/meta/folders/" && tree == nil:
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -138,6 +152,100 @@ func TestFindCompletedJobs_FailedWorkspaceListingIsReturned(t *testing.T) {
 	}
 	if result.WorkspaceErr == nil || len(result.Candidates) != 1 || result.Candidates[0].ID != "own" {
 		t.Errorf("workspace error %v, candidates %d; want the failure and the user's own job", result.WorkspaceErr, len(result.Candidates))
+	}
+}
+
+// A poll counts the workspace folders it skipped, archived or with a name that
+// cannot name a folder here, and the jobs the lookback left out, in its summary
+// and for 'daemon status'. Flattened, a folder's name is no reason to skip it.
+func TestPoll_CountsWhatItLeftOut(t *testing.T) {
+	tree := map[string]any{"sharedWithWorkspace": map[string]any{"id": "root", "name": "Shared", "children": []any{
+		map[string]any{"id": "a", "name": "A"},
+		map[string]any{"id": "old", "name": "Old", "isArchived": true},
+		map[string]any{"id": "colon", "name": "Q1: results"},
+	}}}
+	aged := func(id string, age time.Duration) map[string]any {
+		j := completedJob(id, "a")
+		j["dateInserted"] = time.Now().Add(-age).UTC().Format(time.RFC3339)
+		return j
+	}
+	// Completed within the lookback window, before it, and created too long
+	// before it to have completed within it.
+	url := workspaceServer(t, nil, []map[string]any{aged("new", time.Hour), aged("finished", 10*24*time.Hour), aged("ancient", 60*24*time.Hour)}, tree)
+
+	for _, flatten := range []bool{false, true} {
+		elig := &EligibilityConfig{LookbackDays: 7, IncludeWorkspaceFolders: true}
+		d := newDownloadTestDaemon(t, url, t.TempDir(), elig)
+		var log bytes.Buffer
+		d.logger = logging.NewLoggerWithWriter(&log)
+		d.monitor = NewMonitorWithEligibility(d.apiClient, d.state, nil, elig, d.logger)
+		d.monitor.flatten = flatten
+
+		d.poll(context.Background())
+		folders := 2
+		if flatten {
+			folders = 1
+		}
+		summary := pollSummary(strings.Split(log.String(), "\n"))
+		for _, want := range []string{fmt.Sprintf("skipped-folders=%d", folders), "too_old_creation_prefilter=1", "outside_lookback_window=1"} {
+			if !strings.Contains(summary, want) {
+				t.Errorf("flatten %v: the summary lacks %s: %s", flatten, want, summary)
+			}
+		}
+		if f, l, _ := d.state.GetLeftOut(); f != folders || l != 2 {
+			t.Errorf("flatten %v: the state counts %d folders and %d jobs left out, want %d and 2", flatten, f, l, folders)
+		}
+		if users := NewIPCHandler(d, nil).GetUserList(); len(users) != 1 || users[0].WorkspaceFoldersSkipped != folders || users[0].JobsOutsideLookback != 2 {
+			t.Errorf("flatten %v: daemon status gets %+v, want %d folders and 2 jobs left out", flatten, users, folders)
+		}
+	}
+}
+
+// A job whose workspace folder cannot be mirrored, and which has no download
+// path of its own, is refused before it is claimed: it fails with the reason,
+// and no started tag goes on it, another member's job as it may be.
+func TestPoll_RefusesAnUnmirrorableJobBeforeClaimingIt(t *testing.T) {
+	shortenClaimSettle(t)
+	tree := map[string]any{"sharedWithWorkspace": map[string]any{"id": "root", "name": "Shared", "children": []any{
+		map[string]any{"id": "colon", "name": "Q1: results"},
+	}}}
+	var tagWrites atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body any
+		switch {
+		case r.URL.Path == "/api/v3/meta/folders/":
+			body = tree
+		case r.URL.Path == "/api/v3/jobs/" && r.URL.Query().Get("q") == "folder:root":
+			body = map[string]any{"results": []map[string]any{completedJob("shared1", "colon")}}
+		case r.URL.Path == "/api/v3/jobs/":
+			body = map[string]any{"results": []any{}}
+		case strings.HasSuffix(r.URL.Path, "/tags/") && r.Method == http.MethodGet:
+			body = []api.JobTag{}
+		case strings.HasSuffix(r.URL.Path, "/tags/"):
+			tagWrites.Add(1)
+			w.WriteHeader(http.StatusAccepted)
+			return
+		case strings.HasSuffix(r.URL.Path, "/custom-fields/"):
+			body = map[string]any{config.AutoDownloadFieldName: map[string]any{"value": "Enabled"}}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+	elig := &EligibilityConfig{IncludeWorkspaceFolders: true}
+	d := newDownloadTestDaemon(t, srv.URL, t.TempDir(), elig)
+	d.monitor.SetEligibility(elig)
+
+	d.poll(context.Background())
+	failed := d.state.GetFailedJobs()
+	if len(failed) != 1 || !strings.Contains(failed[0].Error, "cannot mirror") {
+		t.Errorf("failures %+v; want the job failed, saying its folder cannot be mirrored", failed)
+	}
+	if n := tagWrites.Load(); n != 0 {
+		t.Errorf("%d tag writes; want the job refused before any tag went on it", n)
 	}
 }
 

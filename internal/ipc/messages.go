@@ -142,6 +142,14 @@ type UserStatus struct {
 	// downloading them.
 	JobsHeldElsewhere int `json:"jobs_held_elsewhere,omitempty"`
 
+	// WorkspaceFoldersSkipped, JobsOutsideLookback and JobsUnchecked are how
+	// many workspace folders the last scan skipped, how many jobs it left out
+	// as older than the lookback window, and how many it left for the next
+	// scan when its budget ran out.
+	WorkspaceFoldersSkipped int `json:"workspace_folders_skipped,omitempty"`
+	JobsOutsideLookback     int `json:"jobs_outside_lookback,omitempty"`
+	JobsUnchecked           int `json:"jobs_unchecked,omitempty"`
+
 	// LastError is the most recent error for this user (if any), as canonical
 	// English text (see CanonicalText in errors.go).
 	LastError string `json:"last_error,omitempty"`

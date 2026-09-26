@@ -102,7 +102,8 @@ func TestDaemonRetryRemovesThisClientsStartedTags(t *testing.T) {
 	}
 }
 
-// 'daemon status' says how many jobs the last poll left to other clients.
+// 'daemon status' says how many jobs the last poll left to other clients, how
+// many workspace folders and jobs it left out, and how many it left unchecked.
 func TestDaemonStatusCountsJobsOtherClientsAreDownloading(t *testing.T) {
 	home, err := os.MkdirTemp("", "daemon-")
 	if err != nil {
@@ -112,13 +113,17 @@ func TestDaemonStatusCountsJobsOtherClientsAreDownloading(t *testing.T) {
 	for _, v := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME"} {
 		t.Setenv(v, home)
 	}
-	stateFile := writeStateFile(t, `{"version": "1.1.0", "downloaded": {}, "held_elsewhere": 2}`)
+	stateFile := writeStateFile(t, `{"version": "1.1.0", "downloaded": {}, "held_elsewhere": 2, "skipped_folders": 3, "outside_lookback": 4, "unchecked": 5}`)
 
 	out, err := runDaemonCommand(t, newDaemonStatusCmd(), "--state-file", stateFile)
 	if err != nil {
 		t.Fatalf("daemon status: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "Jobs Other Clients Are Downloading (last poll): 2") {
-		t.Errorf("daemon status does not count the jobs other clients are downloading:\n%s", out)
+	for _, want := range []string{"Jobs Other Clients Are Downloading (last poll): 2",
+		"Workspace Folders Skipped (last poll): 3", "Jobs Outside the Lookback Window (last poll): 4",
+		"Jobs Left Unchecked (last poll): 5"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("daemon status lacks %q:\n%s", want, out)
+		}
 	}
 }

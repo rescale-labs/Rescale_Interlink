@@ -61,6 +61,13 @@ type State struct {
 	// downloading them.
 	HeldElsewhere int `json:"held_elsewhere,omitempty"`
 
+	// SkippedFolders, OutsideLookback and Unchecked are how many workspace
+	// folders the last poll skipped, how many jobs it left out as older than
+	// the lookback window, and how many it left for the next poll.
+	SkippedFolders  int `json:"skipped_folders,omitempty"`
+	OutsideLookback int `json:"outside_lookback,omitempty"`
+	Unchecked       int `json:"unchecked,omitempty"`
+
 	// Version for state file format migration
 	Version string `json:"version"`
 
@@ -151,7 +158,8 @@ func (s *State) load(locked bool) error {
 		// Fully reinitialize — Unmarshal may have left partial state
 		s.Version = stateVersion
 		s.Downloaded = make(map[string]*DownloadedJob)
-		s.Started, s.Client, s.HeldElsewhere = nil, "", 0
+		s.Started, s.Client = nil, ""
+		s.HeldElsewhere, s.SkippedFolders, s.OutsideLookback, s.Unchecked = 0, 0, 0, 0
 		s.LastPoll = time.Time{}
 		return nil
 	}
@@ -616,13 +624,16 @@ func (s *State) ClearFailed(jobID string) {
 	}
 }
 
-// UpdateLastPoll records the last successful poll time, and how many jobs
-// the poll left to other clients downloading them.
-func (s *State) UpdateLastPoll(heldElsewhere int) {
+// UpdateLastPoll records the last successful poll time, and from its summary
+// what the poll left to other clients or left out.
+func (s *State) UpdateLastPoll(sum *ScanSummary) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.LastPoll = time.Now()
-	s.HeldElsewhere = heldElsewhere
+	s.HeldElsewhere = sum.SkipBuckets[ReasonHasStartedTag]
+	s.SkippedFolders = sum.SkippedFolders
+	s.OutsideLookback = sum.SkipBuckets[ReasonTooOldCreationPrefilter] + sum.SkipBuckets[ReasonOutsideLookbackWindow]
+	s.Unchecked = sum.Unchecked
 }
 
 // GetLastPoll returns the last successful poll time.
@@ -637,6 +648,15 @@ func (s *State) GetHeldElsewhere() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.HeldElsewhere
+}
+
+// GetLeftOut returns how many workspace folders the last poll skipped, how
+// many jobs it left out as older than the lookback window, and how many it
+// left for the next poll.
+func (s *State) GetLeftOut() (folders, outsideLookback, unchecked int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.SkippedFolders, s.OutsideLookback, s.Unchecked
 }
 
 // GetDownloadedCount returns the number of successfully downloaded jobs.

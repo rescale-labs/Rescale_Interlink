@@ -76,24 +76,26 @@ func TestEmitScanSummary(t *testing.T) {
 			name: "interrupted with an error",
 			summary: &ScanSummary{
 				TotalScanned:     3,
+				SkippedFolders:   2,
 				SkipBuckets:      map[SkipReasonCode]int{},
 				DownloadOutcomes: map[string]int{string(OutcomeDownloaded): 1},
 			},
 			elapsed:     600 * time.Second,
 			interrupted: true,
 			err:         errors.New("scan did not finish within 10m0s"),
-			wantSubstrs: []string{`interrupted=true, duration=600.0s, error=\"scan did not finish within 10m0s\"`},
+			wantSubstrs: []string{`logged-skipped=0 (none), skipped-folders=2, unchecked=0, interrupted=true, duration=600.0s, error=\"scan did not finish within 10m0s\"`},
 		},
 		{
 			name: "interrupted",
 			summary: &ScanSummary{
 				TotalScanned:     10,
+				Unchecked:        4,
 				SkipBuckets:      map[SkipReasonCode]int{ReasonNotCompleted: 2},
 				DownloadOutcomes: map[string]int{string(OutcomeInterrupted): 1},
 			},
 			elapsed:     1 * time.Second,
 			interrupted: true,
-			wantSubstrs: []string{"interrupted=true", "interrupted-jobs=1"},
+			wantSubstrs: []string{"unchecked=4, interrupted=true", "interrupted-jobs=1"},
 		},
 		{
 			// A poll that fails before the job loop still emits the one canonical

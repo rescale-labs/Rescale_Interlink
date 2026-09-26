@@ -712,13 +712,19 @@ the workspace's `sharedWithWorkspace` folder tree:
    folders and everything under them are left out; the walk is bounded by
    `maxWorkspaceFolderDepth`).
 2. One listing, `GET /api/v3/jobs/?q=folder:<root id>&f=0`, fetched newest first
-   through the same pager as the personal listing, is relied on to return the
+   through the same pager as the personal listing, 200 jobs a page (asked for on
+   every page), is relied on to return the
    jobs in every folder under the shared root, for every owner; each job's
    `folder.id` places it in the map, and a job whose folder is not in it is
    skipped.
 3. Results are merged with the personal jobs and deduped by job ID (the
    workspace entry wins, so a job keeps its folder path). Every job carries its
    folder path relative to the shared root.
+
+The poll summary (`skipped-folders=`) and `daemon status` count the folders a
+scan skipped: archived ones and those past the depth limit, not counting the
+folders under them, and, unless `flatten_folder_structure` is set, those whose
+name cannot be used for a folder here.
 
 Each candidate then passes the same per-job eligibility gate (the "Auto
 Download" custom field + tags). Because workspace folders can be polled by
@@ -756,7 +762,7 @@ path is mirrored under the download folder (e.g. `Shared/ExampleFolder/Subfolder
 Each folder name is held to the same rules as every other name the server
 supplies, and the mirrored path must stay within the download directory once
 symlinks are resolved; a job whose folder cannot be mirrored fails with the
-reason. A per-job "Auto Download Path" custom field (if present) still overrides
+reason, before it is claimed, so no started tag goes on it. A per-job "Auto Download Path" custom field (if present) still overrides
 the location. Jobs in archived folders are skipped; a folder-API failure is
 non-fatal: that poll scans personal jobs only and records the failure as its
 scan error.
@@ -887,7 +893,7 @@ The lookback window (`LookbackDays`, default 7) narrows what the scan considers,
 
 Completion is recorded on both sides. Locally the job is recorded as downloaded; remotely the downloaded-marker tag is applied, and that tag update is retried on its own so a failure to tag does not cost the download. A job whose file tasks did not all succeed is not recorded as *downloaded*, but it is recorded: any failed or cancelled task sends it through `MarkFailed` instead, which stores the job's name, the error, an incremented retry count and the time of the attempt, so the next poll picks it up again. Finished download batches keep their tasks in the shared transfer queue only up to `daemonBatchHistoryLimit` (20) — the queue never removes a terminal task, so without that bound a daemon polling for weeks would accumulate one per file it ever downloaded.
 
-**What a poll is bounded by.** The scan phase — listing jobs and checking their eligibility — has a `scanBudget` of ten minutes, deliberately longer than the HTTP client's own 300s timeout so a slow call can still be retried inside it. Downloading is *not* charged to that budget: the elapsed download time is subtracted before the check, and each transfer is given the daemon's lifecycle context rather than a scan context, because a large file legitimately outlasts the scan and a budget-killed download would interrupt a legitimate long transfer and can force retransmission. Each eligibility check gets a two-minute context of its own, parented on the lifecycle context for the same reason. The two ways a poll can end short leave different records. The budget check runs inside the candidate loop, before each candidate rather than after the last one: when it fires it records the overrun as a scan error, emits its summary and persists the progress it made, so the last-scan timestamp advances with the failure attached rather than freezing. A timeout or an error returned by `FindCompletedJobs` is the other exit — it records the error and emits the same summary line with every count at zero, but returns *without* persisting, since that poll never got past listing jobs and has no progress to record.
+**What a poll is bounded by.** The scan phase — listing jobs and checking their eligibility — has a `scanBudget` of ten minutes, deliberately longer than the HTTP client's own 300s timeout so a slow call can still be retried inside it. Downloading is *not* charged to that budget: the elapsed download time is subtracted before the check, and each transfer is given the daemon's lifecycle context rather than a scan context, because a large file legitimately outlasts the scan and a budget-killed download would interrupt a legitimate long transfer and can force retransmission. Each eligibility check gets a two-minute context of its own, parented on the lifecycle context for the same reason. The two ways a poll can end short leave different records. A poll whose budget runs out, while `FindCompletedJobs` looks up completion times or before a candidate in the candidate loop, is a partial scan, not a failed one: it stops there, emits its summary marked interrupted with `unchecked=` counting the jobs it left, records no scan error, and persists its progress, so the last-scan timestamp advances and `daemon status` shows the count. A listing that fails or times out is the other exit — it records the error and emits the same summary line with every count at zero, but returns *without* persisting, since that poll never got past listing jobs and has no progress to record. A partial poll is not wasted: the completion times it looked up are kept in memory while the listing still returns their jobs (a completed job's never changes), and each poll checks new candidates first, then those checked longest ago, so a lookback window too large for one poll is covered over several. Neither is lost when the workspace folders could not be listed. A lookup that fails is not repeated for an hour, so lookups that keep failing cannot spend the budget at every poll; the job is scanned with its completion time unknown, as before. A scan whose context ends stops at once instead of failing, and pausing on, each lookup left; a daemon stopping there ends the poll as interrupted.
 
 State is bounded too. The state file is read once, when the daemon is constructed; from there the daemon works on the in-memory state and writes it back — after a poll saves its progress, after each download outcome, and on shutdown. Where a positive lookback is configured, the persisted download record is retained for the lookback plus the same 30-day buffer `FindCompletedJobs` uses for its creation pre-filter; a non-positive retention disables pruning altogether and keeps everything. Pruning runs inside `State.Save`, and the cutoff is on the local `DownloadedAt` — which `MarkFailed` also resets to the time of the failed attempt, so a job that keeps failing keeps its entry. An entry still owing a tag call is exempt, since losing the pending-tag flag would let the job be downloaded a second time. What pruning bounds is the file's growth, not what a scan can select: candidate filtering runs on the platform's own creation and completion times, and a job whose creation timestamp is missing or unparseable and whose completion time cannot be read passes both filters, so a dropped entry is not a guarantee that no later scan can pick the job up again.
 

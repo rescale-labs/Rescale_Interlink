@@ -102,7 +102,7 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 
 	var lastPollPtr *time.Time
 	downloadFolder := ""
-	jobsDownloaded, heldElsewhere := 0, 0
+	jobsDownloaded, heldElsewhere, folders, outsideLookback, unchecked := 0, 0, 0, 0, 0
 
 	if h.daemon != nil {
 		lastPoll := h.daemon.GetLastPollTime()
@@ -114,6 +114,7 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 		}
 		jobsDownloaded = h.daemon.GetDownloadedCount()
 		heldElsewhere = h.daemon.state.GetHeldElsewhere()
+		folders, outsideLookback, unchecked = h.daemon.state.GetLeftOut()
 	}
 
 	// The current user's SID, which the GUI and tray match their own against.
@@ -124,13 +125,16 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 
 	return []ipc.UserStatus{
 		{
-			Username:          username,
-			SID:               sid,
-			State:             state,
-			DownloadFolder:    downloadFolder,
-			LastScanTime:      lastPollPtr,
-			JobsDownloaded:    jobsDownloaded,
-			JobsHeldElsewhere: heldElsewhere,
+			Username:                username,
+			SID:                     sid,
+			State:                   state,
+			DownloadFolder:          downloadFolder,
+			LastScanTime:            lastPollPtr,
+			JobsDownloaded:          jobsDownloaded,
+			JobsHeldElsewhere:       heldElsewhere,
+			WorkspaceFoldersSkipped: folders,
+			JobsOutsideLookback:     outsideLookback,
+			JobsUnchecked:           unchecked,
 		},
 	}
 }

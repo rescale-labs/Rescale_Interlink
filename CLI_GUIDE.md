@@ -2136,13 +2136,17 @@ rescale-int daemon status [flags]
   last-scan timestamp that stops advancing. The error is cleared by the next scan that
   completes
 - Per-user detail (download folder, jobs downloaded, jobs the last scan left to other
-  clients downloading them) where the daemon reports it
+  clients downloading them, workspace folders it skipped, jobs it left out as older
+  than the lookback window, and jobs it left unchecked for the next scan when its
+  time ran out) where the daemon reports it
 
 **State-file view** (no daemon answering):
 - Whether a daemon process was found at all, and whether it is likely missing `--ipc`
 - Last poll time
 - Number of downloaded jobs and failed downloads, and how many jobs the last poll
-  left to other clients downloading them
+  left to other clients downloading them, how many workspace folders it skipped, how
+  many jobs it left out as older than the lookback window, and how many it left
+  unchecked for the next poll
 - Recent download history, and failed downloads with their error text
 
 "Whether a daemon process was found" is decided by the PID file, which only
