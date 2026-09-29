@@ -12,9 +12,9 @@ import (
 func TestSkippedLinkMessageSaysWhy(t *testing.T) {
 	entry := localfs.FileEntry{
 		Path: filepath.Join("tree", "loop"), Name: "loop", IsSymlink: true, IsDir: true,
-		SkipReason: "its target is outside the folder being uploaded",
+		SkipReason: "it leads back into a folder that contains it",
 	}
-	want := "Skipped link " + entry.Path + ": its target is outside the folder being uploaded"
+	want := "Skipped link " + entry.Path + ": it leads back into a folder that contains it"
 	if got := skippedLinkMessage(entry); got != want {
 		t.Errorf("skip message = %q, want %q", got, want)
 	}

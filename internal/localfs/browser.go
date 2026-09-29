@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/rescale/rescale-int/internal/validation"
 )
 
 // ancestryMap tracks the chain of real directory identities from root
@@ -18,6 +16,8 @@ import (
 // directory at depth D, entries at depth >= D are removed (they belong to a
 // previous sibling branch). This ensures only true ancestors are tracked,
 // not previously-visited siblings — preventing false cycle detection.
+// Negative depths hold every folder that contains the root or a followed
+// link's target (see below), since a link into one would repeat the walk too.
 //
 // Example: walking root/a/sub then root/b/link -> root/a/sub:
 //   - At root/a: map = {0: root, 1: a}
@@ -48,7 +48,8 @@ func (a *ancestryMap) trimTo(depth int) {
 	}
 }
 
-// contains checks if any ancestor in the current chain matches the given identity.
+// contains reports whether id is on the chain: a folder the walk is inside, or
+// one that contains it.
 func (a *ancestryMap) contains(id dirIdentity) bool {
 	for _, existing := range a.entries {
 		if existing == id {
@@ -58,18 +59,23 @@ func (a *ancestryMap) contains(id dirIdentity) bool {
 	return false
 }
 
-// below starts the chain for the walk into a followed link's target, which is
-// depth 0 of that walk. The current chain moves to negative depths, out of
-// reach of the new walk's trims, so a link there back into any directory
-// above it is still a cycle. The caller's chain is not changed.
-func (a *ancestryMap) below(id dirIdentity) *ancestryMap {
+// below returns the chain for a walk that starts at dir, a real path: dir at
+// depth 0, then each folder that contains dir, then the current chain, at
+// depths the new walk never trims. A link to any of them would walk dir, or a
+// folder on the chain, again. An empty dir (a root that did not resolve) adds
+// no folders. The caller's chain is not changed.
+func (a *ancestryMap) below(dir string) *ancestryMap {
 	child := newAncestryMap()
-	depth := 0
-	for _, existing := range a.entries {
-		depth--
-		child.entries[depth] = existing
+	for parent := ""; dir != parent; dir, parent = filepath.Dir(dir), dir {
+		if info, err := os.Stat(dir); err == nil {
+			if id, ok := getDirIdentity(info); ok {
+				child.entries[-len(child.entries)] = id
+			}
+		}
 	}
-	child.entries[0] = id
+	for _, id := range a.entries {
+		child.entries[-len(child.entries)] = id
+	}
 	return child
 }
 
@@ -82,34 +88,31 @@ func realPath(p string) (string, error) {
 	return filepath.EvalSymlinks(abs)
 }
 
-// followLink resolves a link met at depth by a walk that follows links. It
-// returns the target's real path and Stat info and, for a directory, its
-// identity. Otherwise reason says why the link is left out: it is broken; its
-// target is outside realRoot, the real path of the folder the walk started
-// at, so a link cannot pull in files from beside that folder; or its target
-// is a directory on the chain being walked, which would repeat the walk.
-func followLink(path, realRoot string, ancestry *ancestryMap, depth int) (target string, info os.FileInfo, id dirIdentity, reason string) {
+// followLink resolves a link met at depth by a walk that follows links, to
+// wherever it points. It returns the target's real path and Stat info.
+// Otherwise reason says why the link is left out: it is broken, or its target
+// is a directory on the chain being walked, or one containing it, which would
+// walk that directory again.
+func followLink(path string, ancestry *ancestryMap, depth int) (target string, info os.FileInfo, reason string) {
 	target, err := realPath(path)
 	if err == nil {
 		info, err = os.Stat(target)
 	}
 	switch {
 	case err != nil:
-		return "", nil, id, skipBroken
-	case validation.ValidatePathInDirectory(target, realRoot) != nil:
-		return "", info, id, skipOutside
+		return "", nil, skipBroken
 	case !info.IsDir():
-		return target, info, id, ""
+		return target, info, ""
 	}
 	id, ok := getDirIdentity(info)
 	if !ok {
-		return "", info, id, skipNoDirLink
+		return "", info, skipNoDirLink
 	}
 	ancestry.trimTo(depth)
 	if ancestry.contains(id) {
-		return "", info, id, skipCycle
+		return "", info, skipCycle
 	}
-	return target, info, id, ""
+	return target, info, ""
 }
 
 // skippedLink is the entry a walk reports for a link it leaves out. target is
@@ -160,7 +163,6 @@ type FileEntry struct {
 // The reasons a walk that follows links gives for one it does not follow.
 const (
 	skipBroken    = "its target is missing or cannot be read"
-	skipOutside   = "its target is outside the folder being uploaded"
 	skipCycle     = "it leads back into a folder that contains it"
 	skipNoDirLink = "links to folders are not followed on Windows"
 )
@@ -403,16 +405,9 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 
 		// Initialize ancestry tracking for symlink cycle detection.
 		var ancestry *ancestryMap
-		var realRoot string
 		if opts.FollowSymlinks {
-			ancestry = newAncestryMap()
-			rootInfo, statErr := os.Stat(root)
-			if statErr == nil {
-				if id, ok := getDirIdentity(rootInfo); ok {
-					ancestry.set(0, id)
-				}
-			}
-			realRoot, _ = realPath(root)
+			realRoot, _ := realPath(root)
+			ancestry = newAncestryMap().below(realRoot)
 		}
 
 		// Compute root depth for relative depth calculation
@@ -464,7 +459,7 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 				// Surfaced to the caller, so the user sees that the link was
 				// left out rather than silently lost.
 				depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-				resolvedTarget, realInfo, id, reason := followLink(path, realRoot, ancestry, depth)
+				resolvedTarget, realInfo, reason := followLink(path, ancestry, depth)
 				if reason != "" {
 					emitSkipped(ctx, skipped, skippedLink(path, realInfo, reason))
 					return nil
@@ -487,7 +482,7 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 					}
 
 					// Walk the symlink target, emitting entries with ORIGINAL path prefix
-					_ = walkSymlinkedDir(ctx, resolvedTarget, path, realRoot, opts, ancestry.below(id), dirs, files, skipped)
+					_ = walkSymlinkedDir(ctx, resolvedTarget, path, opts, ancestry.below(resolvedTarget), dirs, files, skipped)
 					return nil // We handled it ourselves — return nil (not SkipDir) because d.IsDir()=false for symlinks
 				}
 
@@ -611,7 +606,6 @@ func walkSymlinkedDir(
 	ctx context.Context,
 	resolvedRoot string, // The real directory path (after EvalSymlinks)
 	originalRoot string, // The symlink path (what the user sees)
-	realRoot string, // The real path of the folder the whole walk started at
 	opts WalkOptions,
 	ancestry *ancestryMap,
 	dirs chan<- FileEntry,
@@ -636,7 +630,7 @@ func walkSymlinkedDir(
 		originalPath, name, fileInfo, isSymlink := se.originalPath, se.name, se.fileInfo, se.isSymlink
 
 		if isSymlink {
-			nestedResolved, realInfo, id, reason := followLink(resolvedPath, realRoot, ancestry, se.depth)
+			nestedResolved, realInfo, reason := followLink(resolvedPath, ancestry, se.depth)
 			if reason != "" {
 				emitSkipped(ctx, skipped, skippedLink(originalPath, realInfo, reason))
 				return nil
@@ -658,7 +652,7 @@ func walkSymlinkedDir(
 					return ctx.Err()
 				}
 
-				_ = walkSymlinkedDir(ctx, nestedResolved, originalPath, realRoot, opts, ancestry.below(id), dirs, files, skipped)
+				_ = walkSymlinkedDir(ctx, nestedResolved, originalPath, opts, ancestry.below(nestedResolved), dirs, files, skipped)
 				return nil
 			}
 
@@ -687,7 +681,13 @@ func walkSymlinkedDir(
 
 		if d.IsDir() {
 			if id, ok := getDirIdentity(fileInfo); ok {
-				ancestry.set(se.depth, id)
+				// A folder on the chain through a mount alias or firmlink,
+				// which no link's real path shows, is a loop too.
+				if ancestry.trimTo(se.depth); ancestry.contains(id) {
+					emitSkipped(ctx, skipped, skippedLink(originalPath, fileInfo, skipCycle))
+					return filepath.SkipDir
+				}
+				ancestry.entries[se.depth] = id
 			}
 			select {
 			case dirs <- entry:
@@ -709,7 +709,7 @@ func walkSymlinkedDir(
 // collectSymlinkedDir is the WalkCollect counterpart of walkSymlinkedDir.
 // It collects entries into slices instead of sending to channels.
 func collectSymlinkedDir(
-	resolvedRoot, originalRoot, realRoot string,
+	resolvedRoot, originalRoot string,
 	opts WalkOptions,
 	ancestry *ancestryMap,
 	result *WalkCollectResult,
@@ -726,7 +726,7 @@ func collectSymlinkedDir(
 		originalPath, name, fileInfo, isSymlink := se.originalPath, se.name, se.fileInfo, se.isSymlink
 
 		if isSymlink {
-			nestedResolved, realInfo, id, reason := followLink(resolvedPath, realRoot, ancestry, se.depth)
+			nestedResolved, realInfo, reason := followLink(resolvedPath, ancestry, se.depth)
 			if reason != "" {
 				result.Symlinks = append(result.Symlinks, skippedLink(originalPath, realInfo, reason))
 				return nil
@@ -738,7 +738,7 @@ func collectSymlinkedDir(
 					Path: originalPath, Name: name, IsDir: true,
 					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: realInfo.Mode(),
 				})
-				_ = collectSymlinkedDir(nestedResolved, originalPath, realRoot, opts, ancestry.below(id), result)
+				_ = collectSymlinkedDir(nestedResolved, originalPath, opts, ancestry.below(nestedResolved), result)
 				return nil
 			}
 
@@ -766,7 +766,11 @@ func collectSymlinkedDir(
 
 		if d.IsDir() {
 			if id, ok := getDirIdentity(fileInfo); ok {
-				ancestry.set(se.depth, id)
+				if ancestry.trimTo(se.depth); ancestry.contains(id) { // see walkSymlinkedDir
+					result.Symlinks = append(result.Symlinks, skippedLink(originalPath, fileInfo, skipCycle))
+					return filepath.SkipDir
+				}
+				ancestry.entries[se.depth] = id
 			}
 			result.Directories = append(result.Directories, entry)
 		} else {
@@ -801,16 +805,9 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 	}
 
 	var ancestry *ancestryMap
-	var realRoot string
 	if opts.FollowSymlinks {
-		ancestry = newAncestryMap()
-		rootInfo, statErr := os.Stat(root)
-		if statErr == nil {
-			if id, ok := getDirIdentity(rootInfo); ok {
-				ancestry.set(0, id)
-			}
-		}
-		realRoot, _ = realPath(root)
+		realRoot, _ := realPath(root)
+		ancestry = newAncestryMap().below(realRoot)
 	}
 	rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
 
@@ -859,7 +856,7 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 			}
 
 			depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-			resolvedTarget, realInfo, id, reason := followLink(path, realRoot, ancestry, depth)
+			resolvedTarget, realInfo, reason := followLink(path, ancestry, depth)
 			if reason != "" {
 				result.Symlinks = append(result.Symlinks, skippedLink(path, realInfo, reason))
 				return nil
@@ -871,7 +868,7 @@ func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 					Path: path, Name: name, IsDir: true,
 					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: realInfo.Mode(),
 				})
-				_ = collectSymlinkedDir(resolvedTarget, path, realRoot, opts, ancestry.below(id), result)
+				_ = collectSymlinkedDir(resolvedTarget, path, opts, ancestry.below(resolvedTarget), result)
 				return nil
 			}
 

@@ -18,10 +18,10 @@ type WalkOptions struct {
 	// Default is true (hidden directories are skipped).
 	SkipHiddenDirs bool
 
-	// FollowSymlinks follows symbolic links whose targets lie inside the root,
-	// with cycle detection; the walk reports the links it leaves out.
-	// When true, symlinked directories and files are followed (resolved to their targets).
-	// Cycle detection uses device+inode ancestry tracking on Unix.
+	// FollowSymlinks follows symbolic links to files and directories wherever
+	// they point, except a link to a directory the walk is inside, or to one
+	// containing it, which would walk it again; the walk reports the links it
+	// leaves out. Cycle detection uses device+inode ancestry tracking on Unix.
 	// On Windows, links to directories are NOT followed (getDirIdentity returns false).
 	// Default is false: symlinks are skipped entirely.
 	FollowSymlinks bool
