@@ -1,12 +1,104 @@
 # Release Notes - Rescale Interlink
 
-## v4.9.9 - August 13, 2026
+## v4.9.9 - Unreleased
+
+### Before you upgrade
+
+Most of this release is fixes, but some of them change what a script or a routine sees.
+
+- **Windows: auto-download no longer runs as a Windows service.** It runs in your own
+  session, and the tray starts it when you sign in if it is enabled. A service installed by
+  an earlier version removes itself. If you used the service, see
+  [Windows: auto-download runs in your session](#windows-auto-download-runs-in-your-session).
+  Auto-download that an earlier version started must be ended before this version can
+  start it; see [Windows](#windows).
+- **Linux: the minimum is now GLIBC 2.28** (Red Hat/Rocky/Alma 8, Debian 10, Ubuntu 20.04
+  or later). Ubuntu 18.04 is no longer supported.
+- **Auto-download names job folders after the job, and tags jobs differently.** A job's
+  folder is now its name, with the job ID in a `.jobid` file inside it; a folder an earlier
+  version made for the job is reused. A downloaded job is tagged `autodownload:done`
+  instead of `autoDownloaded:true`, and the default tag for `Conditional` jobs is
+  `autodownload` instead of `autoDownload` where `daemon.conf` records none. See
+  [Auto-download](#auto-download-workspace-folders-several-computers-job-named-folders).
+- **Leftover upload locks from v4.9.8.** An upload that v4.9.8 did not finish (crash, kill,
+  power loss) can leave `<file>.upload.lock` beside the source file. v4.9.8 did not record
+  which machine wrote a lock, so v4.9.9 cannot tell whether its owner is still running,
+  perhaps on another machine that shares the folder. It refuses to upload that file and
+  names the lock:
+
+  `upload of <file> is locked by PID <n> on host unknown as user unknown since <time>; if that upload is not running, delete <file>.upload.lock to release it`
+
+  When no transfer of that file is running on any machine that can reach the folder,
+  delete the lock file the message names and upload again. Delete only the
+  `.upload.lock` file. To find such locks in advance, run
+  `find <folder> -name '*.upload.lock'` on macOS or Linux, or
+  `Get-ChildItem -Path <folder> -Recurse -Filter *.upload.lock` in PowerShell on Windows.
+  On the next upload attempt, Interlink can reclaim a lock when it can prove the owner
+  has exited in the same PID domain. On macOS, locks left across a reboot require the
+  manual check and deletion described above.
+- **Exit codes.** These now exit 1 (most used to exit 0):
+  - `folders upload-dir` and `pur run` when any item failed, and choosing Abort at a
+    prompt, which now stops the batch;
+  - a cancelled `files download`, `jobs download`, `files upload` or
+    `folders download-dir`;
+  - `folders download-dir` when a file conflict could not be resolved, and any download
+    that refused a file name (see [Downloads](#download-integrity-and-safe-file-names));
+  - `jobs watch` when a job's last download pass failed or was cancelled;
+  - compat mode's `submit -E` when the job ends Stopped or Force Stopped (it used to keep
+    polling);
+  - `daemon stop` when the daemon is still running 10 seconds after the request.
+- **Commands that now refuse instead of guessing:**
+  - destructive confirmations without a terminal fail and name `--confirm` (they printed
+    "Cancelled" and exited 0), and `config init` refuses to run without a terminal;
+  - `files delete` takes IDs only through `--fileid`, and the `jobs` commands refuse
+    `--job-id` together with `--id`, which is the same flag;
+  - `jobs download` refuses `-o/--output` for a whole job (use `--outdir`), and
+    `--max-concurrent` outside 1–20 on every command that has it (`-m 32` used to run);
+  - `jobs download --file-id` refuses the batch-only flags and a directory `--output`;
+  - a foreground or `--once` `daemon run` refuses while another daemon is running;
+  - `daemon run`, and Start in the GUI and the tray, refuse a `daemon.conf` whose
+    `download_folder` is not an absolute path or whose `max_concurrent` is outside 1–20,
+    0 included, and `daemon config set` refuses a relative folder and a `max_concurrent`
+    outside 1–20.
+- **Transfer diagnostics are hidden by default.** They could corrupt the progress bars.
+  Add `--verbose` (or `--debug`, or set `RESCALE_DEBUG`) to see them; rate-limit and
+  retry notices are always shown. Please include `--verbose` output when you report a
+  problem.
+- **File-scan mode uploads only each job's own files.** Data every job needs now belongs in
+  `--common-input-files`, which uploads it once for the batch.
+- **The auto-download daemon is stricter.** A failed job is retried after 5, 10, 20 and
+  then 30 minutes, and after five failures it is held until `daemon retry` releases it. A
+  job whose output list contains a file name that is not safe on this computer counts as
+  a failed attempt; `jobs download` refuses only that file.
+- **New files Interlink may leave beside yours:** `<file>.upload.lock` and
+  `<file>.upload.resume` beside an upload's source (the resume record is kept up to
+  seven days after a failure or cancel), `<file>.partial` while a download is in
+  progress, `<file>.corrupt` for a download that failed its size or checksum check,
+  `.rescale-int-<hash>/` for PUR archives next to the input folders (that folder needs
+  write access), `daemon.pid.lock` and `daemon-state.json.lock` beside the daemon's
+  PID and state files, and a `.jobid` file in each job folder auto-download creates.
+- **S3 transfers ignore your AWS environment.** They use only the settings the Rescale
+  platform supplies. `AWS_CA_BUNDLE` (which made S3 transfers fail), `AWS_ENDPOINT_URL`,
+  AWS profiles and shared config files no longer affect them.
+- **Removed:** the Org Code field of the job template (stored values are still honoured;
+  see [Job template](#job-template-project-picker-and-coretype-aware-core-stepper)); the
+  File Browser's Shared Jobs tab, which never worked (#65); and on Windows the service
+  controls in the app and the tray, and the `service install`, `start`, `stop`, `status`
+  and `install-and-start` commands.
+- **Commands printed for you to run are quoted for macOS and Linux shells.** In Windows
+  `cmd.exe`, replace the single quotes around a path with double quotes.
+
+### Security
+
+Security hardening in credential handling, file handling, Windows auto-download and the
+release process.
 
 ### DOE parameter sweeps in PUR (`pur doe`, GUI sweep builder) (#66)
 
 One base job can now be expanded into a design of experiments — one Rescale job per
-design point — from either the CLI or the PUR tab. Contributed by @ctusa-rescale
-([PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66)).
+design point — from either the CLI or the PUR tab. Feature and documentation contributed
+by @ctusa-rescale ([PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66));
+review fixes by the maintainers.
 
 Each case's values are rendered into the **job's command line** rather than passed as
 environment variables, so the configuration of every case is visible on its Rescale job
@@ -18,7 +110,8 @@ case 1:    starccm+ -param alpha 10 -param beta 15 -load input.sim
 ```
 
 Parameters and `{{token}}`s are validated against each other in both directions: a swept
-parameter with no matching token, and a token with no matching parameter, are both errors
+parameter whose token is not in the command (a token used only in the job-name or tag
+template does not count), and a token with no matching parameter, are both errors
 rather than silently wrong jobs. An unknown token in the job-name or tag template is
 an error too, and a token that survives substitution anywhere is fatal rather than
 shipped as literal text. A rendered command over 32 KiB or a job name over 128 bytes is
@@ -40,8 +133,7 @@ already-uploaded deck; leave it unset and the deck is supplied once at run time 
 `pur run --common-input-files`. Either way it transfers once for the whole sweep instead
 of once per case. A generated sweep is an ordinary jobs CSV, so it runs through the
 existing `pur run` / `pur submit-existing` pipeline with resume, state and monitoring
-unchanged. The help text and the preview describe this: neither claims that a case
-uploads the template's directory.
+unchanged.
 
 In the GUI, **PUR → Create Parameter Sweep** builds the sweep with a live case preview,
 showing the case table, the first case's rendered command and tags, and any validation
@@ -49,7 +141,7 @@ problems before anything is submitted.
 
 ### Per-file commands in PUR file-scan mode (`pur scan-files`, GUI Job Source → Files)
 
-Scanning a tree for input files now renders **each job's command from its own file**, instead of giving every job the template's command verbatim. Contributed by @ctusa-rescale as part of [PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66).
+Scanning a tree for input files now renders **each job's command from its own file**, instead of giving every job the template's command verbatim. Contributed by @ctusa-rescale as part of [PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66); review fixes by the maintainers.
 
 ```
 template:   abaqus job={{base}} input={{file}} cpus=8
@@ -61,7 +153,7 @@ Five tokens are available in both the command and the job name: `{{file}}`, `{{b
 
 Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. A secondary pattern that resolves to the primary file itself is dropped rather than listed twice, and two different files that would flatten onto one name skip the job at scan time with both paths named. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
 
-The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load. A path the column cannot carry — one containing a semicolon — is refused when the CSV is written, naming the job and the path, since the JSON job file carries any path. A CSV loaded as a template no longer carries its first job's file list, or a tar subpath a file scan never uses, into the folder scans and sweeps built from it.
+The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load. A path the column cannot carry, such as one containing a semicolon, is refused when the CSV is written, naming the job and the path. `pur scan-files` leaves the `LicensesPerJob` and `SSHPort` columns empty when they are not set, instead of writing `0`.
 
 In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason and its parent folder. The **Recursive** and **hidden directories** options appear only for a folder scan, since a file scan never read them.
 
@@ -87,45 +179,48 @@ Contributed by @ctusa-rescale as part of
   a root such as `proj [v2]` silently scanned its sibling `proj v` and would have uploaded
   the wrong project's decks as a success. Every scan now matches the pattern inside the
   root, and a pattern that is absolute or escapes the root is an error.
-- A resumed run no longer reports the previous run's failures: a batch that failed at the
-  tar or upload stage, was resumed and completed cleanly used to finish with
-  "N of M job(s) failed" and exit 1.
 - A job that would run with no inputs at all — no directory, no per-job files and no
   common files — is refused with an error naming it. `submit-existing` keeps its bypass,
   since its inputs are already on Rescale.
-- Folder scans refuse a `{{token}}` in the command or job name instead of submitting it
-  verbatim, and the license feature pair is validated when the plan is built, so a bad
-  CSV fails before the uploads rather than after every one of them.
-- The jobs CSV gains columns for automations, input file IDs and the SSH fields it used to
-  drop, and a scan that builds no jobs no longer writes an empty file over a good one.
-  Directories matched as input files are skipped with a reason. In the GUI, the
+- The jobs CSV gains columns for automations, input file IDs and the SSH fields, and a
+  scan that builds no jobs no longer writes an empty file over a good one. In the GUI, the
   **Export CSV** refusal is shown beside the button instead of disappearing into the
   console.
 - A run in which every job failed is reported as failed from every GUI entry point, and
-  resolving the upload folder no longer freezes the GUI while the platform answers.
+  the GUI offers an error report when every job failed on the server (none when the jobs
+  were refused by an upload lock).
+- `pur run`, `pur resume` and `pur submit-existing` print each failed job and its reason
+  at the end of the run, on stderr, without `--verbose`: up to ten, or all of them with
+  `--verbose`.
 - On Windows, GNU tar read the drive-letter colon in an absolute path as a remote host
   and failed with "Cannot connect to C:"; the archiver now passes `--force-local` when it
-  detects GNU tar. Contributed by @ctusa-rescale.
-- A transient failure reading the account profile no longer stops the project-assignment
-  retry; only a profile with no company code does.
-- An archive name is kept within the filesystem's limit — a long primary file name
-  produced a name the filesystem refused after the scan had succeeded — and each job's
-  archive is named after its row as well as its file set. The batch's archive directory
-  is resolved to an absolute path, so a resume from another working directory finds it.
+  detects GNU tar. Contributed by @ctusa-rescale. A job folder whose name starts with
+  `-` is passed to tar safely.
 - A batch stages its archives in a directory of its own under the input files' common
   parent (`.rescale-int-<hash>/`, keyed by the batch's state file), so two batches over
-  one deck no longer overwrite or delete each other's archives, and the pipeline stops an
-  item when a checkpoint cannot be written before an irreversible step.
-- A PUR run started without `--state` completes again. Since the transfer hardening
-  refused to pass an irreversible step whose state could not be recorded, such a run
-  archived and uploaded every job and then failed each one; an empty state path now
-  keeps the run's state in memory, and `pur run` says once, before it starts, that the
-  run cannot be resumed and records no progress.
+  one deck do not overwrite or delete each other's archives. A batch with nothing to
+  archive (`submit-existing`, or jobs that only reference uploaded files) creates no
+  staging directory, and a batch whose inputs share nothing below a drive or volume root
+  stages in your cache folder (`~/Library/Caches/rescale/staging` on macOS,
+  `~/.cache/rescale/staging` on Linux, `%LOCALAPPDATA%\rescale\staging` on Windows).
+- The pipeline stops an item when a checkpoint cannot be written before an irreversible
+  step. `pur run` without `--state` keeps its state in memory and says once, before it
+  starts, that the run cannot be resumed.
 - `pur run`, `pur resume` and `pur submit-existing` refuse a jobs CSV whose `Submit`
   column holds an unrecognised value, naming the row and the value, instead of silently
   creating the jobs without submitting them; a `tar_workers`, `upload_workers` or
   `job_workers` value below 1 in `config.csv` is refused before any work instead of
-  stalling the run or crashing it.
+  stalling the run or crashing it. GUI runs apply the same checks.
+- `pur scan-files` and `pur make-dirs-csv` write absolute paths into the jobs CSV, so it
+  works from any folder; they could write paths relative to the folder the scan ran in,
+  which pointed elsewhere when the CSV was used from another folder. `make-dirs-csv`
+  writes a run folder that is a symbolic link as the folder it points to, and
+  `--validation-pattern` now looks inside such a folder.
+- `make-dirs-csv` names each directory it skips, with the reason: one without a file
+  matching `--validation-pattern`, or a `--part-dirs` project without the `--run-subpath`
+  folder. Its final line counts them. It used to drop them silently.
+- `pur scan-files --json` prints only the JSON on standard output; if the scan fails,
+  standard output is empty and the command exits 1.
 
 ### Linux GUI: blank window fixed (#31)
 
@@ -143,39 +238,31 @@ A new **Job Status** tab lists your Rescale jobs with their current status, newe
 fifty at a time with on-demand paging. Contributed by @hjung-rescale
 ([PR #62](https://github.com/rescale-labs/Rescale_Interlink/pull/62)).
 
-After merge: each page is requested on its own (deep pages no longer re-fetch every
-earlier page), a refresh landing while **Load Next** is in flight no longer leaves the
-button disabled, and the latest status reason is chosen by its timestamp rather than by
-comparing date strings with mixed UTC offsets.
-
 ### File Browser: search, owner filtering, and sorting (#65)
 
 The File Browser's remote pane can now search folder contents by name in My Library, My
-Jobs, and Legacy views, and search results page through the full result set. Legacy view
-additionally gains an owner filter (mine / shared with me / all) and server-side sorting
-by name, size, or created date from the column headers; the other views keep their
-existing client-side column sorting. Contributed by @jbeardslee-rescale
-([PR #65](https://github.com/rescale-labs/Rescale_Interlink/pull/65)).
+Jobs, and Legacy views. Legacy view additionally gains an owner filter (mine / shared
+with me / all) and server-side sorting by name, size, or created date from the column
+headers; the other views keep their existing client-side column sorting. Contributed by
+@jbeardslee-rescale ([PR #65](https://github.com/rescale-labs/Rescale_Interlink/pull/65));
+the maintainers added paging of search results through the full result set.
 
-After merge: a failed search or legacy listing is reported as an error instead of shown as
-an empty library; the list header stays pinned and the list stays virtualized while
-scrolling; a search typed just before switching views no longer lands in the other view;
-the File ID column appears only in the remote pane; and legacy listings no longer send an
-owner filter when none is selected.
+A failed legacy listing is reported as an error instead of shown as an empty library.
+The non-functional Shared Jobs tab was removed.
 
 ### Transfers: cancellation and status accuracy (#24, #27, #28)
 
 - Cancel and Cancel All now stop queued and in-flight work promptly on every path.
 - Cancelled batches show **Cancelled** end to end — including batches cancelled before
-  their folder scan registered any files, which previously vanished or showed Completed.
-- Local filesystem errors and user cancellations no longer raise the error-report modal.
-  In the other direction, real failures that the error filters used to hide are reported
-  again: `files upload` with two or more failed files reported nothing at all.
+  their folder scan registered any files, which previously showed Completed.
+- Local filesystem errors, user cancellations and uploads refused by another transfer's
+  lock no longer raise the error-report modal.
 - A newly queued transfer appears in the Transfers tab promptly. The tab's poll no longer
   stacks requests when one runs long, and paging a large batch's rows no longer copies
   the whole batch while holding up progress updates.
 - A row carrying an error survives until **Clear Completed** acknowledges it, and that
-  button appears for a finished folder scan even when no file was queued.
+  button appears for a finished folder scan even when no file was queued. Clearing waits
+  for the result before the list refreshes.
 
 ### GUI responsiveness and correctness
 
@@ -187,29 +274,41 @@ owner filter when none is selected.
   API key changes, so a job cannot be submitted with file IDs from the previous account,
   and a slow folder listing that arrives after you have navigated away no longer replaces
   the newer view.
-- Changing the API key drops the coretype, project and software catalogs so the pickers
-  cannot show the previous account's entries. Editing the key and restoring it brings the
-  catalogs back without a rescan.
+- Changing the API key drops the coretype, project, software and automation catalogs so
+  the pickers cannot show the previous account's entries.
+- A job whose creation is rejected counts as failed at once, in the header and the stats
+  bar.
+- Single Job accepts a jobs-list JSON file, loads its first job and says so.
+- **Save logs to file** also records transfer and engine messages, the same entries the
+  Activity tab shows, each once.
+- An empty folder in the File Browser's remote pane says "This folder is empty".
 
 ### CLI: visible retries, intact progress bars, truthful exit codes (#22, #23)
 
-- Persistent storage or API errors are retried with visible, attempt-numbered notices and
-  a bounded retry budget, and the server's own error message is preserved when a call
-  finally gives up — uploads no longer hang for minutes with no output. The same retry
-  notices are shown in the GUI.
-- API responses that arrive after the retry budget is spent are delivered instead of
-  discarded; terminal errors such as 404 no longer surface as "retries exhausted".
+- Persistent storage or API errors are retried with visible notices and a bounded retry
+  budget, so uploads no longer hang for minutes with no output. The same retry notices
+  are shown in the GUI.
 - Log output is routed around the progress bars, so bars no longer shred into multi-line
-  noise when logging is enabled (including rate-limit and retry notices, and in compat
-  mode).
-- Exit codes reflect what actually happened, and several flags and prompts that ignored
-  or misstated their input have been fixed.
+  noise when logging is enabled (including rate-limit and retry notices). Messages from
+  the storage libraries no longer print over the progress display.
+- Log lines are coloured only on a terminal, so output piped to another program or
+  redirected to a file carries no colour codes. `NO_COLOR` still turns colour off.
+- Exit codes reflect what actually happened; see [Before you upgrade](#before-you-upgrade).
+- Mistakes on the command line, such as conflicting flags or an output file that already
+  exists, print the error only: no "share this report with Rescale support" block and no
+  error report. The same goes for an upload refused by another transfer's lock, which is
+  a local condition; a refused `daemon run` or a `daemon stop` that timed out; a missing
+  conflict mode; a download refused because its destination is a symbolic link; an API
+  key that `config test` or `daemon config validate` rejects; and a workspace without the
+  "Auto Download" field.
+- A failure whose file or folder name contains digits such as `503` or `404` is no longer
+  mistaken for a server error: it is not retried as one and does not produce an error
+  report.
 - `files delete` checks a file exists before hunting for its parent folder — deleting a
   nonexistent ID now fails in a single API call instead of walking the library.
 - Rate limiting: a cooldown the platform imposes while requests are already queued is
   honored instead of ignored, degraded mode is announced once on entry and once on exit,
-  and a detached daemon's rate-limit and retry notices reach its log instead of being
-  discarded.
+  and a detached daemon's rate-limit and API retry notices reach its log.
 - Paging through API results works when the configured platform host differs from the
   canonical one only by letter case; every page after the first used to fail.
 - A rejected file tag reports the server's explanation instead of a bare status code.
@@ -217,192 +316,137 @@ owner filter when none is selected.
   collide, and per-request proxy routing lines are logged only with `RESCALE_DEBUG`.
 - `files upload --dry-run` never uploads. With duplicate checking off, which is the
   default whenever the command runs without a terminal, the preview used to upload for
-  real; every mode now prints the destination and each file that would be uploaded and
-  makes no request.
-- `--timing` is a flag on every command, equivalent to `RESCALE_TIMING=1`; it used to be
-  rejected as unknown.
+  real; every mode now prints the destination and each file that would be uploaded, and
+  uploads nothing.
+- `--timing` is a flag on every native command, equivalent to `RESCALE_TIMING=1`; it used
+  to be rejected as unknown. Compat mode does not accept it.
 - `jobs tail` refuses an interval below one second instead of crashing, and Ctrl+C now
   ends it.
-- The hint printed after an interrupted upload no longer says the rerun starts from the
-  beginning; it says the rerun can resume from the completed parts while the file is
-  unchanged and the interrupted upload is less than seven days old.
+- The hint printed after an interrupted upload now says truthfully that a rerun can
+  resume from the completed parts while the file is unchanged and the interrupted upload
+  is less than seven days old.
+- `config init` writes to the file `--config` names, with or without `--force`, refuses a
+  `--config` path that is the token file or a directory, will not replace an existing
+  token file without `--force`, and prints next steps that include `--config` when you
+  used it.
+- The `upload` shortcut is `files upload` itself, with all of its flags. Like
+  `files upload`, at a terminal it asks how to handle duplicates unless a duplicate flag
+  is given. `files upload` accepts `-m` for `--max-concurrent`, and an upload to the top
+  of My Library names My Library as its destination.
+- `folders download-dir` without a terminal needs `--skip`, `--overwrite` or `--merge`
+  only when the destination already holds files, and `--dry-run` needs none.
+- `jobs download --file-id` honours `--skip`, `--overwrite`, `--resume` and
+  `--skip-checksum` as a whole-job download does.
+- The warning about several API keys appears only when they differ.
+- Compat mode: `submit -E` applies its download filters (`-f`, `--exclude`, `-s`), and the
+  help shows `JOB_ID` as the job ID's placeholder.
 
-### File Browser: option to download jobs without the Input/Output split
+### Auto-download: workspace folders, several computers, job-named folders
 
-Downloading a job folder in the File Browser mirrors the platform's job layout,
-creating separate `Input/` and `Output/` subfolders. A new setting —
-**Download jobs without Input/Output split** (Setup tab → File Browser Settings,
-or `flatten_job_download` in `config.csv`) — strips that leading `Input`/`Output`
-segment so files land directly under the job folder, matching the auto-download
-layout. Deeper structure (e.g. `Output/run1/…`) is preserved. Off by default, so
-existing downloads keep the Input/Output split. It applies to any downloaded folder
-whose first-level subfolder is named `Input` or `Output`. When two files would land
-on the same local file (`Input/model.inp` and `Output/model.inp`), the Output file is
-downloaded and the Input file shows as a failed row naming it; a file that is not
-moved keeps its place over one that is. The option is saved on its own as soon as
-it is changed; other unsaved Setup tab changes wait for **Save**.
+Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-labs/Rescale_Interlink/pull/64)).
 
-### Default "Conditional" auto-download tag renamed to `autodownload`
+- **Jobs in workspace folders, if you choose.** **Include jobs in workspace folders** in
+  the Setup tab (`include_workspace_folders` in `daemon.conf`, off by default) also
+  downloads eligible jobs in the workspace's shared folders, including jobs other users
+  own. Each job still needs its "Auto Download" field. The folder tree is mirrored under
+  your download folder (a job in `Shared/ExampleFolder/Subfolder` lands in
+  `<download folder>/ExampleFolder/Subfolder/<job>`), or, with **Flatten folder
+  structure** (`flatten_folder_structure`), every job lands in the download folder itself.
+  Archived folders are skipped. A job whose folder name cannot be used on this computer
+  (one containing `:`, for example) fails with the reason, shown by
+  `daemon list --failed`, unless the structure is flattened or the job has its own
+  "Auto Download Path". If the workspace folders cannot be listed, your own jobs are
+  still downloaded and the failure is shown as the last scan error. `daemon status`
+  counts the folders the last poll skipped and the jobs it left out as older than the
+  lookback window. A workspace with more jobs than one poll can check is checked over
+  several polls.
+- **Several computers on one account share the work.** Each job is downloaded by one of
+  them. A computer claims a job with a tag, `autodownload:started:<client>:<time>`, reads
+  the job's tags again a few seconds later, and downloads the job only if its claim is
+  the earliest. This relies on the computers' clocks agreeing to within a couple of
+  seconds, which automatic time synchronization normally ensures. The others skip the
+  job, logging which tag holds it and until when, and `daemon status` counts such jobs.
+  A claim holds its job for 24 hours at most. It is removed when the download fails or
+  the daemon stops, so another computer can take the job, and `daemon retry` removes
+  this computer's claims while no daemon is running. Each poll interval varies at random
+  by up to a tenth, 30 seconds at most, so computers started together do not poll in
+  step.
+- **New tags.** A downloaded job is tagged `autodownload:done` instead of
+  `autoDownloaded:true`; a job with the old tag still counts as downloaded, so upgrading
+  does not download it again. The default tag for `Conditional` jobs is now
+  `autodownload`, all lowercase. A `daemon.conf` that records a tag keeps it; the new
+  default applies where none is recorded. The tag must match exactly, so where new and
+  existing installations work on the same jobs, set the same `auto_download_tag` on all
+  of them.
+- **Job folders are named after the job.** Only characters a folder name cannot hold are
+  replaced, and the job ID is written to a `.jobid` file inside the folder instead of
+  being added to its name. When another job already has a folder of that name, the
+  folder is named `<name>_<jobID>`. A job's existing folder, including the
+  `<name>_<shortID>` folder an earlier version made, is reused, so upgrading does not
+  download a job a second time. A job output file named `.jobid` at the top of the job is
+  refused, and the job fails with that reason. `use_job_name_dir = false` (or
+  `--use-job-id`) keeps `job_<id>` folders.
+- **`daemon stop --force`** ends a daemon that does not answer or does not stop in time,
+  once it has checked that the process is your own Interlink daemon.
 
-The default tag checked for jobs whose "Auto Download" field is set to
-`Conditional` changed from `autoDownload` to `autodownload` (all lowercase).
-A `daemon.conf` saved by an earlier version records its tag and keeps it. The new
-default applies only where none is recorded: a new installation, or a `daemon.conf`
-whose `auto_download_tag` is empty or missing. The tag must match exactly, case
-included, so where new and existing installations work on the same jobs, set the
-same `auto_download_tag` on all of them.
+### File Browser: download jobs without the Input/Output split
 
-### Auto-download folders are named after the job, with the ID in a .jobid file
-
-Auto-downloaded job folders are now named after the (sanitized) job name — the
-previous `_<shortID>` suffix is gone. The Rescale job ID is instead written to a
-`.jobid` file inside each job folder, so the folder still maps back to its job.
-Only characters a folder name cannot hold are replaced: Windows/POSIX reserved
-characters and control characters become `_`, leading and trailing dots and
-spaces are trimmed, a Windows reserved device name gets a leading `_`, and a
-long name is shortened without splitting a character. Spaces and other valid
-characters are preserved. If a folder with the same name already exists for a
-*different* job, the job ID is appended (`<name>_<jobID>`) to keep them
-separate. Re-downloading the same job reuses its existing folder, including a
-`<name>_<shortID>` folder an earlier version created, so upgrading does not
-download a job a second time. A job output file named `.jobid` at the top
-level would replace that file, so it is refused and the job fails with that
-reason. Set `use_job_name_dir = false` (or `--use-job-id`) to keep the old
-`job_<id>` naming, which downloads such a file.
-
-### Installer no longer launches anything; auto-download starts with the tray
-
-The MSI no longer starts any process at install time. Previously it launched
-the tray immediately after install. Now installation only lays down files and
-registers the tray to auto-start at logon (under `HKCU\...\Run`). The tray is
-what brings up auto-download: when it starts, it launches the auto-download
-daemon automatically if auto-download is enabled in `daemon.conf` — no manual
-"Start Auto-Download" click needed. Launch the tray or GUI immediately after
-install from the Start Menu or desktop shortcut.
-
-### Fixed: uninstall no longer prompts or hangs on running Interlink processes
-
-When uninstalling while Interlink was running, the uninstaller would prompt to
-close (or hang waiting on) the GUI, tray, and auto-download daemon — the daemon
-especially, since `rescale-int.exe` is a detached, windowless process that
-Windows Restart Manager cannot signal, leaving users to kill it manually from
-Task Manager. Uninstalling, repairing or upgrading now ends your own running
-`rescale-int-gui.exe`, `rescale-int-tray.exe` and `rescale-int.exe` processes,
-including a `rescale-int` command still running in another window, before the
-in-use file scan, so removal proceeds without a prompt. Other signed-in users'
-processes are left running. After an upgrade, auto-download starts again with
-the tray: at the next logon, or when you launch the tray or GUI. A new
-`rescale-int daemon stop --force` flag also ends a daemon that does not answer
-over IPC or does not shut down in time, once it has checked that the process is
-your own Interlink daemon.
-
-### Fixed: only one of several eligible workspace-folder jobs would download
-
-When auto-download picked up multiple jobs from workspace shared folders that
-live on the same platform storage, typically only one job downloaded
-successfully and the rest failed with `403 Forbidden` and spun in a retry
-loop. Each job's files now download with credentials requested for their own
-location, as Azure downloads already did.
-
-### Auto-download coordinates multiple clients downloading the same workspace folders
-
-When several clients poll the same workspace shared folders, they could each
-start downloading the same job. Auto-download now uses two job tags to
-coordinate:
-
-- `autodownload:started:<client>:<time>` is applied when a client begins
-  downloading a job. It names the client, by a random name made once per
-  installation, and the time. Two clients that reach a job together both apply
-  theirs; each reads the job's tags back a few seconds later, and only the
-  client whose tag is the earliest downloads the job. This relies on the
-  computers' clocks agreeing to within a couple of seconds, which automatic
-  time synchronization normally ensures. Other clients skip the job, logging
-  which tag holds it and until when, and `daemon status` counts such jobs. A
-  tag holds its job for 24 hours at most, so a client that crashed or was
-  removed does not hold a job for ever; the client that then takes the job
-  over removes the old tag. Each poll interval also varies at random by up to
-  a tenth, 30 seconds at most, so clients started together fall out of step.
-- `autodownload:done` is applied on successful completion (and the `started`
-  tag is removed). Eligibility treats a `done` job as already downloaded.
-
-When a download fails, or the daemon stops during one, the client removes its
-`started` tag so the job becomes retryable by any client. A removal that fails
-is tried again at the next poll, and `daemon retry` removes this client's tags
-while no daemon is running. The tag added after a successful download was
-renamed from `autoDownloaded:true` to `autodownload:done`; a job carrying the
-old tag still counts as downloaded, so upgrading does not download those jobs
-again. A bare `autodownload:started` tag, applied by earlier builds, holds its
-job for 24 hours from the job's completion.
-
-### Auto-download can now include jobs in workspace shared folders
-
-Auto-download previously scanned only your own jobs. A new option —
-**Include jobs in workspace folders** (off by default) — additionally walks the
-workspace's "Shared" folder tree recursively and auto-downloads eligible
-completed jobs found there, including jobs owned by other users. Each job is
-still gated by the same per-job "Auto Download" custom field and tags.
-
-By default the folder structure is mirrored under your download folder (e.g. a
-job in `Shared/ExampleFolder/Subfolder` lands in
-`<download folder>/ExampleFolder/Subfolder/<job>`). A sub-option, **Flatten
-folder structure** (off by default), downloads everything directly into the
-download folder instead. Jobs in archived folders are skipped. A folder whose
-name cannot be used for a folder here (a name containing `:`, for example) is
-not mirrored: the job fails with the reason, shown by `daemon list --failed`,
-without being claimed from other clients, unless the structure is flattened or the job has its
-own "Auto Download Path". If the workspace folders cannot be listed, your own
-jobs are still downloaded and the failure is shown as the last scan error.
-`daemon status` shows how many workspace folders the last poll skipped
-(archived, or with a name that cannot be used for a folder here) and how many
-jobs it left out as older than the lookback window. A workspace with more jobs
-in the window than one poll can check is checked over several polls, each
-carrying on where the last stopped; such a poll is reported as partial, with
-the number of jobs it left unchecked, not as a failed scan.
-Configure both options in the GUI Setup tab or via
-`daemon config set include_workspace_folders true` /
-`daemon config set flatten_folder_structure true`.
-
-### Auto-download now always runs as the logged-in user (Windows service removed)
-
-The optional Windows **service** for auto-download has been removed. Auto-download
-now runs as a background subprocess in the logged-in user's session on every
-platform — started automatically by the system tray app at login (and on demand
-by the GUI).
-
-Why: the service ran as `LocalSystem`, which **cannot reach networked/mapped
-drives that require the user's credentials.** Drive letters such as `Z:\` are
-per-logon and invisible to SYSTEM, so service-mode downloads to them failed and
-the only workaround was configuring UNC paths with machine-account ACLs. Running
-as the logged-in user means mapped drives and credentials "just work," with no
-admin/UAC and no per-user-profile orchestration.
-
-Upgrade behavior: a Windows service left over from an older version removes
-itself the next time Windows starts it, and uninstalling Interlink removes it
-on a best-effort basis; `rescale-int service uninstall`, run as administrator,
-removes it at once. The rationale, and what reinstating a service — should
-headless, no-one-logged-in operation ever be required — would take, are
-documented in
-[ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model).
+**Download jobs without Input/Output split** (Setup tab → File Browser Settings, or
+`flatten_job_download` in `config.csv`) puts a downloaded job folder's files directly
+under the job folder, as auto-download does, instead of in `Input/` and `Output/`.
+Deeper folders are kept (`Output/run1/…` becomes `run1/…`). It is off by default, and it
+is saved as soon as you change it. If an Input file and an Output file would land on
+the same local file, the Output file is downloaded and the Input file shows as a failed
+row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-labs/Rescale_Interlink/pull/64)).
 
 ### Auto-download reliability
 
 - A daemon that breaks now reports it on every surface (GUI Setup tab, CLI status, logs)
   instead of silently going idle, and the staleness of the last error is shown.
-- Downloads started by a poll are no longer cut off by the poll's own time budget, so
-  files that take longer than one polling interval complete instead of restarting.
+- A failed download is retried after 5, 10, 20 and then 30 minutes instead of on every
+  poll. After five failed attempts the job is held until `daemon retry` releases it, which
+  also works while the daemon is running. A job that had already failed five times under
+  an earlier version gets one more attempt before it is held. `daemon list --failed`
+  shows when each job will be tried next. A download cut short because the daemon was
+  stopping does not count as a failure.
+- A job is recorded and tagged downloaded only when every file it lists is verified on
+  disk or downloaded. A file with an unsafe name or a folder that cannot be created
+  fails the attempt, and the record starts with the reason, for example
+  "1 of 2 files could not be downloaded: ...".
+- Files already present locally are verified against the platform's checksum before the
+  daemon skips downloading them. After each restart the daemon checks present files
+  again once, so the first poll after a restart can take longer.
+- Only one daemon per user runs at a time. Every `daemon run` mode, foreground and
+  `--once` included, claims the PID file under an operating-system lock before it does
+  anything else, so a second launch refuses without changing anything. `daemon status` sees a
+  foreground daemon, and the PID file is removed on every exit.
+- `daemon stop` waits up to 10 seconds for the daemon to exit and exits 1 with a clear
+  message if it does not.
+- `max_concurrent` is 1–20 everywhere: `daemon run --max-concurrent`, `daemon.conf`,
+  `daemon config set` and the GUI's Save and Start (`daemon config set` and Save used to
+  allow only 1–10). A value outside that range, including 0 or a negative number in
+  `daemon.conf`, is refused before the daemon starts, and the message names
+  `daemon.conf` when the value came from there. A `daemon.conf` without the key still
+  gets the default of 5.
+- `download_folder` must be an absolute path. `daemon config set download_folder`
+  expands `~` and `~/…` to your home folder and refuses any other path that is not
+  absolute, such as `~name` or `results`. The GUI's Save refuses a relative folder before
+  creating anything. `daemon run` and Start in the GUI and the tray refuse a
+  `download_folder` in `daemon.conf` that is relative or starts with `~`, naming the fix.
+  A relative `daemon run --download-dir` is still taken from the folder you run it in.
 - A download batch that registered no work (every file already on disk) no longer wedges
-  the poll loop; the daemon used to stay alive but never scan again. Batch IDs are unique
-  per attempt, so a job that failed once can be recorded as downloaded later and stale
-  failures no longer raise an error report on every poll, and a completed job with no
-  output files is tagged like any other finished job.
+  the poll loop; the daemon used to stay alive but never scan again. A job that failed
+  once can be recorded as downloaded later, stale failures no longer raise an error report
+  on every poll, and a completed job with no output files is tagged like any other
+  finished job.
 - **Scan now** reports why a scan did not start (stopped, paused, or one already
   running), **Save all settings** asks the running daemon to reload and reports what
-  happened, and setup validates the download folder with a write probe rather than a
-  stat, so a read-only folder is refused before the first download fails.
+  happened, and the Setup tab's status check write-probes the download folder, as saving
+  already did, so a read-only folder is reported before the first download fails.
 - The daemon's persistent state is now bounded. As part of this, the lifetime
-  `JobsDownloaded` counter becomes a trailing counter covering roughly the last 37 days.
-- Known limitation: when running as a Windows service, some low-level log lines do not
-  reach the service log. They are visible in foreground mode.
+  `JobsDownloaded` counter becomes a trailing count covering `lookback_days` plus 30 days
+  (37 days at the default); jobs still waiting for their tag are kept at any age. Error
+  reports are pruned to the newest 500.
 - The `daemon config validate` help now names the values the daemon actually accepts
   (`Enabled`, `Conditional`, `Disabled`) and the required custom-field setup; the old
   text suggested values the daemon would silently skip.
@@ -412,17 +456,20 @@ documented in
 - The job template Tags field no longer rewrites itself while you type; the
   comma-separated list is parsed into tags when you leave the field. Contributed by
   @hjung-rescale ([PR #61](https://github.com/rescale-labs/Rescale_Interlink/pull/61)).
-- The Single Job flow's Back button returns from review to inputs without losing state.
-  Contributed by @hjung-rescale
+- The Single Job flow's **Select Inputs** step has a Back button that returns to
+  **Configure**. Contributed by @hjung-rescale
   ([PR #63](https://github.com/rescale-labs/Rescale_Interlink/pull/63)).
 - SSH access fields in job files — CIDR rule, public key, SSH port — are carried into the
   create call instead of being silently dropped, and unknown top-level keys in a
   `--job-file` produce a warning (#43). The GUI's job template carries the same fields,
-  so the SSH directives of an SGE script survive the GUI.
+  so an SGE script's CIDR rule and public key survive the GUI (the SGE format has no
+  port directive).
 - Template fields no longer die silently on the GUI's load paths: the tar subpath and the
-  input file list were dropped on every template load and emptied on a CSV round trip.
-- End-to-end monitoring (`submit -E`, `jobs monitor`, compat mode) ends when a job reaches
-  Stopped or Force Stopped instead of polling forever; only Completed counts as success.
+  input file list were dropped on every template load and emptied on a CSV round trip
+  (the CSV fix contributed by @ctusa-rescale).
+- `jobs submit -E`, `jobs tail` and compat mode's wait end when a job reaches Stopped or
+  Force Stopped instead of polling forever. Compat mode counts only Completed as
+  success; `jobs submit -E` and `jobs tail` report the status and exit 0.
 
 ### Disk-space errors report real numbers (#34)
 
@@ -446,14 +493,26 @@ disk-full.
   that could mix two encryptions in one object.
 - Fixed a silent truncation in pre-encrypted uploads: a short read while encrypting the
   source file could commit a truncated object that every later size check agreed with.
-  All read paths now use full-read semantics.
+  Every encrypt and upload read path now reads full buffers.
 - Streaming uploads read every part exactly full before encrypting it; short reads from
   network filesystems can no longer produce undersized parts or failed completion checks.
 - A source file that changes while it is being uploaded is refused instead of registered
-  with a size taken before the transfer and a checksum computed after it.
-- A disk-full error during the final flush of a job archive no longer uploads a truncated
-  archive marked as success, and archive entries use forward-slash names on Windows and
-  carry symlink targets.
+  with a size taken before the transfer and a checksum computed after it. A file that
+  shrinks or empties after the upload was planned fails with "changed during the upload"
+  instead of stopping the program; a file that is empty to begin with still uploads.
+- Special files (named pipes, devices, sockets) are refused as upload sources.
+- `folders upload-dir` and the GUI's folder upload skip a symbolic link that leads back
+  into the folder being uploaded, or into a folder that contains it, instead of uploading
+  a second copy, and name each broken link instead of leaving it out silently. Both are
+  counted in the summary. Other links are followed; on Windows, links to folders are not
+  followed.
+- An S3 response that lacks expected fields (for example behind a proxy that strips
+  headers) fails that file instead of stopping the program.
+- A disk-full error during the final flush of a job archive made by Interlink's built-in
+  archiver no longer uploads a truncated archive marked as success, and its entries use
+  forward-slash names on Windows and carry symlink targets.
+- Single-blob Azure uploads stream the file instead of reading it into memory, and Azure
+  no longer logs a line per block.
 - The File Browser uploads only to the folder it is actually showing. Switching between
   Jobs and My Library, or navigating while a folder is still loading, can no longer send
   files to the previous view's folder (which for job output folders failed with an
@@ -461,90 +520,149 @@ disk-full.
   disabled until the destination has loaded, and the confirmation dialog names the exact
   folder that will receive the files.
 
-### Download integrity
+### Download integrity and safe file names
 
-- A download whose checksum or size does not match what the platform recorded is moved
-  out of the way instead of being left in place as if it were good, and the error says
-  where it went.
-- File names reported by the platform are validated before they are used as local paths,
-  so a malformed name cannot write outside the download folder.
+- A download whose checksum or size does not match what the platform recorded is renamed
+  to `<file>.corrupt` instead of being left in place as if it were good, and the error
+  says where it went.
+- Checksums are recognised however the platform spells SHA-512 (`SHA512`, `sha-512` and
+  so on). When the platform lists checksums for a file but none is SHA-512, the download
+  (or the daemon keeping a file already on disk) warns that the file was not verified.
+- Every file and folder name the platform supplies is checked before it becomes a local
+  path. A name that is empty or only dots, a reserved Windows device name, or a name with a
+  colon, a character Windows forbids, a control character, or a trailing dot or space is
+  refused for that file only, quoting the name and the reason; the rest of the download
+  continues and the command exits 1.
+- A download refuses a destination that is a symbolic link or special file, and leaves
+  that entry alone. GUI folder downloads show each refused entry as a failed
+  transfer, and merge mode downloads a truncated local file again instead of skipping it.
 - Every download verifies the byte count it received before it is reported complete, and
-  the S3 and Azure download paths now share one implementation.
+  the S3 and Azure download paths now share one implementation. Legacy-format S3
+  downloads no longer hold the whole file in memory.
 - A failed concurrent download no longer leaves a full-size file with holes at the
-  destination; it writes to a `.partial` name and renames on completion.
+  destination; it writes to a `.partial` name and renames on completion. A successful
+  download no longer deletes an unrelated `<name>.encrypted` file beside it.
 - Folder downloads and compat-mode downloads skip an existing local file only when its
-  size matches the remote file.
+  size matches the remote file, and `folders download-dir --overwrite` into an existing
+  folder replaces files of the same size too.
+- In a folder download, a file conflict that cannot be resolved counts as a failure and
+  prints its cause; it used to be reported as success. Without `--continue-on-error` the
+  first failure stops the download, and Abort always does. No file is removed once the
+  download has stopped, and files the stop kept from starting are counted as such. The
+  summary counts merged folders correctly.
 - Paginated listings that hit the page limit return an error instead of a truncated
   result presented as success.
 
 ### Transfer hardening: resume, cancellation and object identity
 
-- Interrupted streaming uploads (the default mode) now resume on S3 and Azure. Each
-  completed part is recorded as it lands, the next attempt continues from the last
-  contiguous part and produces the same encrypted object an uninterrupted upload would.
-  A cancelled upload keeps its checkpoint and its uploaded parts too, so retrying after
-  a cancel continues instead of re-sending the file; the record beside the source file
-  (`<file>.upload.resume`) and the parts on the backend are dropped when the source file
-  changes, when the record is older than seven days, or when the retry completes.
+- Interrupted streaming uploads (the default mode) resume on S3 and Azure. The
+  next attempt continues from the last contiguous run of accepted parts and produces the
+  same encrypted object an uninterrupted upload would. The resume record beside the source
+  file (`<file>.upload.resume`) is rewritten at most every 10 seconds while parts
+  complete, and once more when the upload stops. A cancelled upload keeps its record and
+  its uploaded parts, so a retry continues; the record and the parts on the backend are
+  dropped when the source file changes, when the record is older than seven days, or when
+  the retry completes. Abandoning a resume deletes only the encrypted copy Interlink made
+  for that source file.
 - Pre-encrypted uploads resume from their encrypted copy when the source file is
-  unchanged, whatever order the parts completed in, instead of starting over. A resume
-  is planned against the part size it was interrupted with, so a retry that runs
-  beside other transfers continues with fewer workers rather than starting over.
+  unchanged, whatever order the parts completed in, and a resume uses the part size it
+  was interrupted with.
 - An upload from a directory that cannot hold the lock and resume files (read-only or
   full) runs without them instead of failing; such an upload cannot be resumed.
-  Cancelling a transfer waits at most a minute for the backend to acknowledge the
-  abort, instead of up to ten.
+  Cancelling a transfer waits up to a minute for the abort to reach the backend.
 - Two transfers of one file can no longer run against the same upload: the upload lock
   is exclusive across processes, a live owner is never displaced (Windows previously
   treated every other process as gone), and a second transfer of the file within one
-  process is refused. A lock left by a crashed transfer on this same machine is cleared
-  once its owner's process is gone. A lock written on another machine or by a release
-  before this one, whose owner's process id the operating system has since reused, or
-  whose owner's process this user is not allowed to inspect (another login on Windows),
-  is never cleared automatically: the error names the process, host, user and time it
-  was taken, and the `<file>.upload.lock` beside the source file to delete if that
-  upload is not running. After upgrading, a stale lock left by an earlier release
-  therefore needs that one manual step, and on macOS so does a lock left by a crash
-  before a reboot. Two machines restored from one image, including containers started
-  from an image that ships a fixed `/etc/machine-id`, count as one machine for this
-  purpose and do not protect a shared source file against each other, as before.
+  process is refused. A lock left by a crashed transfer on this same machine is reclaimed
+  on the next upload attempt once Interlink can prove its owner has exited. A lock it
+  cannot judge — written on another machine or by an earlier release, or whose owner this
+  user is not allowed to inspect (another login on Windows) — is never cleared
+  automatically. A refusal names the source file and, when another process holds the
+  lock, the lock file; for a lock Interlink cannot judge it also names the process, host,
+  user and time it records, and says to delete the lock file if that upload is not
+  running. Locks left by v4.9.8, and on macOS
+  locks left across a reboot, need the manual step in
+  [Before you upgrade](#before-you-upgrade). Two Windows machines or Linux virtual machines cloned from one image
+  with the same machine ID count as one machine for this purpose and do not protect a
+  shared source file against each other, as before.
 - A file replaced in storage while it is being downloaded aborts the download on every
-  download path, instead of splicing parts of two objects into one file.
+  download path, instead of splicing parts of two objects into one file. A proxy that
+  removes the storage service's ETag headers therefore makes downloads fail.
 - Cancelling a download is reported as a cancellation, never as a completed file. A
   download that did not receive every part fails and keeps its resume state, and a
   resume record that claims more bytes than the partial file holds is discarded.
 - Concurrent downloads bound how far they fetch ahead of a slow part, so a stalled part
   no longer holds the rest of the file in memory.
 - Rejected storage credentials are refreshed once for the whole transfer instead of
-  never, and upload progress no longer double-counts a retried part.
-- A file registration or job submission whose response was lost is reconciled against
-  the platform instead of repeated: the registration adopts only the record of its own
-  stored object, and a job that may already exist is reported rather than submitted
-  twice. The HTTP client's own request timeout is no longer mistaken for proof that a
-  request never left, and neither is a cancellation that lands after the request was
-  sent. A PUR job whose creation could not be confirmed is recorded as such, named at
-  the end of the run and in `pur resume --dry-run`, and never created again on resume
-  unless `--recreate-indeterminate` says it is not on the platform.
-- Retrying a cancelled transfer waits for the previous attempt to finish unwinding,
-  Cancel, Cancel Batch and Cancel All also cancel a retry that is still waiting to
-  start, a failed folder creation ends a folder upload with an error instead of hanging,
-  and the worker pool shrinks when the transfer count drops.
-- Files already present locally are verified against the platform's checksum before the
-  daemon skips downloading them.
+  never, and upload progress no longer double-counts a retried part. S3 resume checks
+  and aborts are retried like Azure's, so one transient error no longer fails a whole
+  upload.
+- A file registration whose response was lost is looked up on the platform instead of
+  repeated, and adopts only the record of its own stored object. A job creation whose
+  response was lost is reported as possibly created rather than sent again; check the
+  platform before retrying it. A PUR job whose creation could not be confirmed is
+  recorded as such, named at the end of the run and in `pur resume --dry-run`, and is
+  never created again on resume unless `--recreate-indeterminate` says it is not on the
+  platform.
+- Cancel, Cancel Batch and Cancel All also cancel a retry that is still waiting to start,
+  a failed folder creation ends a folder upload with an error instead of hanging, and the
+  worker pool shrinks when the transfer count drops.
+- Proxy warm-up connections are closed after use, and transfers with the same proxy
+  settings share one connection pool.
 
-### Build and security
+### Windows
 
-Go toolchain 1.26.7 with refreshed dependencies (resolves all Dependabot alerts open at
-release time); release builds are produced from deterministic, checksum-verified inputs,
-and every tagged build now runs the full Go and frontend test suites before packaging.
-The release workflow grants its signing identity only to the job that signs, and refuses
-a tag that does not match the version the binaries report. The README shipped inside each
-platform archive is now the same document. On Windows, a failure to re-launch the GUI's
-helper process reports an error instead of panicking.
+- Saving auto-download settings accepts local folders again; since v4.9.4 it refused every
+  local folder. It now accepts any folder you can write to, including one on a mapped
+  network drive.
+- Several people signed in to one computer at once can each run auto-download.
+  Auto-download that an earlier version started must be ended before this version can
+  start it: run `rescale-int daemon stop --force`, or end the `rescale-int` process in
+  Task Manager. Until then, Start says so.
+- The token-file permission warning no longer appears on every run.
+- Error messages quote file patterns without doubling Windows backslashes.
+
+### Windows: auto-download runs in your session
+
+Auto-download no longer runs as a Windows service. It runs in your own session, as on
+macOS and Linux, so it can reach your mapped network drives and needs no administrator
+rights. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-labs/Rescale_Interlink/pull/64)).
+
+- **It starts with the tray.** The MSI sets the tray to start when you sign in, and the
+  tray starts auto-download if it is enabled, waiting up to a minute for a download
+  folder on a mapped drive. The app starts the tray when you open it. You can also use
+  **Start Auto-Download** and **Stop Auto-Download** in the Setup tab, under
+  **Auto-Download Control**, or the tray.
+- **If you used the service:** open Interlink in each Windows account that needs
+  auto-download, check its settings in the Setup tab and start it there.
+- **A service installed by an earlier version removes itself** the next time Windows
+  starts it, and uninstalling Interlink also tries to remove it. To remove it at once,
+  run `rescale-int service uninstall` as administrator. While it is still running, Start
+  says so.
+- **The installer no longer starts anything.** After installing, open Interlink from the
+  Start menu or the desktop shortcut. Upgrading, repairing and uninstalling end your own
+  running Interlink first (the app, the tray, auto-download and any `rescale-int`
+  command), so they no longer ask you to close programs or wait on them; other users'
+  Interlink keeps running. After an upgrade, auto-download starts again with the tray.
+
+### Build and release
+
+Go toolchain 1.26.7 with refreshed dependencies. Six advisories in the frontend's build
+and test tools were cleared; none of them affected the shipped application. Release
+builds use pinned, checksum-verified toolchains: Node.js 24.21.0 (Node 20 is end of life)
+and a pinned WebView2 runtime for the Windows installer, whose build now stops if the
+runtime could not be bundled completely. Every macOS and Windows release build runs the
+Go and frontend test suites before packaging, and pushes to release branches and pull
+requests also run the Go tests natively on Windows and Linux. The release workflow
+refuses a tag that does not match the version in the source. The Linux release can now
+be built in GitHub Actions on AlmaLinux 8, with every download checked against a pinned
+SHA-256. Every release asset, including the Windows zip, now has a `.sha256` file that
+`shasum -a 256 -c` accepts. On Windows, a failure to re-launch the GUI's helper process
+exits with an error instead of panicking.
 
 ### License feature sets on a job (#67)
 
-**License Settings** in the job template gained **License Feature Name** and **Licenses Per Job**. Together they submit the job with a user-defined license feature set, so a job checks out a named feature from your own license server. Contributed by @ctusa-rescale.
+**License Settings** in the job template gained **License Feature Name** and **Licenses Per Job**. Together they submit the job with a user-defined license feature set, so a job checks out a named feature from your own license server. Contributed by @ctusa-rescale ([PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66)), with follow-up fixes by the maintainers.
 
 ```json
 "userDefinedLicenseSettings": {
@@ -554,15 +672,22 @@ helper process reports an error instead of panicking.
 }
 ```
 
-Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. Clearing the feature name in the GUI releases the count, so the dialog cannot trap you in an error nothing on screen can clear. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. Clearing the feature name in the GUI releases the count. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
 
 ### Job template: project picker and coretype-aware core stepper
 
-The **Project** field is now a dropdown of the projects the API key can see — the default project first, and each project's remaining budget alongside its name where the platform reports one — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped. Contributed by @ctusa-rescale.
+The **Project** field is now a dropdown of the projects the API key can see — the default project first, and each project's remaining budget alongside its name where the platform reports one — with a **Scan Projects** button beside it, matching **Scan Coretypes**. A project ID stored in a template that the account no longer lists is kept and shown as such rather than silently dropped. Contributed by @ctusa-rescale, with follow-up fixes by the maintainers.
 
 The **Org Code** field has left the job template. It only ever existed to address the project-assignment endpoint, and the organization code is now resolved from the API key's own user profile and reused for the rest of the run, so choosing a project is all that is required. The field itself is preserved everywhere it was already written down — the `OrgCode` column of a jobs CSV, `org_code` in a PUR config file, and saved GUI templates — and an explicit value still overrides the resolved one, for an account whose profile reports a different code. Picking a project from the picker clears an organization code inherited from an older template, since the picker lists this key's projects.
 
 The **Cores** control now steps through the core counts the selected coretype actually offers within a node, and whole nodes above that, instead of counting by one, so neither the stepper buttons nor the arrow keys can land on a value the platform rejects. Without coretype metadata the stepper, its hint and the empty-field default all use one node size.
+
+### Known limitations
+
+- A worker count below 1 typed in the PUR tab is not saved and no message says so; starting
+  the run then refuses it with a message.
+- In a folder download, a file-conflict prompt that is waiting for your answer stays open
+  after another file's failure has stopped the download; answer it to finish.
 
 ### Documentation (#33)
 
@@ -1874,7 +1999,7 @@ Interlink failed when downloading outputs from shared jobs stored in Azure. The 
 #### Regression Command
 
 ```bash
-rescale-int jobs download -j "BWuHag" -d "." --search "rescale-ai"
+rescale-int jobs download -j "BcDeFg" -d "." --search "results"
 ```
 
 ---
@@ -2004,7 +2129,7 @@ On a fresh Windows install (subprocess mode), the auto-download daemon failed si
 - **File**: `internal/daemon/ipc_handler_windows.go`
 
 **Fix 3: Windows username format mismatch**
-- Daemon returned `"DESKTOP-PC\Peter Klein"` but GUI compared with `"Peter Klein"`. Direct equality failed.
+- Daemon returned `"HOSTNAME\username"` but GUI compared with `"username"`. Direct equality failed.
 - Added `matchesWindowsUsername()` helper handling `DOMAIN\user`, `user@domain` (UPN), and case-insensitive comparisons.
 - Added subprocess hardening: in single-user mode, if exactly 1 user is returned and no match is found, treat it as the current user.
 - **File**: `internal/wailsapp/daemon_bindings_windows.go`
@@ -2098,7 +2223,7 @@ This release fixes seven interrelated bugs that rendered the PUR (Parallel Uploa
 - **Files**: `internal/models/job.go`, `internal/wailsapp/job_bindings.go`, `internal/core/engine.go`, `internal/pur/pipeline/pipeline.go`, `frontend/src/stores/jobStore.ts`, `frontend/src/components/tabs/PURTab.tsx`, `frontend/src/components/tabs/SetupTab.tsx`
 
 **Fix 7: Tar File Naming — Readable with Collision-Safe Suffix**
-- Root cause: `GenerateTarPath()` replaced all path separators with underscores, producing unreadable names like `Users_pklein_data_Run_1.tar.gz`.
+- Root cause: `GenerateTarPath()` replaced all path separators with underscores, producing unreadable names like `Users_username_data_Run_1.tar.gz`.
 - Fix: Uses last 1-2 path components plus a short FNV-32a hash for collision safety. Produces: `Testing_Run_6_a1b2c3d4.tar.gz`.
 - **Files**: `internal/util/tar/tar.go`
 
@@ -4721,12 +4846,12 @@ All CLI commands now support single-letter short flags, aligned with `rescale-cl
 ```bash
 # Before (verbose)
 rescale-int hardware list --search emerald --json
-rescale-int jobs download --id WfbQa --outdir ./results --overwrite
+rescale-int jobs download --id GgHhI --outdir ./results --overwrite
 rescale-int files upload model.tar.gz --folder-id abc123
 
 # After (concise)
 rescale-int hardware list -s emerald -J
-rescale-int jobs download -j WfbQa -d ./results -w
+rescale-int jobs download -j GgHhI -d ./results -w
 rescale-int files upload model.tar.gz -d abc123
 ```
 
@@ -4968,7 +5093,7 @@ Fixed incorrect command examples in the Quick Reference Examples section:
 
 **6. go.mod Cleanup**
 
-Removed unused `replace` directive for `github.com/rescale-labs/pur` module which was not imported anywhere in the codebase.
+Removed an unused `replace` directive for a module that was not imported anywhere in the codebase.
 
 #### Testing
 
@@ -5148,7 +5273,7 @@ This release achieves a **99% reduction in API overhead** for job downloads by e
 Verified with real job downloads:
 - ✅ Build successful
 - ✅ Version check: 2.4.8
-- ✅ Integration test: Downloaded 5 files from job wemvxd
+- ✅ Integration test: Downloaded 5 files from a test job
 - ✅ No rate limit waits
 - ✅ Checksum validation passed
 - ✅ All unit tests passing
@@ -5344,8 +5469,8 @@ This release fixes two bugs: a critical issue preventing Azure users from downlo
 
 #### Testing
 
-Verified with Azure account (API key ending in ...4555) downloading job WVieAd:
-- ✅ Single file download successful (file ywiybh)
+Verified with an Azure account downloading a job's output files:
+- ✅ Single file download successful
 - ✅ Batch download successful (10 files with nested directories)
 - ✅ All files receive S3 credentials correctly
 - ✅ No 404 errors or credential mismatches
@@ -5489,8 +5614,8 @@ Error: invalid filename from API for file ABC123: filename cannot contain '..': 
 - ✅ Build succeeds on all platforms
 - ✅ Zero regressions detected
 - ✅ 40 new tests added (1,593 lines of test code)
-- ✅ Tested with S3 backend (API key: 91cb2a...)
-- ✅ Tested with Azure backend (API key: 8f6cb2...)
+- ✅ Tested with S3 backend
+- ✅ Tested with Azure backend
 
 **Version Information**:
 ```bash
@@ -5549,8 +5674,8 @@ This release adds full proxy support for direct S3 and Azure Blob Storage operat
 #### Testing
 
 **Tested with Real Backends**:
-- ✅ S3: File upload, download, folder upload (API key: 91cb2a...)
-- ✅ Azure: File upload, download, folder upload (API key: 8f6cb2...)
+- ✅ S3: File upload, download, folder upload
+- ✅ Azure: File upload, download, folder upload
 - ✅ GUI launches successfully
 - ✅ CLI commands work for both backends
 - ✅ No regressions in existing functionality
@@ -5888,17 +6013,17 @@ Major release adding full upload/download resume capability for both S3 and Azur
 {
   "local_path": "/tmp/test_medium_300mb.dat",
   "encrypted_path": "/tmp/.test_medium_300mb.dat-447006073.encrypted",
-  "object_key": "user/user_HjDBeb/test_medium_300mb.dat-HoxI7mRQgLqk7fpUWSbhqT",
-  "upload_id": "Z5ZRKz5eBYZiXDIA.Tfhrc5_iN4cwNZtXgK...",
+  "object_key": "user/user_<id>/test_medium_300mb.dat-<random_suffix>",
+  "upload_id": "<multipart upload ID>",
   "total_size": 314572816,
   "original_size": 314572800,
   "uploaded_bytes": 67108864,
   "completed_parts": [{"PartNumber": 1, "ETag": "..."}],
-  "encryption_key": "lBklWCPNOP9LkkSqjegNIXEVH+gAUY/g74Gf+M2UuMc=",
-  "iv": "r2vm4sl81G8gbS2b+IP3Tg==",
-  "random_suffix": "HoxI7mRQgLqk7fpUWSbhqT",
-  "created_at": "2025-11-15T15:57:19.572637-05:00",
-  "last_update": "2025-11-15T15:57:19.572638-05:00",
+  "encryption_key": "<base64 AES-256 key>",
+  "iv": "<base64 IV>",
+  "random_suffix": "<random_suffix>",
+  "created_at": "2025-11-15T15:57:19Z",
+  "last_update": "2025-11-15T15:57:19Z",
   "storage_type": "S3Storage"
 }
 ```

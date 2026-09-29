@@ -1,7 +1,7 @@
 # Rescale Interlink — Feature Summary
 
 **Version:** 4.9.9
-**Last Updated:** August 25, 2026
+**Last Updated:** September 26, 2026
 **Status:** Production Ready, FIPS 140-3 Compliant (Mandatory)
 
 This document catalogs what Rescale Interlink can do. For full command syntax, see [CLI_GUIDE.md](CLI_GUIDE.md). For architecture internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For version history, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
@@ -37,8 +37,9 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 
 **Release artifacts** (what a tagged release publishes):
 - macOS (darwin/arm64) — signed and notarized `.zip`
-- Linux (amd64) — `.tar.gz` holding the CLI and an AppImage GUI. The AppImage bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. The Linux build gates the AppImage on `build/linux/verify-appimage.sh` before packaging the tarball, so helpers that are missing or resolve against the host fail the build. This build runs on Rescale HPC, not GitHub Actions
+- Linux (amd64) — `.tar.gz` holding the CLI and an AppImage GUI. The AppImage bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. The Linux build gates the AppImage on `build/linux/verify-appimage.sh` before packaging the tarball, so helpers that are missing or resolve against the host fail the build. It is built by `.github/workflows/release-linux.yml` in an `almalinux:8` container, and fails if a binary needs a GLIBC newer than 2.28
 - Windows (amd64) — portable `.zip` and `.msi`; the executables are signed before zipping and the MSI is signed after it is built
+- Every asset is published with a `.sha256` beside it
 
 **Additional build targets** (`make build-all`, not published with a release):
 - macOS (darwin/amd64)
@@ -59,7 +60,8 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - **Streaming encryption** (default): encrypts on-the-fly during upload, no temp file needed
 - **Legacy mode** (`--pre-encrypt`): full-file encryption before upload, compatible with older clients
 - Every streaming upload is multipart, whatever the file size. The 100MB threshold (`constants.MultipartThreshold`) applies only to `--pre-encrypt`, which sends smaller files in a single request, and to legacy download chunking. Part size is planned per file, not fixed: 16MB / 32MB / 48MB / 64MB by file size, clamped to the transfer memory budget, then raised as far as needed to keep the part count inside the backend's limit (10,000 for S3, 50,000 for Azure). A file too large for even the largest legal part is refused up front, naming the biggest file that backend can take
-- An interrupted upload restarts from the beginning. Every attempt generates a fresh key, IV and object-key suffix, so a `<file>.upload.resume` sidecar from an earlier `--pre-encrypt` attempt describes different ciphertext; it is never resumed, so the upload restarts from scratch instead of splicing two encryptions into one object. On S3 the orphaned multipart upload is aborted as well; on Azure the sidecar simply fails the object-key check and is left until a successful upload clears it. The streaming default writes no sidecar at all
+- An interrupted upload resumes. A `<file>.upload.resume` record beside the source names the backend upload and the parts it has accepted, and a rerun continues from it while the source file is unchanged and the record is less than seven days old. The streaming default continues from the last contiguous part and rewrites the record at most every 10 seconds and once when it stops; `--pre-encrypt` continues from its encrypted copy. An upload from a folder that cannot hold the record runs without it and cannot resume
+- An exclusive `<file>.upload.lock` keeps two transfers off one source file; symbolic links are followed, and a named pipe, device or socket is refused as a source
 - Every upload path checks completeness before committing and aborts rather than registering a partial object: the streaming default requires every part to be present, and `--pre-encrypt` additionally verifies the byte count and that the part or block sequence has no gaps (v4.9.9)
 - Progress bars with transfer speed and ETA, including a retry label when a part is retried
 - S3 and Azure backends with seekable upload streams for retry
@@ -71,6 +73,8 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Chunked/concurrent download for files larger than 100MB
 - Byte-offset resume via HTTP Range requests (`<file>.download.resume` sidecar) — legacy-format objects only. The current v2 CBC format decrypts sequentially into the output file, so an interrupted download restarts from zero
 - Progress bars during download and decryption
+- Names from the platform are checked before they become local paths: an empty or dot-only name, a reserved Windows device name, or one with a colon, a Windows-forbidden or control character, or a trailing dot or space is refused for that file only, and the command exits non-zero. A download never writes through a symbolic link or special file at its destination
+- SHA-512 verification, with the algorithm name matched in any spelling; a file whose listed checksums include no SHA-512 is reported as not verified
 - Pre-flight disk space check that reports the requirement it actually enforced, measured on the filesystem holding the output directory — on the legacy path, which stages an encrypted temp file, and on the Azure v1 path. The v2 CBC format writes plaintext straight out and has no pre-flight check
 - No file size limit
 
@@ -102,16 +106,19 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Optional hidden-file inclusion (`--include-hidden`)
 - Concurrent file uploads with adaptive concurrency, plus concurrent folder creation (`--folder-concurrency`)
 - Folder conflict handling: skip existing subfolders, or merge into them. The root folder cannot be skipped
-- No per-file resume: a re-run restarts each unfinished file from the beginning, the same as a single-file upload
+- Each unfinished file resumes on a re-run, as a single-file upload does
 - Streaming folder creation (creates remote folders as parent becomes ready)
+- Symbolic links are followed wherever they point; a link that leads back into the folder being uploaded (or a folder containing it), a broken link, and on Windows a link to a folder are skipped, named with the reason, and counted
 - Exits non-zero when any file, directory walk, or folder creation failed
 
 ### Download Directory
 - Recursive folder download recreating local structure
-- Conflict handling: skip, overwrite, or merge; `--dry-run` previews the plan
+- Conflict handling: skip, overwrite, or merge; `--dry-run` previews the plan. Without a terminal, a destination that already holds files needs one of the three
 - Concurrent downloads with adaptive concurrency
 - Streaming scan-to-download (downloads begin within seconds of scan start)
 - Checksum verification after download, waivable with `--skip-checksum`
+- A file conflict that cannot be resolved counts as a failed file; without `--continue-on-error` the first failure stops the download, and the command exits non-zero when any file failed
+- `--overwrite` replaces existing files even when the size matches
 
 ### Delete Folder
 - Move a folder (and its contents) to Trash (recoverable) with confirmation; use `--permanent` to delete irreversibly
@@ -147,7 +154,7 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Optimized v2 API endpoint for fast file listing
 
 ### Download Job Outputs
-- Download all output files with automatic decryption, or one file by ID
+- Download all output files with automatic decryption, or one file by ID. `--skip`, `--overwrite`, `--resume` and `--skip-checksum` work in both modes; `--output` names the one file's path and `--outdir` the directory for a whole job, and `--max-concurrent` must be 1–20
 - Selective download with filename include/exclude globs, a search term, and `--path-filter` for path patterns (supports `**`)
 - Optimized: zero per-file `GetFileInfo` calls (metadata from listing)
 
@@ -203,6 +210,7 @@ Background service for automatically downloading completed jobs.
 - Persistent state tracking (downloaded/failed jobs)
 - Output directories are named after the sanitized job name; the job ID is recorded in a `.jobid` file inside the folder (rather than appended to the folder name). If a same-named folder already exists for a different job, the job ID is appended to avoid collisions
 - Graceful shutdown on Ctrl+C
+- **Workspace folders (opt-in)**: with `include_workspace_folders`, jobs in the workspace's shared folders, including other users' jobs, are downloaded too, into a mirror of the folder tree under the download folder, or into the download folder itself with `flatten_folder_structure`. Archived folders are skipped, and `daemon status` counts the folders and out-of-window jobs the last poll left out
 - **Tag-based source of truth**: The `autodownload:done` tag on the Rescale platform is authoritative (`autoDownloaded:true`, applied by earlier versions, counts too). Removing the tag via the Rescale web UI triggers a re-download on the next poll; a tag-apply failure after a successful download is retried without re-downloading the files.
 - **Multi-client coordination**: When several clients poll the same workspace folders, each puts an `autodownload:started:<client>:<time>` tag on a job before downloading it and reads the job's tags back a few seconds later; only the client whose tag is the earliest downloads the job, provided the computers' clocks agree to within a couple of seconds, as automatic time synchronization normally keeps them. The others skip it, logging which tag holds it and until when, and `daemon status` counts such jobs. A client removes its tag when the attempt fails or the daemon stops (so the job is retryable), retrying a removal that fails at the next poll, and replaces it with `autodownload:done` on success. A tag holds its job for 24 hours at most, so a client that crashed does not hold a job for ever.
 - **Shared transfer engine**: Daemon downloads route through the same `TransferService` the GUI uses. Multi-file jobs download in parallel with adaptive concurrency; there is no parallel transfer implementation inside the daemon.
@@ -212,22 +220,21 @@ Background service for automatically downloading completed jobs.
 - **Pre-flight validates the download folder** with the same write probe the config save uses, so a read-only folder is caught before every download fails.
 - **Bounded growth**: the report directory keeps the newest 500 files; state entries are dropped once no scan could select them again (jobs still owed a tag call are exempt); and terminal transfer tasks beyond the 20 most recent batches are cleared, keeping recent auto-downloads visible without accumulating one task per file forever.
 - **The downloaded count is a trailing window, not a lifetime total**: `daemon status` and the Setup tab count the state entries still retained, and retention is `lookback_days` + 30 days — about 37 days at the default. Jobs downloaded before that fall out of the count.
-- **Known limitation**: the shared transfer path's low-level diagnostics (`[SLOT]`, `[CRED]`, `[TIMING]`, `[BATCH]`) go through the standard library logger, which is bridged into the daemon log only by `daemon run`. The Windows service hosts each user's daemon in-process and returns before that bridge is installed, so those lines do not reach the service's per-user log. Run the daemon in the foreground to see them.
 - **Rate limit and retry notices** reach a detached daemon's log file and IPC log buffer, not the closed stderr it was started with.
 
 ### Subcommands
-- `run` — Start the daemon (foreground or `--background`, optional `--ipc`)
-- `stop` — Send a clean shutdown request to a running daemon
+- `run` — Start the daemon (foreground or `--background`, optional `--ipc`). Only one runs at a time: every mode claims the PID file under an OS lock (`daemon.pid.lock`) first, and a second launch refuses
+- `stop` — Send a clean shutdown request to a running daemon, wait up to 10 seconds for it to exit, and exit 1 if it has not
 - `status` — Show daemon state and statistics
-- `list [--failed]` — List downloaded or failed jobs
-- `retry [--all | -j ID...]` — Mark failed jobs for retry on the next poll
+- `list [--failed]` — List downloaded or failed jobs; `--failed` shows when each will be tried next
+- `retry [--all | -j ID...]` — Release failed jobs for another attempt, also while a daemon is running. A failed job is otherwise retried after 5, 10, 20 and then 30 minutes and held after five failed attempts
 - `config show` / `config path` / `config edit` / `config set <key> <value>` / `config init` / `config validate` — Manage `daemon.conf`
 
-On Windows MSI installs, the system tray app auto-starts the daemon at login when auto-download is enabled. The daemon runs as the logged-in user (no Windows service, no admin), so it can reach the user's mapped/network drives. See [ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model) for the rationale.
+On Windows MSI installs, the system tray app starts the daemon at login when auto-download is enabled. The daemon runs as the logged-in user (no Windows service, no admin), so it can reach the user's mapped network drives. A Windows service installed by an earlier version removes itself the next time Windows starts it, and `rescale-int service uninstall`, run as administrator, removes it at once. See [ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model).
 
 ### Platform Support
 - macOS/Linux: subprocess in the user's session, Unix domain socket IPC
-- Windows: subprocess in the logged-in user's session, named pipe IPC; tray auto-start at login
+- Windows: subprocess in the logged-in user's session, with a named pipe of each user's own, so several signed-in users can each run auto-download; tray auto-start at login
 
 ---
 
@@ -281,7 +288,7 @@ Batch job submission pipeline for parallel computational studies.
 **Command:** `rescale-int config [subcommand]`
 
 ### Commands
-- `config init` — Interactive setup with a numbered platform menu (free-text URLs are not accepted). Refuses up front when stdin is not a terminal, rather than looping on the required API-key prompt
+- `config init` — Interactive setup with a numbered platform menu (free-text URLs are not accepted). Refuses up front when stdin is not a terminal, rather than looping on the required API-key prompt. Writes to the `--config` file when one is given, does not echo the key, keeps an existing token file unless `--force`, and creates its directory `0700`
 - `config show` — Display the merged configuration (file, environment, flags) and its precedence
 - `config test` — Test API connection
 - `config path` — Show the configuration file path
@@ -314,7 +321,7 @@ Behavior that applies across the native CLI rather than to one command.
 `1` covers partial outcomes: a batch that transferred some files and failed others exits
 non-zero, `pur run` fails when any job in the pipeline failed, and choosing **Abort** at a
 prompt stops the batch rather than continuing through the rest of the files. A cancelled
-run is not a failure.
+PUR run is not a failure; a cancelled download or `files upload` is.
 
 ### Visible, Bounded Retries
 Transient storage and API failures are retried automatically and reported from the second
@@ -359,7 +366,7 @@ Seven tabs, in order:
 2. **Single Job Tab**: Job template builder with three input modes (directory, local files, remote files). Tar options for directory mode. A Back button between step one and step two returns to the first step without losing what was entered. The tag field accepts multiple comma-separated tags, and values typed without blurring are still captured on save and on template reload. Form state persists across tab navigation.
 3. **PUR Tab**: Batch job pipeline with view modes (choice screen, monitoring, configuration), pipeline settings, run queue. Jobs come from a folder scan, a file scan, or a parameter sweep built in the tab with a live case preview
 4. **Job Status Tab**: Paginated listing of your jobs with status badges, a name filter, and manual refresh. Pages forward with "Load next"; Refresh is disabled while a page load is in flight, and a tab-switch refresh that supersedes an in-flight page does not wedge the control.
-5. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations. The remote pane offers four browse modes — My Library, My Jobs, Legacy, and Trash. My Library and My Jobs support server-side search within a folder; Legacy adds an owner filter (any / mine / shared with me), server-side sorting by name, size, or created date, and Type / Owner / Created columns. Filters are scoped per mode and cleared on mode switch. A search or listing failure is reported rather than rendered as an empty library. Trash shows soft-deleted entries with restore/purge actions; Upload is disabled in Trash and My Jobs with an explicit "N/A in this view" reason.
+5. **File Browser Tab**: Two-pane local/remote browser with upload, download, and delete operations. The remote pane offers four browse modes — My Library, My Jobs, Legacy, and Trash. My Library and My Jobs support server-side search within a folder; Legacy adds an owner filter (any / mine / shared with me), server-side sorting by name, size, or created date, and Type / Owner / Created columns. Filters are scoped per mode and cleared on mode switch. A search or listing failure is reported rather than rendered as an empty library. Trash shows soft-deleted entries with restore/purge actions; Upload is disabled in Trash and My Jobs with an explicit "N/A in this view" reason. An optional setting, **Download jobs without Input/Output split** (`flatten_job_download`), puts a downloaded job folder's files directly under the job folder, as auto-download lays them out.
 6. **Transfers Tab**: Transfer progress with batch grouping (folder ops, PUR, single-job collapse into single rows), cancel/retry, filter chips, disk space error banner. A cancelled batch reads as cancelled end to end rather than as a clean completion, and storage retries surface on the rows and in the Activity log. Daemon auto-download rows appear inline with a `Daemon` badge and support per-row Cancel/Retry via IPC.
 7. **Activity Logs Tab**: Logs with level filtering (DEBUG/INFO/WARN/ERROR), run history with expandable job tables
 
@@ -420,7 +427,7 @@ renders them where the user is looking: the CLI through the progress writer, PUR
 the pipeline log, and the GUI onto the event bus for the Activity log and the batch rows.
 
 ### Resume Support
-- **Upload**: none in practice. The `--pre-encrypt` path writes a `.upload.resume` sidecar (parts, encryption key, IV), but a retry re-encrypts under a fresh key, IV and object-key suffix, so the sidecar always describes a different object and is deliberately discarded rather than resumed; S3 also aborts the orphaned multipart upload, while Azure leaves the sidecar until a successful upload clears it. The streaming default writes no sidecar. Interrupted uploads restart
+- **Upload**: `<file>.upload.resume` records the backend upload and its accepted parts; a rerun resumes while the source is unchanged and the record is under seven days old (see [Upload](#upload))
 - **Download**: `.download.resume` JSON files with byte-offset HTTP Range resume, for legacy-format objects only. The current v2 CBC format restarts from zero
 
 ### Conflict Handling
@@ -451,7 +458,7 @@ ITAR platforms (`itar.rescale.com`, `itar.rescale-gov.com`) automatically route 
 API communication restricted to 6 known Rescale platform URLs. Prevents credential exfiltration via `--api-url`.
 
 ### Error Report Privacy
-Reports redact hex tokens, URL params, emails, auth tokens, home paths, and file paths. Only server errors (5xx) and unclassified internal errors generate reports — auth, network, timeout, disk space, client-error, local filesystem, cancellation, and rate-limit failures are excluded, as are CLI usage errors and batch roll-ups whose individual failures were already reported. The report directory keeps the newest 500 files.
+Reports redact storage signatures and keys, authorization values, hex tokens, URL params, emails and home paths, and timeline entries keep file names only; the same credential redaction applies to every error, log line and GUI message. Only server errors (5xx) and unclassified internal errors generate reports — auth, network, timeout, disk space, client-error, local filesystem, cancellation, and rate-limit failures are excluded, as are CLI usage errors and batch roll-ups whose individual failures were already reported. The report directory keeps the newest 500 files.
 
 ### API Key Security
 Token file with `0600` permissions. Keys never logged or written to config.csv. State files with sensitive data use `0600` permissions.
@@ -466,7 +473,7 @@ See [SECURITY.md](SECURITY.md) for complete security documentation.
 ## Performance
 
 ### Rate Limiting
-Token bucket algorithm with cross-process coordinator (Unix socket / named pipe). Three scopes, each 85% of the platform's hard limit: `user` (1.7 req/sec), `job-submission` (0.236 req/sec), `jobs-usage` (21.25 req/sec). 429 feedback loop propagates cooldowns across all processes. When the coordinator is unreachable, each scope falls back to an emergency cap of one-eighth its hard rate and announces the transition.
+Token bucket algorithm with a cross-process coordinator per user (Unix socket / named pipe). Three scopes, each 85% of the platform's hard limit: `user` (1.7 req/sec), `job-submission` (0.236 req/sec), `jobs-usage` (21.25 req/sec). 429 feedback loop propagates cooldowns across all processes. When the coordinator is unreachable, each scope falls back to an emergency cap of one-eighth its hard rate and announces the transition.
 
 ### Adaptive Concurrency
 Dynamic scaling based on file size distribution: <100MB → up to 20 workers, 100MB–1GB → up to 10, >1GB → up to 5. Bounded by the command's `--max-concurrent` cap, and validated against thread pool and memory constraints.

@@ -49,17 +49,16 @@ For a comprehensive list of all features with source code references, see [FEATU
 - **Linux**: `x86_64`, built as `linux/amd64`
 
 The Linux distribution floors below describe where the `linux/amd64` build is
-supported. Nothing enforces them: the build records no GLIBC minimum and the
-binary makes no such check at startup, so it may well start on an older system
-— and may equally fail in the dynamic linker instead.
+supported. The release build fails if a shipped binary needs a GLIBC newer than
+2.28; the binary itself makes no check at startup.
 
-- GLIBC 2.27+
+- GLIBC 2.28+
 - RHEL/CentOS/Rocky/Alma 8+
-- Ubuntu 18.04+
+- Ubuntu 20.04+
 - Debian 10+
 - CentOS/RHEL 7 and older are not supported (end-of-life, GLIBC too old)
 
-If you see an error like `GLIBC_2.27 not found`, your Linux distribution is too old and not supported.
+If you see an error like `GLIBC_2.28 not found`, your Linux distribution is too old and not supported.
 
 ## Installation
 
@@ -69,15 +68,15 @@ to carry these assets, where `<tag>` is the release tag (for example `v4.9.9`):
 - **macOS (Apple Silicon)**: `rescale-interlink-<tag>-macos_aarch64.zip`
 - **Windows**: `rescale-interlink-<tag>-win_amd64.zip` (portable) or
   `rescale-interlink-<tag>-win_amd64.msi` (installer)
+- **Linux**: `rescale-interlink-<tag>-linux-amd64.tar.gz`
 
-No Linux asset is built, so check the release page itself for what a given
-release actually carries.
+Each asset has a `.sha256` beside it; `shasum -a 256 -c <asset>.sha256` checks it.
 
 Unpack the archive. The CLI binary inside is named `rescale-int` (`rescale-int.exe`
 on Windows); each archive also carries the GUI application alongside it.
 
-On Linux, build the CLI from a checkout instead. The module requires Go 1.26.7 or
-newer:
+To build the Linux CLI from a checkout instead (the module requires Go 1.26.7 or
+newer):
 
 ```bash
 make build-linux-amd64          # writes bin/<version>/linux-amd64/rescale-int
@@ -182,8 +181,8 @@ rescale-int --token-file ~/.config/rescale/token <command>
 ```
 
 The file holds the raw token and nothing else; surrounding whitespace is
-trimmed. Permissions looser than `0600` produce a warning on stderr but do not
-stop the read. A `--token-file` that is missing, unreadable or empty is skipped
+trimmed. On macOS and Linux, permissions looser than `0600` produce a warning on
+stderr but do not stop the read. A `--token-file` that is missing, unreadable or empty is skipped
 silently rather than failing the command, so a lower-priority source — the
 default token file — can still supply a key. Run `rescale-int config test` if
 you need to know which key a setup actually resolves to.
@@ -278,7 +277,7 @@ Additional configuration options for specialized use cases:
 | `validation_pattern` | Pattern to validate runs (e.g., `*.avg.fnc`), opt-in | (none) |
 | `tar_compression` | Compression type: `none` or `gzip`. Only the exact value `none` disables compression; anything else (including the legacy `gz`) produces a gzip archive. The GUI displays legacy `gz` as `gzip`, and saving from the GUI writes that normalized `gzip` back to `config.csv`; editing the file by hand leaves whatever you typed. `--tar-compression` is not validated, so a typo silently means gzip | none |
 | `max_retries` | How many *attempts* a PUR upload worker makes at a whole archive, not how many retries it adds: the default of `1` means one attempt and no retry, and a value below 1 is treated as 1. A second attempt is made only when the first failure looks like a proxy or connection timeout — its text contains `timeout`, `SocketTimeoutException`, `connection reset` or `EOF`. Separate from the storage and API retry layers described under [Output, Retries, and Rate Limits](#output-retries-and-rate-limits), which run inside each attempt | 1 |
-| `proxy_warmup` | Send a warm-up request through the proxy before credential calls (`true`/`false`) | false |
+| `proxy_warmup` | Send a warm-up request through the proxy when a client is created, and fail if it does not succeed (`true`/`false`). In `basic` mode a warm-up before credential calls runs whatever this says, and a failure there is only logged | false |
 | `tenant_url` | Legacy alias for `api_base_url`; the two are kept in sync on load and on save | (none) |
 | `org_code` | Organization code used for org-scoped project assignment | (none) |
 | `detailed_logging` | GUI toggle for timing and metrics diagnostics. The CLI reads the key but does not act on it — pass `--timing` (or set `RESCALE_TIMING=1`) for the same output from a CLI run | false |
@@ -330,6 +329,10 @@ reports the failure instead.
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | Read when `proxy_mode` is `system`. `HTTPS_PROXY` also fills in the proxy host and port when no `proxy_host` is configured, and switches `no-proxy` to `system` |
 | `EDITOR` | Editor launched by `daemon config edit` |
 | `DEBUG_HTTP`, `DEBUG_RETRY`, `DISABLE_HTTP2`, `FORCE_HTTP2` | `true` on any of these switches on a storage-client diagnostic or forces an HTTP/2 decision. Troubleshooting aids, not part of normal operation |
+
+S3 transfers use only the settings and credentials the Rescale platform supplies:
+AWS environment variables (such as `AWS_CA_BUNDLE`, `AWS_ENDPOINT_URL` or
+`AWS_PROFILE`) and AWS shared config and credentials files have no effect on them.
 
 ## Global Flags
 
@@ -450,9 +453,12 @@ transfers some files and fails others exits non-zero, so scripts and CI see the
 failure:
 
 - `files upload`, `files download`, and `jobs download` fail when any file in the batch
-  failed. Files you chose to skip are reported separately and are not failures.
+  failed, including a file whose name the platform supplied was refused as unsafe,
+  and when you cancel them. Files you chose to skip are reported separately and are
+  not failures.
 - `folders upload-dir` fails when any file, directory walk, or folder creation failed.
-- `folders download-dir` fails when any file failed.
+- `folders download-dir` fails when any file failed, including a file conflict it
+  could not resolve, and when you cancel it.
 - `pur run` and `pur resume` fail when any job in the pipeline failed. A run you
   cancelled is not a failure.
 - `jobs watch -j` fails when the job it was watching ends as anything other than
@@ -461,7 +467,8 @@ failure:
   `jobs watch --newer-than` does not classify that way: it exits `0` once every
   job it discovered is terminal, whatever those statuses are, and also when the
   reference job has no newer jobs at all. In both modes a failed download pass is
-  reported as a warning and does not change the exit code.
+  reported as a warning, and the command exits `1` when a job's last download pass
+  failed or was cancelled (`job <id>: last download pass failed: …`).
   `jobs tail` only reports and exits `0` on every terminal status. Interrupting
   either command with Ctrl+C ends it as a cancellation and exits `1`, with no
   diagnostic report written.
@@ -472,6 +479,8 @@ failure:
 - `daemon run --once` exits `0` whenever it managed to write its state file. A
   poll that listed no jobs, failed against the API, or failed a download is
   visible in the log and in `daemon status`, not in the exit code.
+- `daemon stop` exits `1` when the daemon is still running 10 seconds after the
+  shutdown request.
 - Choosing **Abort** at a conflict or error prompt stops the batch and exits non-zero.
   Remaining files are not uploaded.
 - A prompt that cannot run — no terminal, so the read fails immediately — is
@@ -629,18 +638,22 @@ rescale-int config init [--force]
 Every answer comes from the terminal, so a run with no terminal fails rather than
 hanging on an unanswerable prompt.
 
-**`config init` always writes to the default configuration path.** It ignores the
-global `-c/--config`, with or without `--force`, so `rescale-int --config
-./my.csv config init` still reads and writes `~/.config/rescale/config.csv` (or
-its Windows equivalent). Use `config path` to see where that is, and write a
-configuration file of your own by hand when you want it somewhere else.
+**`config init` writes to the global `-c/--config` file when you give one**, with
+or without `--force`, and to the default configuration path otherwise (`config
+path` shows it). The API key it collects goes to a file named `token` in the same
+directory, not into `config.csv`, and is not echoed while you type it. It refuses
+a `--config` path that is a directory, is named `token`, or is the token file
+through a link. Without `--force` it leaves an existing configuration or token
+file alone. It creates the configuration directory with mode `0700`.
 
-The API key it collects goes to the token file beside that configuration —
+The default token lookup does not follow `--config`: it reads
 `~/.config/rescale/token`, or `%LOCALAPPDATA%\Rescale\Interlink\token` on
-Windows — rather than into `config.csv`. The default token lookup is likewise
-independent of `--config`, and it also has a legacy fallback: when the current
-path does not exist it reads `~/.config/rescale-int/token`, or
-`%APPDATA%\Rescale\Interlink\token` on Windows.
+Windows, and when that does not exist the legacy `~/.config/rescale-int/token`,
+or `%APPDATA%\Rescale\Interlink\token` on Windows. After `config init --config`,
+the next steps it prints therefore pass `--config` and `--token-file`. They are
+written for a POSIX shell, with paths in single quotes: in Windows `cmd.exe` use
+double quotes instead, and in PowerShell set `$env:RESCALE_API_KEY` rather than
+running the `export` line.
 
 **Example:**
 ```bash
@@ -706,10 +719,12 @@ rescale-int files upload <file> [file...] [flags]
 - Support for both S3 and Azure storage backends
 - Duplicate detection with configurable handling modes
 - An exclusive per-file upload lock, so two transfers cannot race on one source
+- Symbolic links are followed; a named pipe, device or socket is refused with
+  `cannot upload <path>: not a regular file`
 
 **Flags:**
 - `-d, --folder-id string` - Target folder ID
-- `--max-concurrent int` - Maximum concurrent uploads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
+- `-m, --max-concurrent int` - Maximum concurrent uploads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
 - `--tags string` - Comma-separated tags to apply to each uploaded file (e.g. `"simulation,cfd,v2"`)
 - `--check-duplicates` - Check for existing files before uploading (prompts for each duplicate)
 - `--no-check-duplicates` - Skip duplicate checking (fast mode, may create duplicates)
@@ -817,9 +832,12 @@ file was registered with Rescale — each of those starts over.
 Both encryption modes keep a record beside the source file, named
 `<file>.upload.resume`, and the parts already accepted stay on the backend:
 
-- **Streaming (the default).** Each completed part is recorded as it lands,
-  together with the encryption chain position at that boundary. The next attempt
-  continues from the last contiguous part and produces exactly the object an
+- **Streaming (the default).** The record holds the contiguous run of parts the
+  backend has accepted, together with the encryption chain position at that
+  boundary. It is rewritten at most every 10 seconds while parts complete, and
+  once more when the upload succeeds, fails or is cancelled, so after a crash the
+  parts accepted since the last rewrite are sent again. The next attempt
+  continues from the last recorded part and produces exactly the object an
   uninterrupted upload would have produced.
 - **`--pre-encrypt`.** The upload resumes from the encrypted copy it already
   wrote, in whatever order the parts completed. A resume is planned against the
@@ -876,8 +894,11 @@ still needs somewhere to write the encrypted copy.
 `<file>.upload.lock` beside the source file, so two transfers of one file cannot
 run against the same upload. A second transfer of the file inside one process is
 refused outright, and so is one whose owner is another process still running on
-this machine. A lock left by a crashed transfer on this same machine is cleared
-automatically once its owner's process is gone. An upload that could not write
+this machine (`upload of <file> is locked by another process (PID N) since T; its
+lock is <file>.upload.lock`). A lock left by a crashed transfer on this same
+machine is reclaimed on the next upload attempt once Interlink can prove its
+owner's process is gone. A refusal is a local condition, so it writes no error
+report. An upload that could not write
 its state at all (above) takes no lock, so it is not protected against a
 concurrent transfer of the same file.
 
@@ -1035,8 +1056,10 @@ is still in place and must be deleted before retrying. This matters because the
 CLI's "already downloaded" tests — `--skip` and `jobs watch` — compare sizes, so
 a full-length bad file left in place would be taken for a finished download.
 Three cases behave differently: an expected size of zero (the API reported none)
-disables the size comparison, an object with no SHA-512 in its metadata cannot be
-checksum-verified, and a download that produced **zero bytes** against a positive
+disables the size comparison, a file whose checksums include no SHA-512 (in any
+spelling, such as `sha512` or `SHA-512`) cannot be checksum-verified and is reported
+with `Warning: <file> was not verified: its checksums (…) include no SHA-512` when
+the platform lists other checksums, and a download that produced **zero bytes** against a positive
 expected size is not quarantined at all — it fails with `download failed: file is
 empty (0 bytes) - possible write error or filesystem issue` and the empty file
 stays where it is.
@@ -1051,6 +1074,11 @@ reports a SHA-512 it hashes the existing file before adopting it, and re-fetches
 one that is the right length but fails its checksum. Each such verification is
 remembered for the rest of that daemon's run, keyed by path, size, modification
 time and expected checksum, so the file is not re-hashed on every poll.
+
+**Links at the destination are left alone.** Before it overwrites, skips or
+resumes, and again before it puts the finished file in place, a download refuses
+to write through a symbolic link or special file at its destination or its
+`.partial` path: `refusing to download to <path>: it is a symbolic link`.
 
 #### files list
 List files
@@ -1202,6 +1230,12 @@ rescale-int folders upload-dir <directory> [flags]
 Only one of `--skip-folder-conflicts`, `--merge-folder-conflicts` and
 `--skip-existing` may be given; passing two fails with an error naming all three.
 
+**Symbolic links:** a link is followed wherever it points. A link that leads back into the
+folder being uploaded or into a folder containing it, a broken link, and on Windows a
+link to a folder are skipped, each with a line such as
+`Skipped link <path>: it leads back into a folder that contains it`, and counted in the
+summary (`Symlinks skipped: N`).
+
 **Performance Note:** Files upload concurrently with connection reuse. Folder creation runs concurrently too (`--folder-concurrency`, default 15).
 
 `--help` reports `--max-concurrent`'s default as `5`, which is the flag's declared
@@ -1264,7 +1298,19 @@ rescale-int folders download-dir <folder-id> [flags]
 - **Overwrite** (`-w`): Download into existing folders, overwrite existing files
 - **Merge** (`-m`): Download into existing folders, skip existing files
 - **Interactive mode (no flags)**: Prompts for conflict handling mode when folder exists
-- **Non-interactive mode**: Requires explicit flag (`--skip`, `--overwrite`, or `--merge`)
+- **Non-interactive mode**: with no terminal to prompt on, a destination that already
+  holds files needs `--skip`, `--overwrite` or `--merge`; a new or empty destination is
+  downloaded as with `--merge`, and `--dry-run` needs none
+
+`--overwrite` replaces an existing file even when its size already matches. A
+file conflict that cannot be resolved counts as a failed file and prints its
+cause, and a name from the platform that is not safe on this computer is refused
+for that file (see [jobs download](#jobs-download)). Without `--continue-on-error`
+the first failure stops the download, and Abort at a prompt always does. Once the
+download has stopped no file is removed, and files that never started are counted
+as such. The command exits `1` when any file failed or the download was cancelled.
+A conflict prompt that is already waiting for your answer does not notice that
+another file's failure has stopped the download; answer it to finish.
 
 **Examples:**
 ```bash
@@ -1341,7 +1387,7 @@ Each job prints as a block:
 
 ```
 Job #1:
-  ID: WfbQa
+  ID: GgHhI
   Name: cfd-run-1
   Status: Completed
   Created: 2026-09-01T12:00:00Z
@@ -1364,7 +1410,7 @@ rescale-int jobs get -j <job-id>
 
 **Example:**
 ```bash
-rescale-int jobs get -j WfbQa
+rescale-int jobs get -j GgHhI
 ```
 
 `--job-id` and `--id` write the same value, so passing both is rejected rather than
@@ -1384,8 +1430,8 @@ rescale-int jobs stop -j <job-id>
 
 **Example:**
 ```bash
-rescale-int jobs stop -j WfbQa
-rescale-int jobs stop -j WfbQa -y  # Skip confirmation
+rescale-int jobs stop -j GgHhI
+rescale-int jobs stop -j GgHhI -y  # Skip confirmation
 ```
 
 #### jobs tail
@@ -1424,13 +1470,13 @@ rather than stopping.
 **Examples:**
 ```bash
 # Follow status changes with default 10-second polling
-rescale-int jobs tail -j WfbQa
+rescale-int jobs tail -j GgHhI
 
 # Monitor job with 5-second polling interval
-rescale-int jobs tail -j WfbQa -i 5
+rescale-int jobs tail -j GgHhI -i 5
 
 # Using long flags
-rescale-int jobs tail --job-id WfbQa --interval 30
+rescale-int jobs tail --job-id GgHhI --interval 30
 ```
 
 #### jobs listfiles
@@ -1445,7 +1491,7 @@ rescale-int jobs listfiles -j <job-id>
 
 **Example:**
 ```bash
-rescale-int jobs listfiles -j WfbQa
+rescale-int jobs listfiles -j GgHhI
 ```
 
 #### jobs download
@@ -1461,65 +1507,57 @@ rescale-int jobs download -j <job-id> [flags]
 
 **Flags:**
 - `-j, --job-id string` - Job ID (required) (alias: `--id`)
-- `--file-id string` - Specific file ID to download (optional). Giving it selects single-file mode, which ignores most of the flags below
-- `-o, --output string` - Output file path (single-file mode only)
-
-Batch mode only — every one of these is ignored when `--file-id` is given:
-
-- `-d, --outdir string` - Output directory for batch download
-- `-m, --max-concurrent int` - Maximum concurrent downloads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
+- `--file-id string` - Specific file ID to download (optional). Giving it selects single-file mode
+- `-o, --output string` - Output file path (single-file mode only; refused without `--file-id`)
 - `-w, --overwrite` - Overwrite existing files
 - `-S, --skip` - Skip existing files
 - `-r, --resume` - Resume interrupted downloads
+- `--skip-checksum` - Do not fail on a checksum mismatch (not recommended); verification still runs and a mismatch becomes a warning. The file-size check is unaffected
+
+Whole-job mode only — each of these is refused with `--file-id`, and so is an
+`--output` that names a directory:
+
+- `-d, --outdir string` - Output directory for all of a job's files
+- `-m, --max-concurrent int` - Maximum concurrent downloads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
 - `-s, --search string` - Include only files whose name contains one of these terms (comma-separated, case-insensitive)
 - `-x, --exclude string` - Exclude files matching these glob patterns (comma-separated)
 - `--filter string` - Include only files matching these glob patterns; comma-separated. Matched against the filename
 - `--path-filter string` - Include only files matching these path patterns. Matched against the file's path within the job, and supports `**` for recursive matching (e.g. `"run_1/*.dat"`, `"**/results/*.csv"`)
-- `--skip-checksum` - Do not fail on a checksum mismatch (not recommended); verification still runs and a mismatch becomes a warning. The file-size check is unaffected
 
-`--overwrite`, `--skip` and `--resume` are mutually exclusive: passing more than
-one fails with `only one of --overwrite, --skip, or --resume can be specified`.
-That check runs in batch mode only.
+`--overwrite`, `--skip` and `--resume` are mutually exclusive in both modes:
+passing more than one fails with `only one of --overwrite, --skip, or --resume can
+be specified`. Single-file mode fetches the one file to `--output` (or
+`./<remote name>` when `--output` is not given) through the same download path as
+a whole job, so the three flags and `--skip-checksum` mean the same thing there.
 
-**Single-file mode takes its own path, and it always overwrites.** With
-`--file-id` the command bypasses the batch machinery entirely: it fetches that one
-file to `--output` (or `./<remote name>` when `--output` is not given), creating
-the parent directory if needed. There is no conflict handling on that path — the
-destination is created or truncated, so **`--skip` does not protect a file
-already sitting there**, and `--resume` has nothing to act on. Checksum
-verification is always strict here: `--skip-checksum` is ignored, so a mismatch
-fails the download and the file is moved aside exactly as described under
-[`files download`](#files-download). Concurrency is one file, so
-`--max-concurrent` has no meaning, and the filters have no list to filter.
-
-**Batch mode never prompts.** With no conflict flag it behaves as `--skip`: a
+**Neither mode prompts.** With no conflict flag a download behaves as `--skip`: a
 file already on disk at the full expected size is left alone and announced with
 `⊘ Skipping existing file: <name>`, and one of the wrong size is removed and
 fetched again. This is deliberate — job downloads also run unattended from
 `jobs watch` and the end-to-end workflow — and it differs from `files download`,
 which does prompt in the same situation.
 
-**Two files with the same name.** A job's outputs are laid out under `--outdir`
-by each file's path within the job, but a path that would escape the output
-directory falls back to the filename alone, which can put two files at one
-destination. Any such collision is resolved by inserting the file ID before the
-extension — `results.dat` becomes `results_AbCdEf.dat` — and the command reports
-`⚠️  Found N files with duplicate names. File IDs will be appended to ensure
-unique downloads.` Separately, a file whose server-supplied name is not a plain
-filename is refused: a warning names it and it is dropped from the batch. If the
-files that remain all succeed the command still exits `0`, so read the warnings
-rather than the exit code to know the batch was complete.
+**Names from the platform are checked.** A job's outputs are laid out under
+`--outdir` by each file's path within the job. A file whose name or path component
+is empty or only dots, is a reserved Windows device name, or contains a colon, a
+character Windows forbids or a control character, or ends in a dot or space, is
+refused with its quoted name and the reason; the rest of the batch downloads and
+the command exits `1`. A download also refuses to write through a symbolic link
+or special file at its destination. Two files that land on one destination are
+told apart by inserting the file ID before the extension — `results.dat` becomes
+`results_AbCdEf.dat` — and the command reports `⚠️  Found N files with duplicate
+names. File IDs will be appended to ensure unique downloads.`
 
 **Examples:**
 ```bash
 # Download all job files to current directory
-rescale-int jobs download -j WfbQa
+rescale-int jobs download -j GgHhI
 
 # Download all job files to specific directory
-rescale-int jobs download -j WfbQa -d ./results
+rescale-int jobs download -j GgHhI -d ./results
 
 # Download specific file
-rescale-int jobs download -j WfbQa --file-id xyz789 -o result.tar.gz
+rescale-int jobs download -j GgHhI --file-id xyz789 -o result.tar.gz
 ```
 
 #### jobs watch
@@ -1575,9 +1613,9 @@ non-zero with `job reached terminal status: <status>`.
 
 `--newer-than` does not work that way. It exits `0` once every job it discovered
 has reached a terminal status, whatever those statuses are, and also when no job
-newer than the reference exists. In both modes a download that fails is logged as
-a warning and does not affect the exit code, so a script that needs to know
-whether the outputs arrived has to check them.
+newer than the reference exists. In both modes a download pass that fails is
+logged as a warning, and when a job's last pass failed or was cancelled the
+command exits `1` with `job <id>: last download pass failed: …`.
 
 #### jobs delete
 Delete jobs
@@ -1593,13 +1631,13 @@ rescale-int jobs delete -j <job-id> [-j <job-id>...] [-y]
 **Examples:**
 ```bash
 # Delete single job (with confirmation)
-rescale-int jobs delete --job-id WfbQa
+rescale-int jobs delete --job-id GgHhI
 
 # Delete multiple jobs (short form)
-rescale-int jobs delete -j WfbQa -j XyzBb -j AbcCc
+rescale-int jobs delete -j GgHhI -j XyzBb -j AbcCc
 
 # Delete without confirmation
-rescale-int jobs delete --job-id WfbQa --confirm
+rescale-int jobs delete --job-id GgHhI --confirm
 ```
 
 #### jobs submit
@@ -1707,7 +1745,7 @@ rescale-int daemon run [flags]
 
 **Config File:** `~/.config/rescale/daemon.conf` (macOS/Linux) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows — Roaming, unlike `config.csv` and the state file, which live under Local)
 
-The daemon automatically loads settings from the config file. CLI flags override config file values, allowing you to test different settings without modifying the config file. `daemon run` does not consult `daemon.conf`'s `enabled` setting: that gates the per-user daemons the Windows service starts, not a daemon you start yourself.
+The daemon automatically loads settings from the config file. CLI flags override config file values, allowing you to test different settings without modifying the config file. `daemon run` does not consult `daemon.conf`'s `enabled` setting, which is the GUI's **Enable Auto-Download** switch. A `download_folder` in `daemon.conf` must be an absolute path: `daemon run` refuses a relative one, or one starting with `~`, with `download_folder in daemon.conf must be an absolute path, got "results"; choose a folder in the Interlink app or run 'rescale-int daemon config set download_folder <absolute path>'`. A relative `--download-dir` is taken from the folder you run the command in.
 
 **Flags:**
 - `-d, --download-dir string` - Directory to download job outputs to (default: value from `daemon.conf` `download_folder`, falling back to the platform default at `~/Downloads/rescale-jobs` on Unix or `%USERPROFILE%\Downloads\rescale-jobs` on Windows)
@@ -1715,12 +1753,12 @@ The daemon automatically loads settings from the config file. CLI flags override
 - `--name-prefix string` - Only download jobs with names starting with this prefix
 - `--name-contains string` - Only download jobs with names containing this string
 - `--exclude stringArray` - Exclude jobs with names starting with these prefixes
-- `--max-concurrent int` - Maximum concurrent file downloads per job (default 5)
+- `--max-concurrent int` - Maximum concurrent file downloads per job, 1-20 (default 5). A value out of range, from the flag or from `max_concurrent` in `daemon.conf`, is refused before the daemon starts
 - `--state-file string` - Path to daemon state file (default `~/.config/rescale/daemon-state.json` on macOS/Linux, `%LOCALAPPDATA%\Rescale\Interlink\state\daemon-state.json` on Windows)
 - `--use-job-id` - Name output directories `job_<id>` instead of the (sanitized) job name. When using the job name (the default), the job ID is written to a `.jobid` file inside each job folder; if a same-named folder already exists for a different job, the job ID is appended (`<name>_<id>`), and a folder an earlier version named `<name>_<first six characters of the ID>` is reused
 - `--once` - Run once and exit (useful for cron jobs)
 - `--log-file string` - Path to log file (empty = stdout)
-- `--background` - Run in background mode (macOS/Linux only; on Windows it fails and points at the Windows service)
+- `--background` - Run in background mode (macOS/Linux only; on Windows it fails and says to start auto-download from the Interlink app, or to run `daemon run` without `--background`)
 - `--ipc` - Enable IPC server for GUI/CLI control
 
 `--background` re-launches the process with a rebuilt argument list that carries
@@ -1728,14 +1766,17 @@ the daemon's own flags — download directory, poll interval, filters, max
 concurrent, state file, `--use-job-id`, log file, `--ipc` — and nothing else. Global credential
 and configuration flags (`--api-key`, `--token-file`, `--config`, `--api-url`)
 and `--once` are not passed on to the child, so a backgrounded daemon has to get
-its credentials from the environment or the default token file. `--background`
-and `--ipc` both refuse to start when a daemon is already running, naming its PID.
+its credentials from the environment or the default token file.
 
-Those two modes are also the only ones that write the PID file
-(`~/.config/rescale/daemon.pid`, or
-`%LOCALAPPDATA%\Rescale\Interlink\daemon.pid` on Windows), and they remove it on
-exit. A plain foreground `daemon run` writes none, which is why `daemon status`
-cannot see it — see [daemon status](#daemon-status).
+Only one daemon per user runs at a time. Every mode, foreground and `--once` included,
+first claims the PID file (`~/.config/rescale/daemon.pid`, or
+`%LOCALAPPDATA%\Rescale\Interlink\daemon.pid` on Windows) under an
+operating-system lock on `daemon.pid.lock` beside it, before any other startup
+work. A second launch refuses with `daemon is already running (PID N)` (on Windows,
+`cannot start daemon: Auto-download is already running (PID N)`, followed by how to
+end a daemon an earlier version started), changes nothing and writes no error report. The PID file is removed on every exit, so
+`daemon status` sees a foreground daemon too. Saves of the state file take the
+same kind of lock, on `daemon-state.json.lock`.
 
 **Examples:**
 ```bash
@@ -1770,17 +1811,20 @@ rescale-int daemon stop --force   # force-terminate if graceful shutdown is unav
 ```
 
 Requires the daemon to have been started with `--ipc`. After sending the shutdown
-request it checks ten times, half a second apart, whether IPC has stopped
-answering, and prints `Daemon stopped successfully.` on the first check that
-finds it gone. IPC going quiet is the signal — not the process actually exiting —
-so cleanup can still be in progress when the command returns. If IPC is still
-answering after those checks it prints `Shutdown command sent. Daemon may still
-be cleaning up.` and still exits `0`. If no daemon is running it prints
+request it waits up to 10 seconds for the daemon's process to exit and prints
+`Daemon stopped successfully.` If the process is still running then, it exits
+`1` with `daemon (PID N) did not exit within 10s of the shutdown request; check
+with 'rescale-int daemon status'`, and writes no error report. When no PID file
+names the process it prints that the exit cannot be confirmed and exits `0`. If
+no daemon is running it prints
 "No running daemon detected." and exits `0`. If a daemon process exists but IPC is not
-responding, it says so and tells you how to terminate the process by PID.
-
-The daemon runs in your own user session, so this stops your auto-download daemon
-directly — there is no separate Windows service to stop.
+responding, it says so and how to end it: `daemon stop --force`, or `kill <PID>` on
+macOS and Linux. On Windows it names `daemon stop --force` and ending the `rescale-int`
+process in Task Manager, which also ends a daemon an earlier version of Interlink
+started. While a service from an earlier version is running, `daemon stop` and `daemon
+status` print `A Windows service from an earlier version is running; restart Windows, or
+run 'rescale-int service uninstall' as administrator.`, and `daemon stop` still stops
+your own daemon.
 
 **Flags:**
 - `--force` — if the daemon is not reachable over IPC (e.g. started without `--ipc`), refuses the shutdown or does not exit in time, terminate the process directly using its recorded PID, and wait for it to exit. The process is ended only if it is your own Interlink daemon; on macOS and Linux it is sent SIGTERM first, and SIGKILL if that has not ended it.
@@ -1881,10 +1925,10 @@ rescale-int daemon config set <key> <value>
 
 **Available keys:**
 - `enabled` - Enable/disable daemon (true/false)
-- `download_folder` - Download directory path (resolved to an absolute path)
+- `download_folder` - Absolute path of the download directory. `~` and `~/…` expand to your home folder; any other path that is not absolute, such as `~name` or `results`, is refused with `download_folder must be an absolute path, got "results"`
 - `poll_interval_minutes` - Poll interval in minutes (1-1440)
 - `use_job_name_dir` - Name subdirectories after the sanitized job name (true/false). The job ID is stored in a `.jobid` file inside each folder. When false, folders are named `job_<id>`
-- `max_concurrent` - Max concurrent downloads (1-20)
+- `max_concurrent` - Max concurrent downloads (1-20); anything else is refused with `max_concurrent must be between 1 and 20, got 21`
 - `lookback_days` - How many days back to check for jobs (1-365)
 - `include_workspace_folders` - Also scan jobs in workspace shared folders (true/false, default false)
 - `flatten_folder_structure` - Download workspace-folder jobs into the download folder instead of mirroring the folder tree (true/false, default false)
@@ -1900,7 +1944,8 @@ Booleans accept `true`, `1`, or `yes`; anything else reads as false. `correctnes
 is accepted as a deprecated alias for `auto_download_tag`. `mode`,
 `auto_download_value` and `downloaded_tag` are not settable: each prints a note
 saying that the mode lives on the per-job custom field instead. Any other key is
-an error.
+refused with `unknown setting "<key>"; 'rescale-int daemon config set --help' lists them`.
+A refused key or value exits `1` and writes no error report.
 
 **Examples:**
 ```bash
@@ -1928,10 +1973,9 @@ rescale-int daemon config init
 ```
 
 Prints the created path and the defaults it wrote (download folder, poll interval, max
-concurrent, and whether auto-download is enabled — it is off by default). Set
-`enabled true` for the Windows service, which will not start a per-user daemon
-without it, and for the GUI, which reads the key and presents it. `daemon run`
-starts regardless.
+concurrent, and whether auto-download is enabled — it is off by default). The GUI
+reads `enabled` and presents it as **Enable Auto-Download**; `daemon run` starts
+regardless.
 
 ##### daemon config validate
 
@@ -1974,9 +2018,10 @@ Neither produces a per-job skip line, but an unrecognized value does log
 the field shows up at all; an unset field is skipped in silence.
 
 **Why a completed job was not downloaded.** Any one of these accounts for it. The
-first three are applied while the job list is being scanned; the last two are the
+first three are applied while the job list is being scanned; the next two are the
 per-job tag and field checks that follow, so a job dropped during the scan never
-reaches them:
+reaches them; the sixth is the daemon's own record of failed attempts, and the
+seventh another client's claim:
 
 1. It was created longer ago than `lookback_days` plus 30 days. This is a
    creation-date pre-filter meant as an optimization on the listing, but it is
@@ -1996,17 +2041,21 @@ reaches them:
 5. Its `Auto Download` field is `Disabled` or unset, or `Conditional` without the
    tag named by `auto_download_tag`, which is `autodownload` when the key is
    empty or missing.
+6. A previous download attempt failed and the job is waiting out its backoff: the
+   daemon tries a failed job again after 5, 10, 20 and then 30 minutes. After five
+   failed attempts it stops and holds the job until `daemon retry` releases it.
+   `daemon list --failed` shows each job's next attempt. A download cut short
+   because the daemon was stopping does not count as an attempt. An attempt fails
+   when any file the job lists cannot be downloaded, including a file whose name is
+   not safe on this computer (`1 of 2 files could not be downloaded: …`).
+7. Another client is downloading it: the job carries another client's
+   `autodownload:started:<client>:<time>` tag that still holds it. The daemon logs
+   which tag holds the job and until when, and `daemon status` counts such jobs.
 
 One more suppression sits ahead of all of these and is not a reason to
 investigate: a job whose files are already on disk but whose `autodownload:done`
 tag has not yet been accepted by the platform is skipped silently until that tag
 call succeeds, so the retry pass cannot download it twice.
-
-A previous download that failed is *not* on this list. The daemon keeps no
-backoff and gives up on nothing: a failed job that is still eligible is attempted
-again on the next poll like any other. `daemon list --failed` shows what failed
-last time and `daemon retry` clears those records, but neither is a precondition
-for another attempt.
 
 An optional `Auto Download Path` custom field on the job redirects that job's
 output, within limits. A relative value is resolved beneath the configured
@@ -2018,7 +2067,7 @@ download directory. The per-job subdirectory (job name, or job ID with
 
 #### Auto-Start on Login
 
-On **Windows with MSI installer**, auto-download starts automatically. The installer registers the system tray app (`rescale-int-tray.exe`) under `HKCU\...\Run`, and the tray starts the auto-download daemon at login whenever it is enabled in `daemon.conf`. The daemon runs as the logged-in user (so it can reach your mapped/network drives) — no admin, no Windows service. You can also start/stop it from the GUI Setup tab.
+On **Windows with the MSI installer**, the installer registers the system tray app (`rescale-int-tray.exe`) under `HKCU\...\Run`, and when you sign in the tray starts auto-download if it is enabled in `daemon.conf`, waiting up to a minute for a download folder on a mapped drive to appear. The daemon runs as you, so it can reach your mapped network drives. You can also start and stop it from the Setup tab or the tray.
 
 On **Mac and Linux**, configure auto-start using the system's init system. Interlink does not ship a built-in provisioning flow for launchd or systemd-user; the instructions below are for users who want to wire this up themselves:
 
@@ -2149,14 +2198,10 @@ rescale-int daemon status [flags]
   unchecked for the next poll
 - Recent download history, and failed downloads with their error text
 
-"Whether a daemon process was found" is decided by the PID file, which only
-`daemon run --background` and `daemon run --ipc` write. A foreground `daemon run`
-writes none, so this view reports `No running daemon detected.` while that daemon
-is alive and polling. On Windows the two halves are independent: the command
-prints `Note: Windows Service is running but IPC not responding.` when the
-service is up, and then still falls through to the PID-file line, which can read
-`No running daemon detected.` in the same output. Treat the message as
-conclusive only when it names a PID.
+"Whether a daemon process was found" is decided by the PID file, which every
+`daemon run` writes. On Windows, a daemon that holds the PID file but does not answer
+gets the same advice as in [`daemon stop`](#daemon-stop) about a daemon an earlier
+version started.
 
 **Example:**
 ```bash
@@ -2173,7 +2218,7 @@ rescale-int daemon list [flags]
 
 **Flags:**
 - `--state-file string` - Path to daemon state file (default `~/.config/rescale/daemon-state.json` on macOS/Linux, `%LOCALAPPDATA%\Rescale\Interlink\state\daemon-state.json` on Windows)
-- `--failed` - Show failed downloads instead of successful ones
+- `--failed` - Show failed downloads instead of successful ones, each with its `Next attempt:`
 - `--limit int` - Limit number of entries shown (0 = all)
 
 **Examples:**
@@ -2223,61 +2268,27 @@ rescale-int daemon retry --all
 rescale-int daemon retry --job-id XxYyZz
 ```
 
+`daemon retry` works whether or not a daemon is running. It rewrites the state
+file under the state file's lock, and a running daemon takes the release in the
+next time it saves its state.
+
 When no daemon is running, `daemon retry` also takes off the
 `autodownload:started:<client>:<time>` tags this client left on the jobs named,
 or with `--all` on every job, so other clients may download them; it names each
 job whose tag it took off. A running daemon takes its own off at every poll. A job
 whose `autodownload:done` tag is still to be applied keeps its started tag.
 
-**Stop the daemon before running this, and check that it has actually stopped.**
-`daemon retry` edits the state file on disk. A running daemon read that file once
-at startup and keeps its state in memory, so it does not see the edit — and the
-next time it saves, it writes its own copy back over yours.
-
-`daemon stop` is not proof of that. It returns as soon as IPC stops answering,
-which is not the same as the process exiting, and it returns straight away —
-still exiting `0` — when no daemon is detected or when a daemon is running
-without `--ipc`.
-
-`daemon status` is only a partial check, and it is worth knowing why before
-trusting it. It looks for a PID file, which is written only by `daemon run
---background` and `daemon run --ipc`; a plain foreground `daemon run` writes
-none. So `No running daemon detected.` means "no PID file and no answer over
-IPC", which a live foreground daemon also produces. When there *is* a PID file it
-is conclusive the other way: `Daemon process found (PID N) but IPC not
-responding.` means the process is still there. The PID file lives at
-`~/.config/rescale/daemon.pid` on macOS and Linux and
-`%LOCALAPPDATA%\Rescale\Interlink\daemon.pid` on Windows.
-
-So confirm against the process itself — the terminal you started a foreground
-daemon in, your platform's process list, or Task Manager — and use `daemon
-status` as the quick check only for a daemon you started with `--background` or
-`--ipc`:
-
-```bash
-rescale-int daemon stop
-rescale-int daemon status       # for a --background/--ipc daemon: repeat until
-                                # "No running daemon detected."
-                                # otherwise: confirm the process itself has exited
-rescale-int daemon retry --all
-rescale-int daemon run          # or daemon run --once to retry immediately
-```
-
 ---
 
-### Service Commands (legacy cleanup, Windows only)
+### Service Commands (Windows only)
 
-Auto-download no longer runs as a Windows service — it runs as a subprocess in
-the logged-in user's session, started by the tray app (see
-[Auto-Start on Login](#auto-start-on-login)). This change exists so auto-download
-can reach mapped/network drives using the user's own credentials; see
-[ARCHITECTURE.md → Auto-Download Process Model](ARCHITECTURE.md#auto-download-process-model)
-for the full rationale.
-
-The only remaining `service` command removes a service left over from an older
-Interlink version. It is hidden from `--help`, runs automatically when Interlink is
-uninstalled, and such a service also removes itself the next time Windows starts
-it, so you normally never need it. To run it manually from an elevated prompt:
+Auto-download does not run as a Windows service: it runs in your own session, started
+by the tray app or the Interlink app (see [Auto-Start on Login](#auto-start-on-login)),
+so it can reach your mapped network drives. A service installed by an earlier version
+removes itself the next time Windows starts it, and uninstalling Interlink also tries to
+remove it. To remove it at once, run this hidden command from an elevated
+(Administrator) prompt; it does nothing when there is no service. The other `service`
+commands have been removed.
 
 ```bash
 rescale-int service uninstall
@@ -2383,10 +2394,10 @@ rescale-int automations get --id <automation-id> [flags]
 **Examples:**
 ```bash
 # Get automation details
-rescale-int automations get --id YYnVk
+rescale-int automations get --id JjKkL
 
 # Get JSON output
-rescale-int automations get --id YYnVk --json
+rescale-int automations get --id JjKkL --json
 ```
 
 ### PUR (Parallel Upload and Run) Commands
@@ -2405,7 +2416,7 @@ case-insensitively. (`pur submit-existing --ids` reads no CSV, and
 
 | Column | Meaning |
 |---|---|
-| `Directory` | Local directory this job's archive is made from. Empty for a job that supplies `LocalInputFiles`, `InputFiles` or `ExtraInputFileIDs` instead |
+| `Directory` | Local directory this job's archive is made from. Empty for a job that supplies `LocalInputFiles`, `InputFiles` or `ExtraInputFileIDs` instead. `pur make-dirs-csv` and `pur scan-files` write it as an absolute path, so the CSV works from any folder |
 | `JobName` | Name of the job on Rescale. Keep it unique in the batch: it is the label progress lines and skip messages are reported under, and `pur scan-files` refuses to generate two rows with the same rendered name |
 | `AnalysisCode` | Rescale analysis code, e.g. `openfoam` |
 | `Command` | Command the job runs |
@@ -2422,7 +2433,7 @@ case-insensitively. (`pur submit-existing --ids` reads no CSV, and
 | `AnalysisVersion` | Analysis version. Version names are resolved to version codes at submit time |
 | `ExtraInputFileIDs` | IDs of files already on Rescale, **comma**-separated. Required by `pur submit-existing --jobs-csv`. These are always requested with decompression on the cluster |
 | `InputFiles` | File IDs, `;`-separated. Read **only** for a job that builds no archive of its own — one with neither `Directory` nor `LocalInputFiles`. Where an archive is built, the job's primary input is that archive's file ID and this column is ignored |
-| `LocalInputFiles` | Local paths that together form this job's archive, `;`-separated (written by `pur scan-files`) |
+| `LocalInputFiles` | Local paths that together form this job's archive, `;`-separated (written by `pur scan-files`, as absolute paths) |
 | `TarSubpath` | Subdirectory inside `Directory` to archive instead of the whole directory |
 | `Tags` | Job tags, **comma**-separated |
 | `Automations` | Automation IDs, `;`-separated |
@@ -2504,10 +2515,17 @@ rescale-int pur make-dirs-csv --template TEMPLATE --output OUTPUT --pattern PATT
 - `--iterate-command-patterns` - Vary command across runs by iterating numeric patterns
 - `--command-pattern-test` - Preview pattern detection without generating CSV
 - `--cwd string` - Working directory (default: current directory)
-- `--run-subpath string` - Subdirectory path to navigate before finding runs
-- `--validation-pattern string` - File pattern to validate directories
+- `--run-subpath string` - Subdirectory path to navigate before finding runs. Without `--part-dirs`, a missing subpath fails the command; with it, a project that lacks the subpath is skipped
+- `--validation-pattern string` - File pattern to validate directories: a run directory holding no matching file is skipped
 - `--start-index int` - Starting index for job numbering (default: 1)
 - `--part-dirs strings` - Project directories for multi-part mode. This takes **one** argument: give the directories comma-separated, or repeat the flag. Space-separating them — which the command's own usage example does — supplies only the first; the rest are consumed as positional arguments and dropped without an error, so the run reports `partDirs=1` and generates jobs from that one directory alone
+
+Every `Directory` it writes is absolute, and a run folder that is a symbolic link is
+written as the folder it points to; job names still come from the name it was found
+under. Each skipped directory or project gets a log line naming it and the reason
+(`Skipped directory: no file matches the validation pattern "*.avg.fnc"`, or
+`Skipped directory: run subpath "Simcodes" not found in it`), and the final line counts
+them: `Generated 3 jobs in jobs.csv (2 skipped, listed above)`.
 
 **Example:**
 ```bash
@@ -2554,7 +2572,7 @@ rescale-int pur scan-files --primary <pattern> [flags]
 - `-t, --template string` - Template CSV used as the row prototype when generating jobs CSV
 - `-o, --output string` - Output jobs CSV path. A CSV is written only when both `--template` and `--output` are given; `--output` on its own prints the summary and writes nothing
 - `--overwrite` - Overwrite an existing output file
-- `--json` - Emit the scan result as JSON instead of a printed summary. This returns before any CSV is generated, so `--json` together with `--template` and `--output` writes no CSV
+- `--json` - Emit the scan result as JSON instead of a printed summary. Standard output carries only the JSON; if the scan fails, it is empty and the command exits `1`. This returns before any CSV is generated, so `--json` together with `--template` and `--output` writes no CSV
 
 **How `--primary` matches.** The pattern is a path relative to `--root`, matched
 with ordinary shell globbing: `*` does not cross a `/`, and `**` is not special.
@@ -2616,7 +2634,8 @@ than 32KiB, or a job name longer than 128 bytes, is rejected rather than
 submitted.
 
 Generated jobs carry their file list in the `LocalInputFiles` column of the jobs
-CSV, semicolon-separated, so `scan-files` → `jobs.csv` → `pur run` round-trips.
+CSV, semicolon-separated and as absolute paths, so `scan-files` → `jobs.csv` →
+`pur run` round-trips from any folder.
 The column is optional on load, so older CSVs still work.
 
 **Examples:**
@@ -2916,12 +2935,17 @@ moved into `--folder`, and not tagged by `--file-tags`.
 
 **Where the archives go.** A batch writes its tar archives to
 `<common parent>/.rescale-int-<hash>/`, where the common parent is the directory
-containing the jobs' run directories. With `--state` the hash comes from the
+containing the run directories of the jobs that have something to archive. A
+batch with nothing to archive (`submit-existing`, or rows without a directory)
+creates no such directory. When those jobs share nothing below a drive or volume
+root, the directory goes under your cache folder instead, as
+`rescale/staging/.rescale-int-<hash>` (`~/Library/Caches` on macOS, `~/.cache` on
+Linux, `%LOCALAPPDATA%` on Windows). With `--state` the hash comes from the
 absolute state-file path, so a resumed batch gets the directory it had before —
 and two batches given the same state-file path share one. With no `--state` the
-hash comes from the process id and the current time instead, so each such run
-gets a directory of its own and reuses nothing — including two stateless runs
-over the same job list.
+hash comes from the process id, the current time and a per-process count instead,
+so each such run gets a directory of its own and reuses nothing — including two
+stateless runs over the same job list.
 `--rm-tar-on-success` deletes only an archive that sits directly inside such a
 directory, resolved through symlinks and carrying the name Interlink gave it, and
 the directory itself is removed when the run leaves it empty.
@@ -2936,9 +2960,11 @@ reconciled against the platform before resuming.
 **Run PUR with `--verbose` when you need these warnings.** The pipeline's own
 per-job messages — the metadata warnings above, the skip notice below, the
 storage retry notices — all go through the standard logger, which is discarded at
-default verbosity. What a default run shows is the progress display and the
-end-of-run failure count, plus the final error, which names unconfirmed jobs
-without reproducing the detailed text.
+default verbosity. What a default run shows is the progress display, the
+end-of-run failure count and, on stderr, one line per failed job with its reason
+(`✗ <job name>: <reason>`, credentials removed): at most ten, then `... and N more
+(--verbose lists them all)`. The final error names unconfirmed jobs without
+reproducing the detailed text.
 
 **Jobs a previous run could not confirm.** If a create request went out and no
 answer came back, the job may be running on the platform under a name this run
@@ -3091,24 +3117,17 @@ rescale-int pur submit-existing --ids "abc123,def456,ghi789"
 
 ### Shortcuts
 
-Convenient aliases for commonly-used commands. Each carries a smaller flag set
-than the command it stands for — use the full command when you need a flag the
-shortcut does not have.
+Convenient aliases for commonly-used commands. `upload` is `files upload` itself;
+`download` and `ls` carry a smaller flag set than the command they stand for — use
+the full command when you need a flag the shortcut does not have.
 
 #### upload
-Shortcut for `files upload`
+`files upload` under a shorter name, with all of its flags and the same duplicate
+prompt at a terminal. See [files upload](#files-upload).
 
 ```bash
 rescale-int upload <file> [file...] [flags]
 ```
-
-**Flags:**
-- `-d, --folder-id string` - Upload to a specific folder (default: root)
-- `-m, --max-concurrent int` - Maximum concurrent file uploads, 1-20 (default 5)
-- `--pre-encrypt` - Use legacy pre-encryption
-
-Duplicate handling, `--tags` and `--dry-run` are not available here; use
-`files upload` for those.
 
 **Example:**
 ```bash
@@ -3159,7 +3178,8 @@ not a mystery; there is no reason to run them by hand.
   cross-process rate limiter described under
   [Rate limit notices](#rate-limit-notices). The group is hidden, so it does not
   appear in `--help`. Interlink starts `run` as a subprocess of its own accord
-  when a transfer needs a coordinator and none is listening; `status` reports what
+  when a transfer needs a coordinator and none of the user's own is listening, so
+  each signed-in user has one; `status` reports what
   that process is doing. Stopping or starting one by hand only interferes with the
   transfers already relying on it.
 - **`help [command]`**, the `-h/--help` flag on every command, and the hidden
@@ -3344,7 +3364,7 @@ rescale-cli list-info -a    # analyses
 ```
 rescale-cli upload -f file1.txt -f file2.txt [-d DIRECTORY_ID] [-e] [-r REPORT]
 ```
-`-r/--report` writes an upload report to a file; `-` writes it to stdout.
+`-r/--report` writes an upload report to a file; `-` writes it to stdout. The report holds the files' encryption keys, so the file is written `0600` through a temporary file, and a link or special file at that path is refused.
 
 **`download-file`** — Download job output files
 ```
@@ -3587,16 +3607,16 @@ rescale-int folders list --folder-id abc123
 rescale-int ls --limit 20
 
 # Get job details
-rescale-int jobs get -j WfbQa
+rescale-int jobs get -j GgHhI
 
 # Follow status changes in real-time
-rescale-int jobs tail -j WfbQa
+rescale-int jobs tail -j GgHhI
 
 # Download all job outputs
-rescale-int jobs download -j WfbQa -d ./results
+rescale-int jobs download -j GgHhI -d ./results
 
 # Stop job
-rescale-int jobs stop -j WfbQa
+rescale-int jobs stop -j GgHhI
 
 # Delete old jobs
 rescale-int jobs delete -j job1 -j job2 --confirm
@@ -3725,7 +3745,7 @@ at every terminal status, so prefer it. Where a loop is wanted, it has to handle
 all five terminal statuses and a failing command, or it spins forever:
 
 ```bash
-job_id="WfbQa"
+job_id="GgHhI"
 while true; do
   if ! out=$(rescale-int jobs get -j "$job_id"); then
     echo "status check failed" >&2
@@ -3875,7 +3895,10 @@ rescale-int upload input.txt --verbose
 ```
 
 If a command fails in a way Interlink can report, it writes a diagnostic report
-file. Look for it under `%LOCALAPPDATA%\Rescale\Interlink\reports` on Windows,
+file. Mistakes you can fix yourself, such as conflicting flags, an output file that
+already exists, or an upload refused by another transfer's lock, print only the
+error and write no report. Credentials in a report are redacted.
+Look for it under `%LOCALAPPDATA%\Rescale\Interlink\reports` on Windows,
 `~/Library/Application Support/rescale/reports` on macOS and
 `~/.config/rescale/reports` on Linux — where, unlike the config file, the
 directory follows `XDG_CONFIG_HOME` when that is set, so it is
@@ -3886,13 +3909,13 @@ different macOS location, `~/.config/rescale/logs`.
 
 ```bash
 # Check job status
-rescale-int jobs get --job-id WfbQa
+rescale-int jobs get --job-id GgHhI
 
 # Follow status changes (polls every 10 seconds by default)
-rescale-int jobs tail --job-id WfbQa
+rescale-int jobs tail --job-id GgHhI
 
 # List job files to verify outputs
-rescale-int jobs listfiles --job-id WfbQa
+rescale-int jobs listfiles --job-id GgHhI
 ```
 
 ### A Command Looks Hung
@@ -3931,7 +3954,9 @@ question fail and name the flag that answers it rather than guessing. Supply the
 relevant flag up front: `--overwrite` / `--skip` / `--resume` / `--merge` for conflicts,
 `--confirm` for destructive operations, and `--continue-on-error` for error prompts.
 
-`files upload` is the one exception. Without a duplicate-handling flag it does not
+`folders download-dir` asks only when the destination already holds files, so a new or
+empty destination, or a `--dry-run`, needs no flag. `files upload` (and the `upload`
+shortcut) is the other exception. Without a duplicate-handling flag it does not
 fail: it warns that duplicate checking is disabled and uploads everything. Pass
 `--check-duplicates`, `--skip-duplicates`, `--allow-duplicates`, or
 `--no-check-duplicates` to choose deliberately. `--dry-run` is safe either way —

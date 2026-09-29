@@ -1,7 +1,7 @@
 # Contributing to Rescale Interlink
 
 **Version**: 4.9.9
-**Last Updated**: August 25, 2026
+**Last Updated**: September 26, 2026
 
 Thank you for your interest in contributing to Rescale Interlink!
 
@@ -13,7 +13,7 @@ For comprehensive feature list, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
 ### Prerequisites
 
 - Go 1.26.7 (the version in `go.mod`, and what CI pins)
-- Node.js 20 (CI pins 20; the frontend uses Vite 6 and Vitest 4)
+- Node.js 24 (CI pins 24.21.0; the frontend uses Vite 6 and Vitest 4)
 - Wails v2 CLI v2.12.0 (matching the `github.com/wailsapp/wails/v2` require in `go.mod`)
 - macOS, Linux, or Windows development environment
 - Git
@@ -58,6 +58,19 @@ GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build 
 Use `npm ci` rather than `npm install`: it installs exactly what `package-lock.json`
 pins, which is what `wails build` and CI do. `npm install` can silently move
 dependencies and produce a lockfile diff you did not intend.
+
+### Windows Without Administrator Rights
+
+`build/windows_local_build/` keeps a portable toolchain in one folder and changes nothing
+system-wide. `install-deps.ps1` downloads the pinned Go, Node.js and .NET SDK versions,
+checking each against its SHA-256, plus the Wails CLI and WiX; `check.ps1` builds, and
+with `-Test` tests, in FIPS mode as CI does; `dev.ps1` runs `wails dev`; `dist.ps1`
+builds the unsigned distribution; and `installer.ps1` builds the MSI.
+
+### Line Endings
+
+`.gitattributes` stores text files with LF line endings and checks them out that way,
+whatever your `core.autocrlf` says. `.bat` and `.cmd` files keep CRLF.
 
 ## Build Requirements (CRITICAL)
 
@@ -135,7 +148,10 @@ skips the files behind the `fips` build tag, so use the make target before openi
 
 Go tests must not read from a checked-in fixture directory: `testdata/` is gitignored
 and blocked by the pre-commit hook. Inline fixture content in the test file and write it
-to `t.TempDir()`, which is what the config tests do.
+to `t.TempDir()`, which is what the config tests do. Keep tests hermetic: an isolated
+home directory, cleared credential variables such as `RESCALE_API_KEY`, and local test
+servers instead of the live platform. Pull requests run the Go suite on Windows and Linux
+(`.github/workflows/test.yml`).
 
 See [TESTING.md](TESTING.md) for the full test guide.
 
@@ -231,7 +247,7 @@ rescale-int/
 │   ├── ipc/                   # Cross-process IPC (daemon ↔ GUI)
 │   ├── localfs/               # Local filesystem browser (WalkStream)
 │   ├── logging/               # Logger and TeeWriter (log → EventBus)
-│   ├── mesa/                  # Mesa/OpenGL setup (Windows/Linux GPU)
+│   ├── mesa/                  # Mesa software OpenGL for Windows
 │   ├── mesainit/              # Mesa early initialization
 │   ├── models/                # Data models (jobs, files, credentials)
 │   ├── pathutil/              # Path resolution utilities
@@ -248,7 +264,7 @@ rescale-int/
 │   │   └── coordinator/       # Cross-process rate limit coordinator
 │   ├── reporting/             # Error reporting (classify → redact → report)
 │   ├── resources/             # Resource management (threads, memory)
-│   ├── service/               # Shared auto-download state vocab + legacy-service cleanup
+│   ├── service/               # Daemon status; removal of an old Windows service
 │   ├── services/              # GUI-agnostic services (TransferService, FileService)
 │   ├── transfer/              # Transfer coordination and batch abstraction
 │   │   ├── folder/            # Folder creation and orchestration
@@ -269,10 +285,11 @@ rescale-int/
 │   └── watch/                 # Job watch engine (polling + download)
 │
 ├── build/                     # Wails build assets (icons, manifests), plus
-│                              # build/linux/ AppImage WebKit bundling + verify scripts
+│                              # build/linux/ release build, WebKit bundling + verify
 ├── installer/                 # Windows MSI installer sources
 ├── packaging/                 # Desktop entry, icon, macOS install helper
-└── .github/workflows/         # release.yml — the tagged release pipeline
+└── .github/workflows/         # release.yml and release-linux.yml (releases; see TESTING.md),
+                               # test.yml (Go tests on Windows and Linux for PRs)
 ```
 
 ## Key Patterns

@@ -1,6 +1,6 @@
 # Testing Guide - Rescale Interlink
 
-**Last Updated**: August 25, 2026
+**Last Updated**: September 26, 2026
 **Version**: 4.9.9
 
 For comprehensive feature details, see [FEATURE_SUMMARY.md](FEATURE_SUMMARY.md).
@@ -53,6 +53,10 @@ go tool cover -html=coverage.out
 GOFIPS140=certified go test -tags fips -race ./...
 ```
 
+On Windows without administrator rights, `build\windows_local_build\check.ps1 -Test`
+builds and runs the Go suite in FIPS mode with the portable toolchain that
+`install-deps.ps1` sets up (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
 ### Package-Specific Tests
 
 ```bash
@@ -81,108 +85,113 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-134 Go test files (133 under `internal/`, one under `installer/`) across 50 packages,
-plus 8 frontend vitest files. Grouped by functional area:
+257 Go test files (255 under `internal/`, one each under `installer/` and `cmd/rescale-int-tray/`) across 55 packages,
+plus 14 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/cli` | 10 | Command parsing, flag aliases, config commands, daemon commands, file deletion, job-file decode, conflict resolution, job monitoring, folder-upload abort/failure paths, download helper (incl. the skip-existing size gate), shortcut concurrency |
-| `internal/cli/compat` | 9 | Compat mode detection, arg normalization, commands, execution, JSON output, submit, parity, skip-existing size gate |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/cli` | Command parsing, flag aliases, config commands, daemon commands, file deletion, job-file decode, conflict resolution, job monitoring, folder-upload abort/failure paths, download helper (incl. the skip-existing size gate), shortcut concurrency |
+| `internal/cli/compat` | Compat mode detection, arg normalization, commands, execution, JSON output, submit, parity, skip-existing size gate |
 
 #### Core Infrastructure
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/api` | 3 | Client, retry policy and budget, pagination |
-| `internal/core` | 2 | Engine pipeline orchestration, upload-progress reporting |
-| `internal/events` | 1 | EventBus pub/sub, ring buffer |
-| `internal/config` | 14 | CSV config, API config, jobs CSV, daemon config, platforms (incl. internal- and production-tagged variants), proxy features (FIPS / non-FIPS), token ACL on Windows |
-| `internal/models` | 1 | Job serialization, including the SSH access fields |
-| `internal/pathutil` | 2 | Path resolution |
-| `internal/validation` | 1 | Path validation |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/api` | Client, retry policy and budget, pagination |
+| `internal/core` | Engine pipeline orchestration, upload-progress reporting |
+| `internal/events` | EventBus pub/sub, ring buffer |
+| `internal/config` | CSV config, API config, jobs CSV, daemon config, platforms (incl. internal- and production-tagged variants), proxy features (FIPS / non-FIPS), token ACL on Windows |
+| `internal/models` | Job serialization, including the SSH access fields |
+| `internal/pathutil` | Path resolution, `~` expansion, download-folder write checks |
+| `internal/validation` | Path validation |
 
 #### Cloud & Transfer
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/cloud` | 2 | Timing utilities, retry notices |
-| `internal/cloud/credentials` | 1 | Credential management |
-| `internal/cloud/download` | 1 | Corrupt-file quarantine, downloaded-size verification |
-| `internal/cloud/providers/s3` | 3 | S3 upload progress reader, provider behavior, pre-encrypt part-count plan and short-upload refusal |
-| `internal/cloud/providers/azure` | 2 | Azure client, SAS token lookup, pre-encrypt block-count plan and short-upload refusal |
-| `internal/cloud/state` | 1 | Resume state serialization |
-| `internal/cloud/storage` | 1 | Disk-full and quota error classification |
-| `internal/cloud/transfer` | 3 | Transfer orchestration, object-format parsing, concurrent chunked download and range-fetch retry |
-| `internal/cloud/upload` | 1 | Upload flow |
-| `internal/transfer` | 4 | Batch executor, queue (incl. paginated batch rows), speed window, manager |
-| `internal/transfer/folder` | 2 | Folder creation, orchestrator |
-| `internal/transfer/scan` | 1 | Remote folder scanning |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/cloud` | Timing utilities, retry notices |
+| `internal/cloud/credentials` | Credential management |
+| `internal/cloud/download` | Corrupt-file quarantine, downloaded-size verification |
+| `internal/cloud/providers/s3` | S3 upload progress reader, provider behavior, pre-encrypt part-count plan and short-upload refusal |
+| `internal/cloud/providers/azure` | Azure client, SAS token lookup, pre-encrypt block-count plan and short-upload refusal |
+| `internal/cloud/state` | Resume state serialization |
+| `internal/cloud/storage` | Disk-full and quota error classification |
+| `internal/cloud/transfer` | Transfer orchestration, object-format parsing, concurrent chunked download and range-fetch retry |
+| `internal/cloud/upload` | Upload flow |
+| `internal/transfer` | Batch executor, queue (incl. paginated batch rows), speed window, manager |
+| `internal/transfer/folder` | Folder creation, orchestrator |
+| `internal/transfer/scan` | Remote folder scanning |
 
 #### Services & GUI Bindings
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/wailsapp` | 15 | Job bindings, job-status bindings, path helpers, version bindings, daemon bindings, config bindings, API key source bindings, progress + failure-path tests |
-| `internal/services` | 1 | Transfer service |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/wailsapp` | Job bindings, job-status bindings, path helpers, version bindings, daemon bindings, config bindings, API key source bindings, progress + failure-path tests |
+| `internal/services` | Transfer service |
 
 #### PUR (Parallel Upload and Run)
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/pur/filescan` | 1 | File scanning |
-| `internal/pur/parser` | 1 | SGE script parsing, SSH directive round-trip |
-| `internal/pur/pattern` | 1 | Pattern detection |
-| `internal/pur/pipeline` | 2 | Pipeline orchestration, failed-job accounting, JobSpec → JobRequest mapping |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/pur/doe` | Sweep designs (full factorial, OFAT, Latin hypercube, Sobol, Monte Carlo and the rest), cases CSV parsing, seeded reproducibility |
+| `internal/pur/filescan` | File scanning |
+| `internal/pur/parser` | SGE script parsing, SSH directive round-trip |
+| `internal/pur/pattern` | Pattern detection |
+| `internal/pur/pipeline` | Pipeline orchestration, failed-job accounting, JobSpec → JobRequest mapping |
+| `internal/pur/state` | State file persistence: concurrent saves and checkpoints, in-memory runs, unconfirmed creations, a private file without credentials |
+| `internal/pur/validation` | Job spec validation, including the license pair |
 
 #### Networking & Rate Limiting
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/http` | 3 | Proxy, retry logic and elapsed budget, NTLM transport under FIPS |
-| `internal/ratelimit` | 3 | Token bucket, registry, store (incl. degraded-mode notices) |
-| `internal/ratelimit/coordinator` | 5 | Cross-process coordination |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/http` | Proxy, retry logic and elapsed budget, NTLM transport under FIPS |
+| `internal/ratelimit` | Token bucket, registry, store (incl. degraded-mode notices) |
+| `internal/ratelimit/coordinator` | Cross-process coordination, one coordinator per user |
 
 #### Background Auto-Download
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/daemon` | 6 | Daemon lifecycle, monitor, state pruning, transfer tracker, status snapshot errors |
-| `internal/service` | 5 | Shared State/Presentation vocabulary (Compute, per-user state), detection, removal of an earlier version's service |
-| `internal/ipc` | 7 | Client/server, messages, pipe, security, user-scope catalog tests |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/daemon` | Daemon lifecycle, monitor, state pruning, transfer tracker, status snapshot errors, workspace folders, claims between clients, job folder names |
+| `internal/service` | Detection, daemon status and user matching, removal of an earlier version's service |
+| `internal/ipc` | Client/server, messages, per-user pipe names and owner-only pipes, error texts |
 
 #### Security & Crypto
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/crypto` | 2 | Encryption, streaming encryption |
-| `internal/reporting` | 1 | Error classification, redaction, reportability |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/crypto` | Encryption, streaming encryption |
+| `internal/reporting` | Error classification, redaction, reportability |
 
 #### Platform & Utilities
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `internal/diskspace` | 1 | Cross-platform disk space checking, margin-vs-message accuracy |
-| `internal/localfs` | 2 | Directory browser, WalkStream |
-| `internal/logging` | 1 | TeeWriter (log → EventBus) |
-| `internal/platform` | 1 | Sleep prevention |
-| `internal/progress` | 1 | Bar-safe log sink |
-| `internal/resources` | 2 | Thread pool, memory management, upload plan geometry and shared memory budget |
-| `internal/watch` | 1 | Job watch engine |
-| `internal/util/analysis` | 1 | Analysis utilities |
-| `internal/util/buffers` | 1 | Buffer pooling |
-| `internal/util/glob` | 1 | Glob pattern matching |
-| `internal/util/multipart` | 1 | Multipart scan |
-| `internal/util/paths` | 1 | Path collision detection |
-| `internal/util/sanitize` | 1 | String sanitization |
-| `internal/util/tags` | 1 | File tag utilities |
+| Package | Key Coverage |
+|---------|--------------|
+| `internal/diskspace` | Cross-platform disk space checking, margin-vs-message accuracy |
+| `internal/localfs` | Directory browser, WalkStream |
+| `internal/logging` | TeeWriter (log → EventBus), colour only on a terminal |
+| `internal/platform` | Sleep prevention |
+| `internal/progress` | Bar-safe log sink |
+| `internal/resources` | Thread pool, memory management, upload plan geometry and shared memory budget |
+| `internal/watch` | Job watch engine |
+| `internal/util/analysis` | Analysis utilities |
+| `internal/util/buffers` | Buffer pooling |
+| `internal/util/glob` | Glob pattern matching |
+| `internal/util/multipart` | Multipart scan: absolute and resolved run folders, skipped directories |
+| `internal/util/paths` | Path collision detection |
+| `internal/util/sanitize` | String sanitization |
+| `internal/util/tags` | File tag utilities |
+| `internal/util/tar` | Archive creation: explicit file sets, entry names and symlinks, partial-archive cleanup, finalization failures |
 
 #### Other
 
-| Package | Test Files | Key Coverage |
-|---------|-----------|--------------|
-| `installer` | 1 | Installer tests |
+| Package | Key Coverage |
+|---------|--------------|
+| `installer` | What the MSI source must and must not contain |
+| `cmd/rescale-int-tray` | Windows only: failed actions return, Start refusals are shown, start at login only when enabled and after the download folder appears |
 
 #### Frontend (vitest)
 
@@ -196,6 +205,9 @@ plus 8 frontend vitest files. Grouped by functional area:
 | `components/tabs/FileBrowserTab.test.tsx` | Upload gating (job output folders, in-flight and failed folder loads) and destination resolution — the confirmation dialog names the folder the current view resolved, not the previous one |
 | `components/widgets/TemplateBuilder.test.tsx` | License UX — CUSTOM/RLM preset auto-switch and its hint lifecycle |
 | `components/widgets/RemoteFilePicker.test.tsx` | Workspace invalidation on API key change, discarding stale listings |
+
+Also: `jobStore`, the PUR, Setup and Single Job tabs, and the `ErrorSummary` and
+`StatsBar` widgets.
 
 ### Coverage Goals
 
@@ -476,6 +488,11 @@ func TestMyFeature(t *testing.T) {
 }
 ```
 
+Keep every test hermetic. Point `HOME` (and `USERPROFILE`, `APPDATA` and `LOCALAPPDATA`
+where Windows paths are involved) at `t.TempDir()`, clear credential variables such as
+`RESCALE_API_KEY`, and serve API and storage calls from a local `httptest` server. A test
+must never read the developer's configuration or token, or reach the live platform.
+
 ### GUI Test Checklist
 
 - [ ] Feature works in relevant tab(s)
@@ -488,12 +505,20 @@ func TestMyFeature(t *testing.T) {
 
 ## Continuous Integration
 
-`.github/workflows/release.yml` runs on every `v*` tag push. The first job is a
-`verify` gate; the platform builds declare `needs: [verify]`, so a failing check blocks
-the release instead of shipping alongside it.
+`.github/workflows/release.yml` runs on every `v*` tag push, and when a maintainer runs
+it by hand from any branch (Actions → Release Rescale Interlink → Run workflow, with a
+`vX.Y.Z` or `vX.Y.Z-rc.N` version). Either way it makes a draft release; a manual run's
+draft has no Linux tarball, and its tag is created when the draft is published. A
+`check` job runs first and never replaces a release: a manual run stops if its version
+already has a tag or a release, draft or published, and a second run for one version
+waits for the first and then stops; a tag push whose release was already published from
+the same commit builds nothing, and from another commit it stops. The release job checks
+again just before it creates the draft. Then comes a `verify` gate; the platform builds
+declare `needs: [verify]`, so a failing check blocks the release instead of shipping
+alongside it.
 
 **`verify`** (macos-14; Go 1.26.7 downloaded and checked against its published SHA-256,
-Node.js pinned to major version 20 via `actions/setup-node`):
+Node.js 24.21.0 via `actions/setup-node`):
 
 | Step | Command |
 |------|---------|
@@ -512,16 +537,26 @@ needs them both):
 - Windows build (portable zip + MSI, Azure Trusted Signing)
 - macOS build (Apple Silicon, Developer ID signed + notarized)
 
-The Linux build runs outside GitHub Actions, on a Rescale HPC job. Its AppImage carries
-its own gate: `build/linux/bundle-webkit.sh` copies the host's WebKit helper
-executables into the AppDir with `$ORIGIN`-relative RPATHs, and
-`build/linux/verify-appimage.sh` then extracts the **finished AppImage** — deliberately
-the image rather than the AppDir — and fails the release before the artifact ships if the
-helpers are missing, not executable, or resolve their WebKit/GTK dependencies from
-outside the bundle.
+The Linux build runs in `.github/workflows/release-linux.yml`, in an `almalinux:8`
+container, through `build/linux/build-release.sh`; it runs no test suite. Every download
+is checked against a pinned SHA-256, `ldd -r` resolves every shipped binary, and the
+build fails if one needs a GLIBC newer than 2.28. Its AppImage carries its own gate:
+`build/linux/bundle-webkit.sh` copies the host's WebKit helper executables into the
+AppDir with `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then
+extracts the **finished AppImage** — deliberately the image rather than the AppDir — and
+fails the release before the artifact ships if the helpers are missing, not executable,
+or resolve their WebKit/GTK dependencies from outside the bundle.
 
-**Not automated**: test runs on pull requests, cross-platform test execution (the suite
-runs on macOS only), and performance regression detection.
+**`.github/workflows/test.yml`** runs on pull requests and on pushes to `release/**`: the
+Go suite (without the root package, which embeds `frontend/dist`) natively on
+`windows-latest` and, with `-race`, on `ubuntu-latest`, with Go 1.26.7 checked against
+its published SHA-256. A step in each job fails it unless the platform-only upload-lock
+tests ran and passed. The Windows job has a second such step for the Windows-only
+tests of the retired service, the per-user pipes, the tray and drive-relative scan
+roots: each must run and pass, so a skip or a missing test fails the job.
+
+**Not automated**: the frontend suite, `go vet` and a macOS Go run on pull requests
+(the `verify` job runs them only for releases), and performance regression detection.
 
 ---
 
@@ -542,14 +577,15 @@ runs on macOS only), and performance regression detection.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 134 test files across 50 packages, 0 failing — roughly 930 top-level
-  test functions, plus subtests. Don't treat any of the reported case totals as a
+- **Go suite**: 257 test files across 55 packages — roughly 1,450 top-level test
+  functions, plus subtests. Don't treat any of the reported case totals as a
   checksum: some tests branch on `runtime.GOOS`, so what `make test` counts, and what it
-  skips, depends on the platform you measure on. 14 of the project's own packages have no test files (`make test` prints 15 `[no test files]` lines; the extra one is the vendored `frontend/node_modules/.../flatted` Go package).
-- **Frontend suite**: 8 vitest files, 100 passing tests.
+  skips, depends on the platform you measure on. 10 of the project's own packages have no test files.
+- **Frontend suite**: 14 vitest files.
 - **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
-  `go vet -tags fips` and the frontend lint and build, on every `v*` tag push. The
-  platform builds are gated on it.
+  `go vet -tags fips` and the frontend lint and build, on every release run. The
+  platform builds are gated on it. `.github/workflows/test.yml` runs the Go suite
+  natively on Windows and Linux for pull requests and pushes to `release/**`.
 - v4.9.8 adds:
   - `TestShouldProbeResolvedDirectory` — predicate gating the walker's defensive Stat to non-regular entries (covers regular file, directory, irregular file, named pipe).
   - `TestWalkStream_SkippedChannelDrainsCleanly` — regression guard for the new `skippedChan` ensuring it closes cleanly when no entries are emitted.

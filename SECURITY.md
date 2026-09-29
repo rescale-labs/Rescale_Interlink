@@ -1,7 +1,7 @@
 # Security Documentation - Rescale Interlink
 
 **Version:** 4.9.9
-**Last Updated:** 2026-08-25
+**Last Updated:** 2026-09-26
 
 ## Overview
 
@@ -45,16 +45,22 @@ RESCALE_ALLOW_NON_FIPS=true ./rescale-int
 
 ### Build and Release Integrity
 
-Release artifacts are produced by `.github/workflows/release.yml` on a `v*` tag push,
-with the following controls:
+Release artifacts are produced by `.github/workflows/release.yml`, on a `v*` tag push or
+a maintainer's manual run from any branch, with the following controls:
 
-- **Gated on verification.** A `verify` job runs first: the FIPS-tagged Go test suite
+- **No release is replaced.** A first job stops a manual run whose version already has
+  a tag or a release, draft or published, and on a tag push leaves an already published
+  release untouched; the release job checks again before it creates the draft. Every run
+  makes a draft, and a manual run's tag is created only when its draft is published.
+- **Gated on verification.** A `verify` job runs before any build: the FIPS-tagged Go test suite
   (`make test`), `GOFIPS140=certified go vet -tags fips ./...`, and the frontend test,
   lint, and build. The Windows and macOS build jobs declare `needs: [verify]`, so a
   failing check blocks the release rather than shipping beside it.
 - **Pinned, checksum-verified toolchain.** Go 1.26.7 is downloaded and checked against
-  its published SHA-256 before install. Node.js is pinned to major version 20 via
-  `actions/setup-node`; the Windows build job pins the exact patch (20.20.2).
+  its published SHA-256 before install. Node.js is pinned to 24.21.0 in every job
+  (checksum-verified in the Linux build), and the WebView2 runtime bundled into the MSI
+  is pinned by version and SHA-256; the installer build stops if it was not bundled
+  completely.
 - **Deterministic dependency installs.** `npm ci` installs exactly what
   `package-lock.json` pins. This is also what `wails.json`'s `frontend:install` runs, so
   local and CI builds resolve the same tree.
@@ -63,9 +69,13 @@ with the following controls:
   the standalone CLI is signed with the hardened runtime and a timestamp, signatures are
   verified in-job, then the bundle is submitted to `notarytool` and the notarization
   ticket is stapled.
-- **Linux AppImage self-check.** The Linux build runs outside GitHub Actions. Its
-  packaging step bundles WebKit's helper executables into the AppDir with
-  `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then inspects the
+- **Checksums and build paths.** Every release asset (macOS zip, Windows MSI and zip,
+  Linux tarball) is published with a `.sha256` that `shasum -a 256 -c` accepts, and
+  every binary is built with `-trimpath`, so it records no build-machine paths.
+- **Linux AppImage self-check.** The Linux build runs in
+  `.github/workflows/release-linux.yml`, in an `almalinux:8` container, with every
+  download checked against a pinned SHA-256. Its packaging step bundles WebKit's helper
+  executables into the AppDir with `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then inspects the
   finished AppImage — deliberately the built image rather than the AppDir, so a missing
   RPATH cannot hide behind a matching host WebKit — and fails the release before the
   artifact ships if the helpers are missing, not executable, or resolve their WebKit/GTK
@@ -74,7 +84,7 @@ with the following controls:
 
 ### S3 FIPS Endpoints (ITAR Platforms)
 
-For ITAR platforms (`itar.rescale.com` and `itar.rescale-gov.com`), Interlink automatically routes S3 API traffic through AWS FIPS-validated endpoints. This is detected at runtime by `shouldUseFIPSEndpoint()` in `internal/cloud/providers/s3/client.go` and applied via `aws.FIPSEndpointStateEnabled` in the AWS SDK configuration.
+For ITAR platforms (`itar.rescale.com` and `itar.rescale-gov.com`), Interlink automatically routes S3 API traffic through AWS FIPS-validated endpoints. This is detected at runtime by `shouldUseFIPSEndpoint()` in `internal/cloud/providers/s3/client.go` and applied by `newSDKClient()`, which sets `EndpointOptions.UseFIPSEndpoint` to `aws.FIPSEndpointStateEnabled`.
 
 - **Scope**: All S3 operations (upload, download, multipart, credential refresh)
 - **Trigger**: Platform URL contains `itar.rescale-gov.com` or `itar.rescale.com`
@@ -82,6 +92,11 @@ For ITAR platforms (`itar.rescale.com` and `itar.rescale-gov.com`), Interlink au
 - **No user configuration required**: Enabled automatically based on the configured platform URL
 
 This satisfies FedRAMP Moderate requirements for FIPS-validated data-in-transit to S3 storage.
+
+The S3 client is built only from what the platform supplies: region, temporary
+credentials, the HTTP client and the FIPS switch. AWS environment variables and shared
+config or credentials files do not affect it, and CRC32 request checksums and response
+validation are on.
 
 ---
 
@@ -150,6 +165,8 @@ Logs may contain:
 
 Logs do **not** contain:
 - API keys (full or partial)
+- Storage access signatures, storage keys or `Authorization` values: every log line and
+  error passes through the redactor described under [Redaction](#redaction)
 - Proxy passwords
 - File contents
 - Encryption keys
@@ -170,7 +187,7 @@ API keys should be stored securely:
 
 | Method | Recommended | Notes |
 |--------|-------------|-------|
-| Token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token` for the default-user token, `%LOCALAPPDATA%\Rescale\Interlink\token` for the per-user token preferred by the auto-download daemon) | Yes | 0600 on Unix; explicit DACL on Windows (owner + Administrators + SYSTEM, no inheritance) |
+| Token file (Unix: `~/.config/rescale/token`; Windows: `%LOCALAPPDATA%\Rescale\Interlink\token`, with the legacy `%APPDATA%\Rescale\Interlink\token` still read) | Yes | 0600 on Unix; explicit DACL on Windows (owner + Administrators + SYSTEM, no inheritance) |
 | Environment variable (`RESCALE_API_KEY`) | Yes | Cleared after session |
 | Config file (`config.csv`) | **No** | Keys are ignored from config.csv |
 
@@ -178,6 +195,7 @@ API keys should be stored securely:
 
 - API keys are transmitted only over HTTPS
 - Keys are never logged (not even partially)
+- `config init` does not echo the key while you type it
 - The GUI allows viewing the key (toggle) but never exposes it externally
 - **Auth scheme selected by key shape**: API tokens use `Authorization: Token <key>`; short-lived JWT-shaped credentials (three dot-separated `ey…` segments) automatically switch to `Authorization: Bearer <key>`. Selection is per request, based on the credential value at the time of the call
 
@@ -223,19 +241,25 @@ unauthenticated HTTPS request to `api.github.com`.
 
 ### Authorization Model
 
-The Windows daemon uses named pipes for IPC with a two-tier security model:
+Each user's daemon listens on a named pipe of its own, `\\.\pipe\rescale-interlink-<SID>`,
+named with that user's SID. Access is checked twice:
 
-1. **Connection Level**: Each user's daemon listens on a pipe named for that user
-   (`\\.\pipe\rescale-interlink-<SID>`) that only the user and LocalSystem can
-   open, and a client connects only to a pipe its own user owns
-2. **Operation Level**: Modify operations require owner authorization
+1. **Connection level**: the pipe admits only that user and LocalSystem, and is owned by
+   the user. The daemon never joins a pipe that already exists, and the app, tray and
+   CLI use a pipe only if the current user owns it. If another account holds the name,
+   auto-download does not start, and the tray, the app and `daemon run` say so.
+2. **Operation level**: modify operations also require the caller's SID to match the
+   daemon owner's.
 
-The daemon runs as a subprocess in a single user's session, so authorization is
-owner-based: the caller's SID must match the SID that owns the daemon.
+Without the user's SID the IPC server does not start and clients refuse; nothing falls
+back to a pipe name shared between users. The rate-limit coordinator's pipe,
+`\\.\pipe\rescale-ratelimit-coordinator-<SID>`, follows the same rules. On macOS and
+Linux both sockets are in the user's `~/.config/rescale`, with mode `0600`, and without
+a home folder neither starts.
 
 ### Modify Operations (Protected)
 
-These require the caller's SID to match the daemon owner:
+These require the caller's SID to match the SID of the user who started the daemon:
 - `PauseUser`
 - `ResumeUser`
 - `TriggerScan`
@@ -245,23 +269,11 @@ These require the caller's SID to match the daemon owner:
 - `CancelDaemonTransfer`
 - `RetryFailedInDaemonBatch`
 
-### User-Scoped Read Operations
-
-These require the caller's SID to match the daemon owner. An unidentifiable caller (empty SID) is **rejected** rather than receiving data or a silently-empty response:
-- `GetUserList` (returns the single owner's entry)
-- `GetRecentLogs`
-- `GetTransferStatus`
-- `OpenLogs`
-
-### Non-Scoped Read Operations
-
-These return only non-user-specific information and are available to any caller that can open the pipe:
-- `GetStatus` (daemon state and version)
-- `OpenGUI` (forwarded to the tray app to surface the GUI window; carries no user data)
-
 ### Fail-Closed Authorization
 
-If the daemon cannot capture the owner SID at startup, all modify operations are denied. If a request arrives with an unidentifiable caller (SID capture failed at the pipe layer), both modify operations and user-scoped read operations are rejected rather than silently succeeding with an empty scope. This policy is enforced by a single `resolveUserScope` helper in `internal/ipc/server.go`.
+If the daemon cannot capture the owner SID at startup, the IPC server does not start, so
+`daemon run --ipc` stops with an error. A modify request whose caller SID cannot be
+captured at the pipe layer is denied (`authorizeModifyRequest` in `internal/ipc/server.go`).
 
 ---
 
@@ -289,7 +301,7 @@ Rescale Interlink resolves API credentials through a priority chain that differs
 1. `--api-key` command-line flag (highest priority)
 2. Per-user token file in the resolved user-profile directory
 3. `apiconfig` INI file in the resolved user-profile directory (legacy)
-4. Default token file (Unix: `~/.config/rescale/token`; Windows: `%APPDATA%\Rescale\Interlink\token`)
+4. Default token file (Unix: `~/.config/rescale/token`; Windows: `%LOCALAPPDATA%\Rescale\Interlink\token`, then the legacy `%APPDATA%\Rescale\Interlink\token`)
 5. `RESCALE_API_KEY` environment variable (lowest priority)
 
 **Source:** `internal/config/apikey.go`
@@ -327,7 +339,8 @@ The following are **not reportable** (users can fix these themselves, or nothing
 - Timeout errors
 - Disk space errors
 - Client errors (400/404)
-- Local filesystem refusals (permissions, missing path, file-descriptor limit)
+- Local filesystem refusals (permissions, missing path, read-only volume), including an
+  upload refused by another transfer's upload lock
 - User cancellation, and daemon-stopped
 - Rate limit responses (429)
 
@@ -337,9 +350,11 @@ The following are **not reportable** (users can fix these themselves, or nothing
 Two further filters run ahead of `IsReportable()` on the CLI and daemon path, in
 `internal/reporting/cli_helper.go`:
 
-- **Usage errors** — a missing required flag, an unknown flag, a refusal to prompt
-  without a terminal, a user abort, or a pre-flight validation failure ("no valid files
-  to upload"). These are user mistakes, not system failures.
+- **Usage errors** — a missing required flag, an unknown flag, conflicting flags, a
+  refusal to prompt without a terminal, a user abort, an output file that already
+  exists, a refused `daemon run` or a `daemon stop` that timed out, or a pre-flight
+  validation failure ("no valid files to upload"). These are user mistakes or local
+  conditions, not system failures.
 - **Aggregate roll-ups** — the batch summary a command returns after it has already
   reported each failure item by item (`N file(s) failed to upload`,
   `N of M job(s) failed`, and similar). Reporting the roll-up as well would duplicate
@@ -351,7 +366,18 @@ failure is a debug-only note rather than a warning that competes with the real f
 
 ### Redaction
 
-All error messages are redacted before inclusion in reports:
+Error text is redacted wherever it is shown or written — the terminal, the GUI, logs,
+the daemon's records and error reports. The first layer (`RedactSecrets`) removes
+credentials and keeps the surrounding text:
+- Signed-URL parameters (Azure SAS `sig`, `se`, `sp`, `sv` and the like; S3 `X-Amz-*`),
+  plain or HTML-, percent- or JSON-escaped → `name=REDACTED`
+- Storage and AWS keys (`AccountKey=`, `accessKey`, `secretKey`, `sessionToken`, also as
+  JSON fields) → `REDACTED`
+- `Authorization` and `Proxy-Authorization` values of any scheme → the scheme is kept,
+  the value becomes `REDACTED`
+- AWS access key IDs (`AKIA…`) → `[REDACTED_AWS_KEY]`
+
+Reports then apply these rules as well:
 - Hex tokens of **20 or more** characters → `[REDACTED]`
 - URL query parameters → `?[REDACTED]`
 - Email addresses → `[EMAIL]`
@@ -371,7 +397,9 @@ In addition, when the report includes the recent **timeline snapshot** (transfer
   bounds a repeating failure — a daemon retrying the same broken scan every poll used to
   write one file per occurrence, forever (`internal/reporting/transport.go`).
 - Reports include workspace name, workspace ID, and platform URL for support context.
-- Reports **do not** contain API keys, passwords, file contents, or full file paths.
+- Reports **do not** contain API keys, storage credentials, passwords or file contents.
+  Home-directory paths are shortened to `[HOME]`, and timeline entries keep only file
+  names.
 
 ---
 
@@ -412,6 +440,7 @@ Do not disclose security issues publicly until a fix is available.
 
 | Version | Date | Security-Relevant Changes |
 |---------|------|---------------------------|
+| 4.9.9 | Unreleased | Security hardening in credential handling, file handling, Windows auto-download and the release process |
 | 4.9.8 | 2026-05-31 | FIPS 140-3 build path tightening; security dependency refresh to clear advisories; cleaner credential source DTO across GUI and CLI |
 | 4.9.4 | 2026-04-19 | Explicit Windows DACL on token file (owner + Administrators + SYSTEM, no inheritance); IPC caller-SID scoping consolidated behind one helper with catalog-wide fail-closed enforcement |
 | 4.9.3 | 2026-04-15 | AWS SDK security bump (eventstream DoS fix); CodeQL quality cleanup |

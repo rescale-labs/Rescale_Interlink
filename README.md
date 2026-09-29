@@ -30,13 +30,17 @@ A unified tool combining comprehensive command-line interface and graphical inte
 - **File Browser: search, owner filter, sorting and better pagination.** The remote pane can search by file name, restrict a listing to your own files or files shared with you, and sort by name, size or upload date, with the pagination cursor carried through search.
 - **Transfers tell the truth about what happened.** A cancelled folder transfer now reads as cancelled rather than as a clean completion, on the batch row and in the CLI. Storage retries and API rate-limit throttling are surfaced instead of silently stalling a transfer ([#22](https://github.com/rescale-labs/Rescale_Interlink/issues/22)), including for the detached auto-download daemon.
 - **CLI progress bars and exit codes fixed.** Diagnostic log lines are routed through the progress-bar writer instead of landing inside a redrawing frame ([#23](https://github.com/rescale-labs/Rescale_Interlink/issues/23)). And a run that printed a failure summary no longer exits 0: `folders upload-dir` and `pur run` return an error when any item failed, aborting at a prompt stops the batch instead of continuing through the remaining files, and a prompt that cannot run (no terminal) records the file as failed rather than dropping it silently — so scripts and CI see a failed run as failed.
-- **Auto-download daemon reliability.** A broken daemon now says so on every surface that reports its state, a zero-task download batch no longer wedges the poll loop, and its unbounded internal state is now bounded.
+- **Auto-download daemon reliability.** A broken daemon now says so on every surface that reports its state, a failed job is retried with a backoff and held after five failures until `daemon retry`, only one daemon per user runs at a time, a zero-task download batch no longer wedges the poll loop, and its unbounded internal state is now bounded.
+- **Auto-download: workspace folders, several computers, job-named folders.** Auto-download can also fetch jobs in the workspace's shared folders, mirroring their folder tree; several computers on one account share the work, each job downloaded by one of them; and job folders are named after the job, with its ID in a `.jobid` file. See [RELEASE_NOTES.md](RELEASE_NOTES.md#auto-download-workspace-folders-several-computers-job-named-folders).
+- **Windows: auto-download runs in your session.** The Windows service is removed: auto-download runs as you, so it reaches your mapped network drives, and the tray starts it when you sign in. A service installed by an earlier version removes itself. See [RELEASE_NOTES.md](RELEASE_NOTES.md#windows-auto-download-runs-in-your-session).
 - **Disk space refusals now agree with themselves.** A download could be refused with "need 292366 MB, have 312832 MB available" — need below have. The pre-flight check's own figures are reported verbatim, and free space is measured on the download directory's filesystem rather than its parent ([#34](https://github.com/rescale-labs/Rescale_Interlink/issues/34)).
 - **Upload integrity, and much larger files.** Multipart part size now scales with the file instead of capping at 64 MB, so uploads are no longer limited to 640 GB on S3 or 3.2 TB on Azure by part-count ceilings, and a file beyond a backend's maximum is refused up front rather than failing mid-transfer. Every upload path now verifies that all bytes and all parts arrived before the file is registered, so a short read during upload or encryption can no longer commit a truncated object.
 - **Job submission carries SSH access settings.** `cidrRule`, `publicKey` and `sshPort` from a job file, and the CIDR rule and public key from an SGE script (the SGE format carries no port directive), now reach the API instead of being dropped during decode ([#43](https://github.com/rescale-labs/Rescale_Interlink/issues/43)).
 - **Job templates: license features, a project picker, and a coretype-aware core stepper.** A job can check a named feature out of your own license server, the project is chosen from a dropdown of the projects the API key can see rather than typed as an ID (the organization code is resolved from the key, so its field is gone), and the Cores control steps through the sizes the selected coretype actually offers.
 - **Linux AppImage renders on hosts with a different WebKit.** The AppImage now bundles the WebKitGTK helper processes it forks, with a release gate that verifies they resolve their libraries from inside the bundle. Previously a host WebKit mismatch left a window that painted but never rendered content.
-- **Toolchain pinned; tag builds gated on tests.** A checksum-verified Go 1.26.7 toolchain, pinned Node 20 (also checksum-verified on the Linux build), deterministic `npm ci` installs, and a release pipeline that runs the full test suite before it builds or signs anything.
+- **Safe file names.** A file or folder name from the platform that is not safe on this computer is refused for that file only, and the rest of the download continues.
+- **Security hardening** in credential handling, file handling, Windows auto-download and the release process.
+- **Toolchain pinned; release builds gated on tests.** Checksum-verified Go 1.26.7 and Node 24.21.0 toolchains, deterministic `npm ci` installs, a release pipeline that runs the full test suite before it builds or signs anything, and Go tests run natively on Windows and Linux for every change to a release branch.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 
@@ -69,7 +73,7 @@ See [RELEASE_NOTES.md](RELEASE_NOTES.md) for complete version history.
 - **Progress Tracking**: Multi-progress bars for concurrent operations
 - **Streaming Encryption**: Per-part AES-256-CBC encryption during upload
 - **Multi-part/Multi-threaded Transfers**: Dynamic thread allocation based on file size
-- **Resume Support**: Resume interrupted downloads from exact byte position
+- **Resume Support**: Interrupted uploads resume from the parts the backend already accepted; legacy-format downloads resume from their byte position
 
 ### GUI Features
 
@@ -115,7 +119,7 @@ Built with [Wails](https://wails.io/) (Go backend, React/TypeScript frontend):
 
 - macOS, Linux, or Windows
 - Rescale API key
-- For building from source: Go 1.26.7, Node.js 20, and the [Wails v2 CLI](https://wails.io/) for the GUI binary
+- For building from source: Go 1.26.7, Node.js 24, and the [Wails v2 CLI](https://wails.io/) for the GUI binary
 
 ### Installation
 
@@ -128,6 +132,8 @@ Download the latest release for your platform from [GitHub Releases](https://git
 | macOS (Apple Silicon) | `rescale-interlink-v<version>-macos_aarch64.zip` | `rescale-int-gui.app` + `rescale-int` CLI |
 | Linux (x64) | `rescale-interlink-v<version>-linux-amd64.tar.gz` | `rescale-int-gui.AppImage` + `rescale-int` CLI |
 | Windows (x64) | `rescale-interlink-v<version>-win_amd64.msi` (installer) or `rescale-interlink-v<version>-win_amd64.zip` (portable) | `rescale-int-gui.exe` + `rescale-int.exe` CLI |
+
+Each asset has a `<asset>.sha256` beside it. On macOS or Linux, check a download with `shasum -a 256 -c <asset>.sha256`; on Windows, compare the file's `Get-FileHash <asset>` value with the one in that file.
 
 **macOS:** Unzip, move `rescale-int-gui.app` to Applications. Copy `rescale-int` to a directory in your PATH for CLI usage.
 
@@ -159,7 +165,7 @@ GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the macOS GUI build invocation and the rest of
 the development setup; `.github/workflows/release.yml` has the exact commands the Windows and macOS release
-builds run.
+builds run, and `build/linux/build-release.sh` those of the Linux release.
 
 ### First Run (CLI Mode)
 
@@ -224,17 +230,17 @@ rescale-int ls --limit 20
 
 **Monitor job:**
 ```bash
-rescale-int jobs tail --job-id WfbQa --interval 5
+rescale-int jobs tail --job-id GgHhI --interval 5
 ```
 
 **Watch job and download results as they appear:**
 ```bash
-rescale-int jobs watch -j WfbQa -d ./results
+rescale-int jobs watch -j GgHhI -d ./results
 ```
 
 **Download job results:**
 ```bash
-rescale-int jobs download --id WfbQa --outdir ./results
+rescale-int jobs download --id GgHhI --outdir ./results
 ```
 
 **Run batch job pipeline:**
@@ -274,16 +280,16 @@ rescale-int daemon run --background --ipc --download-dir ./results
 # how long ago it happened, and what to do about it
 rescale-int daemon status
 
-# List downloaded jobs (--failed for the failures), and mark
-# failed jobs to be retried on the next poll cycle
+# List downloaded jobs (--failed for the failures and their next attempt),
+# and release failed jobs for another attempt
 rescale-int daemon list
-rescale-int daemon retry
+rescale-int daemon retry --all
 
 # Stop running daemon
 rescale-int daemon stop
 ```
 
-In the GUI, the Setup tab provides start/stop/pause/resume buttons, status indicators, and "Scan Now" for immediate job checks. A scan that fails (expired key, dead network, proxy trouble) is reported with its age rather than showing only as a last-scan timestamp that stops advancing. On Windows, a tray icon provides the same controls. Both Windows distributions ship `rescale-int-tray.exe`; the MSI additionally registers it to start with your session, while from the portable zip you start it yourself. Either way the daemon runs as a session subprocess until you install the optional Windows service from the tray's "Install Service (Admin)" item, which prompts for elevation. macOS and Linux do not include a tray — the main GUI fills that role.
+In the GUI, the Setup tab provides start/stop/pause/resume buttons, status indicators, and "Scan Now" for immediate job checks. A scan that fails (expired key, dead network, proxy trouble) is reported with its age rather than showing only as a last-scan timestamp that stops advancing. On Windows, a tray icon provides the same controls. Both Windows distributions ship `rescale-int-tray.exe`; the MSI additionally registers it to start with your session, while from the portable zip you start it yourself. Either way auto-download runs in your own session: the tray starts it when it starts, if auto-download is enabled, and you can also use the Setup tab or the tray's "Start Auto-Download" item. macOS and Linux do not include a tray — the main GUI fills that role.
 
 For auto-start on login (macOS launchd, Linux systemd), see [CLI_GUIDE.md](CLI_GUIDE.md#auto-start-on-login).
 
@@ -317,7 +323,7 @@ rescale-int/
 ├── main.go                   # GUI+CLI binary entry point (rescale-int-gui)
 ├── cmd/
 │   ├── rescale-int/          # CLI-only binary entry point
-│   └── rescale-int-tray/     # Windows system tray companion (MSI install only)
+│   └── rescale-int-tray/     # Windows system tray companion (zip + MSI; autostart is MSI-only)
 │
 ├── frontend/                 # Wails React frontend
 │   ├── src/
@@ -342,7 +348,7 @@ rescale-int/
 │   ├── services/             # GUI-agnostic services (TransferService, FileService)
 │   ├── cloud/                # Cloud storage backends (S3, Azure)
 │   ├── daemon/               # Auto-download daemon
-│   ├── service/              # Windows service mode
+│   ├── service/              # Daemon status; removal of an old Windows service
 │   ├── ipc/                  # Inter-process communication
 │   ├── api/                  # Rescale API client (v3 + v2)
 │   ├── ratelimit/            # Token bucket rate limiting + cross-process coordinator
@@ -416,7 +422,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development setup and guidel
 - Compat mode covers 10 of rescale-cli's commands; software publisher (spub) commands are not yet supported
 - No support for Rescale CFS or Publisher capabilities. In compat mode, `upload --copy-to-cfs` and `upload -T/--Target` return an explicit "not yet implemented" error rather than silently doing nothing
 - Terminal resize during CLI progress bars causes visual artifacts (transfers continue correctly)
-- The system tray and the installable system service are Windows-only. macOS and Linux run the auto-download daemon as a session-scoped subprocess; auto-start on login is manual (see [CLI_GUIDE.md](CLI_GUIDE.md#auto-start-on-login))
+- The system tray is Windows-only. On macOS and Linux the auto-download daemon does not start by itself at login; you can set that up yourself (see [CLI_GUIDE.md](CLI_GUIDE.md#auto-start-on-login))
 
 ---
 
@@ -440,4 +446,4 @@ MIT License - see [LICENSE](LICENSE) for the full text
 
 **Version**: 4.9.9
 **Status**: Production Ready
-**Last Updated**: August 25, 2026
+**Last Updated**: September 26, 2026
