@@ -18,6 +18,7 @@ func jobFilesFor(primaryFile string) JobFiles {
 	base := filepath.Base(primaryFile)
 	return JobFiles{
 		PrimaryFile: primaryFile,
+		PrimaryRel:  primaryFile,
 		PrimaryDir:  filepath.Dir(primaryFile),
 		PrimaryBase: strings.TrimSuffix(base, filepath.Ext(base)),
 		InputFiles:  []string{primaryFile},

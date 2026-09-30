@@ -1522,7 +1522,7 @@ Whole-job mode only — each of these is refused with `--file-id`, and so is an
 - `-s, --search string` - Include only files whose name contains one of these terms (comma-separated, case-insensitive)
 - `-x, --exclude string` - Exclude files matching these glob patterns (comma-separated)
 - `--filter string` - Include only files matching these glob patterns; comma-separated. Matched against the filename
-- `--path-filter string` - Include only files matching these path patterns. Matched against the file's path within the job, and supports `**` for recursive matching (e.g. `"run_1/*.dat"`, `"**/results/*.csv"`)
+- `--path-filter string` - Include only files matching these path patterns. Matched against the file's path within the job, and supports `**` for recursive matching (e.g. `"run_1/*.dat"`, `"**/results/*.csv"`). Each part between slashes also matches a name that is literally the same, so `"case [1]/**"` reaches a folder named `case [1]`
 
 `--overwrite`, `--skip` and `--resume` are mutually exclusive in both modes:
 passing more than one fails with `only one of --overwrite, --skip, or --resume can
@@ -2567,7 +2567,7 @@ rescale-int pur scan-files --primary <pattern> [flags]
 
 **Flags:**
 - `-r, --root string` - Root directory to scan (default: current directory)
-- `--primary string` - Primary file pattern, e.g., `*.inp` (required)
+- `--primary string` - Primary file pattern, e.g., `*.inp`, or `**/*.inp` to search subfolders too (required)
 - `--secondary stringArray` - Secondary file pattern; repeat for multiple. Each entry may end with `:required` (default) or `:optional`. Wildcard `*` is replaced with the primary file's basename. Unlike `--part-dirs`, this is a repeat-only flag: a comma inside one value is part of the pattern, not a separator
 - `-t, --template string` - Template CSV used as the row prototype when generating jobs CSV
 - `-o, --output string` - Output jobs CSV path. A CSV is written only when both `--template` and `--output` are given; `--output` on its own prints the summary and writes nothing
@@ -2575,9 +2575,12 @@ rescale-int pur scan-files --primary <pattern> [flags]
 - `--json` - Emit the scan result as JSON instead of a printed summary. Standard output carries only the JSON; if the scan fails, it is empty and the command exits `1`. This returns before any CSV is generated, so `--json` together with `--template` and `--output` writes no CSV
 
 **How `--primary` matches.** The pattern is a path relative to `--root`, matched
-with ordinary shell globbing: `*` does not cross a `/`, and `**` is not special.
+with ordinary shell globbing: `*` does not cross a `/`.
 So `--primary "*.inp"` finds only the `.inp` files sitting directly in the root,
-and `--primary "inputs/*.inp"` finds those one level down in `inputs/`. An absolute
+and `--primary "inputs/*.inp"` finds those one level down in `inputs/`. A `**`
+matches any number of folders, so `--primary "**/vasprun.xml"` finds every
+`vasprun.xml` under the root at any depth; that search matches files only, skips
+hidden folders and does not follow links to folders. An absolute
 pattern, or one that climbs out of the root with `..`, is rejected. A match that is
 not a regular file — a directory named `model.inp`, say — is skipped and reported
 rather than failing the job later at tar time.

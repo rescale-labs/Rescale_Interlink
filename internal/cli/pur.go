@@ -429,7 +429,7 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&rootDir, "root", "r", "", "Root directory to scan (default: current dir)")
-	cmd.Flags().StringVar(&primaryPattern, "primary", "", "Primary file pattern, e.g., '*.inp' (required)")
+	cmd.Flags().StringVar(&primaryPattern, "primary", "", "Primary file pattern, e.g., '*.inp', or '**/*.inp' to search subfolders too (required)")
 	cmd.Flags().StringArrayVar(&secondaryPatterns, "secondary", nil, "Secondary file patterns (can repeat), e.g., '*.mesh:required'")
 	cmd.Flags().StringVarP(&templatePath, "template", "t", "", "Template CSV file for generating jobs")
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output jobs CSV file")

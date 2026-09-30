@@ -3,6 +3,7 @@
 package filter
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -116,107 +117,45 @@ func matchesPathFilter(filePath string, patterns []string) bool {
 
 	for _, pattern := range patterns {
 		pattern = filepath.ToSlash(pattern)
-		if matchPathPattern(filePath, pattern) {
+		if MatchPathPattern(filePath, pattern) {
 			return true
 		}
 	}
 	return false
 }
 
-// matchPathPattern matches a single path against a pattern.
-// Supports standard glob patterns plus ** for recursive directory matching.
-func matchPathPattern(path, pattern string) bool {
-	// Handle ** patterns specially
-	if strings.Contains(pattern, "**") {
-		return matchDoubleStarPattern(path, pattern)
-	}
+// MatchPathPattern reports whether a slash-separated path matches pattern.
+// A "**" segment matches any number of folders, none included: "**/foo.txt"
+// matches "foo.txt" and "a/b/c/foo.txt", and "run_1/**" everything under
+// run_1. Every other segment matches one path segment by path.Match, as
+// fs.Glob matches it, so "*" never crosses a "/", on Windows included.
+//
+// A segment also matches a name that is literally the same, so "case [1]/**"
+// reaches a folder named "case [1]": a pattern's backslashes become separators
+// on Windows, so there a bracket cannot be escaped. A trailing "/" is ignored.
+func MatchPathPattern(name, pattern string) bool {
+	pat, segs := strings.Split(strings.TrimRight(pattern, "/"), "/"), strings.Split(name, "/")
 
-	// Standard glob match
-	matched, err := filepath.Match(pattern, path)
-	if err != nil {
-		return false
-	}
-	return matched
-}
-
-// matchDoubleStarPattern handles ** glob patterns for multi-directory matching.
-// Examples:
-//   - "**/foo.txt" matches "foo.txt", "a/foo.txt", "a/b/c/foo.txt"
-//   - "run_1/**" matches "run_1/anything", "run_1/a/b/c/file.txt"
-//   - "run_*/*.dat" matches "run_1/file.dat", "run_5/other.dat"
-func matchDoubleStarPattern(path, pattern string) bool {
-	// Case 1: Pattern starts with **/ (match any prefix)
-	if strings.HasPrefix(pattern, "**/") {
-		suffix := pattern[3:] // Remove "**/""
-		// Try matching the suffix at any position
-		// Check if path ends with this suffix (ignoring leading directories)
-		if matchPathPattern(path, suffix) {
-			return true
-		}
-		// Also check each subdirectory level
-		parts := strings.Split(path, "/")
-		for i := range parts {
-			subPath := strings.Join(parts[i:], "/")
-			if matchPathPattern(subPath, suffix) {
-				return true
+	// Worked from the last pattern segment back, next[j] reports whether the
+	// segments after pat[i] match segs[j:]. That settles each pair of pattern
+	// and path segments once; retrying every split for every "**" instead
+	// multiplies the work by the path's depth for each "**".
+	next := make([]bool, len(segs)+1)
+	next[len(segs)] = true
+	for i := len(pat) - 1; i >= 0; i-- {
+		cur := make([]bool, len(segs)+1)
+		for j := len(segs); j >= 0; j-- {
+			switch {
+			case pat[i] == "**":
+				cur[j] = next[j] || j < len(segs) && cur[j+1]
+			case j < len(segs) && next[j+1]:
+				ok, err := path.Match(pat[i], segs[j])
+				cur[j] = pat[i] == segs[j] || ok && err == nil
 			}
 		}
-		return false
+		next = cur
 	}
-
-	// Case 2: Pattern ends with /** (match any suffix)
-	if strings.HasSuffix(pattern, "/**") {
-		prefix := pattern[:len(pattern)-3] // Remove "/**"
-		// Check if path starts with this prefix
-		if strings.HasPrefix(path, prefix+"/") || path == prefix {
-			return true
-		}
-		// Also try glob match on prefix
-		parts := strings.Split(path, "/")
-		for i := 1; i <= len(parts); i++ {
-			subPath := strings.Join(parts[:i], "/")
-			matched, _ := filepath.Match(prefix, subPath)
-			if matched {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Case 3: ** in the middle (e.g., "foo/**/bar.txt")
-	// Split pattern at ** and match prefix and suffix
-	doubleStar := strings.Index(pattern, "/**/")
-	if doubleStar != -1 {
-		prefix := pattern[:doubleStar]
-		suffix := pattern[doubleStar+4:] // Skip "/**/"
-
-		// Path must start matching prefix and end matching suffix
-		// with any number of directories in between
-		parts := strings.Split(path, "/")
-		for i := 1; i < len(parts); i++ {
-			prefixPath := strings.Join(parts[:i], "/")
-			if matched, _ := filepath.Match(prefix, prefixPath); matched {
-				// Prefix matches, now check suffix for remaining path
-				for j := i; j <= len(parts); j++ {
-					suffixPath := strings.Join(parts[j:], "/")
-					if matchPathPattern(suffixPath, suffix) {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-
-	// Case 4: ** is the whole pattern (match everything)
-	if pattern == "**" {
-		return true
-	}
-
-	// Fallback: treat ** as * (match any single segment)
-	replaced := strings.ReplaceAll(pattern, "**", "*")
-	matched, _ := filepath.Match(replaced, path)
-	return matched
+	return next[0]
 }
 
 // ParsePatternList parses a comma-separated list of patterns into a slice.

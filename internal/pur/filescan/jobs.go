@@ -33,19 +33,17 @@ func BuildJobs(template models.JobSpec, found []JobFiles) (jobs []models.JobSpec
 	seenNames := make(map[string]string, len(found))
 
 	for i, jf := range found {
-		display := displayPath(jf.PrimaryDir, jf.PrimaryFile)
-
 		command, jobName, renderErr := Render(template.Command, template.JobName, jf, i+1)
 		if renderErr != nil {
-			skipped = append(skipped, fmt.Sprintf("%s: %v", display, renderErr))
+			skipped = append(skipped, fmt.Sprintf("%s: %v", jf.PrimaryRel, renderErr))
 			continue
 		}
 		if first, dup := seenNames[jobName]; dup {
 			return nil, nil, nil, fmt.Errorf("%s and %s both render to job name %q; "+
 				"add {{index}} or {{dir}} to the job name template to keep names unique",
-				first, display, jobName)
+				first, jf.PrimaryRel, jobName)
 		}
-		seenNames[jobName] = display
+		seenNames[jobName] = jf.PrimaryRel
 
 		job := template
 		job.Command = command

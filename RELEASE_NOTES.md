@@ -155,7 +155,9 @@ Each job also uploads **only its own files** now — its primary file plus the s
 
 The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load. A path the column cannot carry, such as one containing a semicolon, is refused when the CSV is written, naming the job and the path. `pur scan-files` leaves the `LicensesPerJob` and `SSHPort` columns empty when they are not set, instead of writing `0`.
 
-In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason and its parent folder. The **Recursive** and **hidden directories** options appear only for a folder scan, since a file scan never read them.
+In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason and its path from the scan root. The **Recursive** and **hidden directories** options appear only for a folder scan, since a file scan never read them.
+
+- A primary pattern can use `**` to match any number of folders, so `**/vasprun.xml` finds every `vasprun.xml` under the root, at any depth. Such a search matches files only, skips hidden folders and does not follow links to folders. When a bare pattern such as `*.xml` finds nothing, the error suggests `**/*.xml`. (#69)
 
 ### PUR uploads can target a folder and carry file tags
 
@@ -621,6 +623,8 @@ disk-full.
   Task Manager. Until then, Start says so.
 - The token-file permission warning no longer appears on every run.
 - Error messages quote file patterns without doubling Windows backslashes.
+- `jobs download --path-filter` matches as documented: `*` and `?` no longer run across a
+  `/`, so `run_1/*.dat` no longer also takes files from folders inside `run_1`.
 
 ### Windows: auto-download runs in your session
 

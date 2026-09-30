@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 // writeScanFile creates one file under dir, making parents as needed.
@@ -33,14 +35,22 @@ func TestScanFiles_NoPrimaryPattern(t *testing.T) {
 	}
 }
 
+// A bare pattern such as "*.xml" searches only the root folder, which is not
+// how it reads, so that error says how to reach the subfolders.
 func TestScanFiles_NoFilesFound(t *testing.T) {
-	result := ScanFiles(ScanOptions{
-		RootDir:        "/tmp",
-		PrimaryPattern: "nonexistent-*.xyz",
-	})
+	root := t.TempDir()
+	writeScanFile(t, root, filepath.Join("sub", "a.xml"))
 
-	if result.Error == "" {
-		t.Error("Expected error for no matching files")
+	for _, tc := range []struct{ pattern, hint string }{
+		{"*.xml", "; to search subfolders too, use **/*.xml"},
+		{"sub/*.inp", ""},
+		{"**/*.inp", ""},
+		{"**.inp", ""},
+	} {
+		result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: tc.pattern})
+		if want := "no files found matching pattern: " + tc.pattern + tc.hint; result.Error != want {
+			t.Errorf("error %q, want %q", result.Error, want)
+		}
 	}
 }
 
@@ -221,10 +231,8 @@ func TestResolveSecondaryPattern(t *testing.T) {
 				}
 			}
 
-			files, warning, skip := ResolveSecondaryPattern(
-				dir, "model", filepath.Join(dir, "model.inp"),
-				SecondaryPattern{Pattern: "*.mesh", Required: tt.required},
-			)
+			files, warning, skip := ResolveSecondaryPattern(dir, "model",
+				SecondaryPattern{Pattern: "*.mesh", Required: tt.required})
 
 			if (skip != "") != tt.wantSkip {
 				t.Errorf("skip = %q, wantSkip %v", skip, tt.wantSkip)
@@ -304,6 +312,16 @@ func TestScanFiles_PrimaryPatternMustStayUnderTheRoot(t *testing.T) {
 			// The joined form reached outside the root and found loose.inp.
 			name:    "climbing out of the root",
 			pattern: func(string) string { return filepath.Join("..", "*.inp") },
+			wantErr: "outside the scan root",
+		},
+		{
+			name:    "absolute, searching subfolders",
+			pattern: func(root string) string { return filepath.Join(root, "**", "*.inp") },
+			wantErr: "absolute path",
+		},
+		{
+			name:    "climbing out of the root, searching subfolders",
+			pattern: func(string) string { return filepath.Join("..", "**", "*.inp") },
 			wantErr: "outside the scan root",
 		},
 	} {
@@ -421,13 +439,11 @@ func TestScanFiles_MalformedPrimaryPatternIsReported(t *testing.T) {
 	root := t.TempDir()
 	writeScanFile(t, root, "case1.inp")
 
-	result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "[.inp"})
-
-	if result.Error == "" {
-		t.Fatalf("an unparseable pattern was accepted: %v", result.Jobs)
-	}
-	if !strings.Contains(result.Error, "invalid primary pattern") {
-		t.Errorf("error %q does not say the pattern is invalid", result.Error)
+	for _, pattern := range []string{"[.inp", "**/[.inp"} {
+		result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: pattern})
+		if !strings.Contains(result.Error, "invalid primary pattern") {
+			t.Errorf("%s: error %q does not say the pattern is invalid", pattern, result.Error)
+		}
 	}
 }
 
@@ -442,7 +458,7 @@ func TestNotRegularReason_NonDirectory(t *testing.T) {
 		t.Skipf("%s is a regular file here", os.DevNull)
 	}
 
-	if got := notRegularReason(info); got != "is not a regular file" {
+	if got := notRegularReason(info, nil); got != "is not a regular file" {
 		t.Errorf("notRegularReason(%s) = %q", os.DevNull, got)
 	}
 }
@@ -472,11 +488,191 @@ func TestScanFiles_RelativeRootGivesAbsolutePaths(t *testing.T) {
 	dir := filepath.Join(wd, "scan", "a")
 	want := JobFiles{
 		PrimaryFile: filepath.Join(dir, "m1.inp"),
+		PrimaryRel:  filepath.Join("a", "m1.inp"),
 		PrimaryDir:  dir,
 		PrimaryBase: "m1",
 		InputFiles:  []string{filepath.Join(dir, "m1.inp"), filepath.Join(dir, "m1.mesh")},
 	}
 	if !reflect.DeepEqual(result.Jobs[0], want) {
 		t.Errorf("job files = %+v\nwant %+v", result.Jobs[0], want)
+	}
+}
+
+// "**" is how a file scan reaches below the root folder. Each row lists what
+// its pattern must find, in order; the folder named vasprun.xml is not a match.
+func TestScanFiles_DoubleStarMatchesAtAnyDepth(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{
+		"top.inp", "vasprun.xml", "a/vasprun.xml", "a/b/c/vasprun.xml", "a/b/vasprun.xml/notes.txt",
+		"x/input/a.xml", "x/input/sub/a.xml", "run_1/a.inp", "run_2/deep/b.inp", "other/run_3/c.inp",
+		"case [1]/in.lit", "case 1/in.lit", "case [1/in.lit",
+	} {
+		writeScanFile(t, root, filepath.FromSlash(f))
+	}
+
+	for _, tc := range []struct {
+		pattern string
+		want    []string
+	}{
+		{"**/vasprun.xml", []string{"a/b/c/vasprun.xml", "a/vasprun.xml", "vasprun.xml"}},
+		{"**/input/*.xml", []string{"x/input/a.xml"}},
+		{"run_*/**/*.inp", []string{"run_1/a.inp", "run_2/deep/b.inp"}},
+		// A folder name matches literally too, brackets and all, with or without
+		// "**", and even where it is not a valid glob.
+		{"**/case [1]/*.lit", []string{"case 1/in.lit", "case [1]/in.lit"}},
+		{"case [1]/*.lit", []string{"case 1/in.lit", "case [1]/in.lit"}},
+		{"**/case [1/*.lit", []string{"case [1/in.lit"}},
+		{"case [1/*.lit", []string{"case [1/in.lit"}},
+		// Without "**", a pattern searches only the levels it names, as before.
+		{"*.inp", []string{"top.inp"}},
+		{"*/*.inp", []string{"run_1/a.inp"}},
+	} {
+		result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: tc.pattern})
+		if result.Error != "" || len(result.SkippedFiles) != 0 {
+			t.Errorf("%s: error %q, skipped %v", tc.pattern, result.Error, result.SkippedFiles)
+		}
+		var got, want []string
+		for _, jf := range result.Jobs {
+			got = append(got, jf.PrimaryFile)
+		}
+		for _, w := range tc.want {
+			want = append(want, filepath.Join(root, filepath.FromSlash(w)))
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: found %v, want %v", tc.pattern, got, want)
+		}
+	}
+
+	// A trailing "/" is ignored, so "**/" finds what "**" does.
+	all := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "**"})
+	slash := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "**/"})
+	if len(all.Jobs) == 0 || !reflect.DeepEqual(slash, all) {
+		t.Errorf("**/ found %d files and ** found %d; want the same, and some", len(slash.Jobs), len(all.Jobs))
+	}
+}
+
+// A part without wildcards is looked up, as UnderRoot looks it up, so where the
+// file system ignores case, as macOS's and Windows's usually do, "CASES/*.inp"
+// still finds the folder cases.
+func TestScanFiles_PlainPartsKeepTheFileSystemsCaseRules(t *testing.T) {
+	root := t.TempDir()
+	writeScanFile(t, root, filepath.Join("cases", "a.inp"))
+	if _, err := os.Stat(filepath.Join(root, "CASES")); err != nil {
+		t.Skip("this file system tells case apart")
+	}
+
+	result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "CASES/*.inp"})
+	if len(result.Jobs) != 1 {
+		t.Errorf("error %q, %d jobs; want the one file in cases", result.Error, len(result.Jobs))
+	}
+}
+
+// A "**" scan searches neither hidden folders, where PUR stages its own
+// archives, nor linked folders, which can lead anywhere, back up the tree
+// included. A hidden root is still searched, and a link to a file still matches.
+func TestScanFiles_DoubleStarSkipsHiddenAndLinkedFolders(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, ".scan")
+	for _, f := range []string{"keep/m.inp", ".rescale-int-0123abcd/m.inp", ".git/m.inp"} {
+		writeScanFile(t, root, filepath.FromSlash(f))
+	}
+	writeScanFile(t, base, filepath.Join("elsewhere", "m.inp"))
+	writeScanFile(t, base, "target.inp")
+	for link, target := range map[string]string{"cases.inp": "elsewhere", "alias.inp": "target.inp"} {
+		if err := os.Symlink(filepath.Join(base, target), filepath.Join(root, link)); err != nil {
+			t.Skipf("cannot make a symbolic link here: %v", err)
+		}
+	}
+
+	result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "**/*.inp"})
+
+	if result.Error != "" || len(result.SkippedFiles) != 0 {
+		t.Fatalf("error %q, skipped %v", result.Error, result.SkippedFiles)
+	}
+	var got []string
+	for _, jf := range result.Jobs {
+		got = append(got, jf.PrimaryFile)
+	}
+	if want := []string{filepath.Join(root, "alias.inp"), filepath.Join(root, "keep", "m.inp")}; !reflect.DeepEqual(got, want) {
+		t.Errorf("found %v, want %v", got, want)
+	}
+}
+
+// A link whose target is missing matched the pattern and became a job, which
+// then failed at tar time. It is skipped with the reason instead, whichever
+// way the pattern is matched.
+func TestScanFiles_DanglingLinkIsSkipped(t *testing.T) {
+	root := t.TempDir()
+	writeScanFile(t, root, "good.inp")
+	if err := os.Symlink(filepath.Join(root, "missing.inp"), filepath.Join(root, "gone.inp")); err != nil {
+		t.Skipf("cannot make a symbolic link here: %v", err)
+	}
+
+	for _, pattern := range []string{"*.inp", "**/*.inp"} {
+		result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: pattern})
+		if len(result.Jobs) != 1 || result.Jobs[0].PrimaryFile != filepath.Join(root, "good.inp") {
+			t.Errorf("%s: jobs %v, want good.inp alone", pattern, result.Jobs)
+		}
+		// The cause, not the path again.
+		if len(result.SkippedFiles) != 1 || !strings.Contains(result.SkippedFiles[0], "gone.inp: cannot be read") ||
+			strings.Contains(result.SkippedFiles[0], root) {
+			t.Errorf("%s: skipped %q, want gone.inp and why", pattern, result.SkippedFiles)
+		}
+	}
+}
+
+// "**" makes deep layouts the usual case, and there two files can share their
+// folder's name as well as their own. Named from the scan root, no two of them
+// read the same in a skip line, a GUI list key or the duplicate-name refusal.
+func TestScanFiles_MessagesNameFilesFromTheRoot(t *testing.T) {
+	root := t.TempDir()
+	writeScanFile(t, root, filepath.Join("a", "input", "vasprun.xml"))
+	writeScanFile(t, root, filepath.Join("b", "input", "vasprun.xml"))
+	want := []string{filepath.Join("a", "input", "vasprun.xml"), filepath.Join("b", "input", "vasprun.xml")}
+
+	result := ScanFiles(ScanOptions{
+		RootDir:           root,
+		PrimaryPattern:    "**/vasprun.xml",
+		SecondaryPatterns: []SecondaryPattern{{Pattern: "OUTCAR", Required: true}},
+	})
+	if len(result.SkippedFiles) != 2 || !strings.HasPrefix(result.SkippedFiles[0], want[0]+": ") ||
+		!strings.HasPrefix(result.SkippedFiles[1], want[1]+": ") {
+		t.Errorf("skipped %q, want one line for each of %q", result.SkippedFiles, want)
+	}
+
+	result = ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "**/vasprun.xml"})
+	_, _, _, err := BuildJobs(models.JobSpec{Command: "run {{file}}", JobName: "{{base}}"}, result.Jobs)
+	if err == nil || !strings.Contains(err.Error(), want[0]+" and "+want[1]) {
+		t.Errorf("BuildJobs error %v, want it to name %q", err, want)
+	}
+}
+
+// Jobs are numbered in scan order ({{index}}, Name_N), so the order has to be
+// the same on every platform and the same for "**" as for the plain pattern
+// that finds the same files. Paths are compared a part at a time, as fs.Glob
+// lists them level by level; comparing whole paths put m.dat before m/z.dat,
+// and on Windows, where "\" sorts after the digits, job10 before job1.
+func TestScanFiles_OrderIsTheSameEverywhere(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{"job/x.inp", "job-2/x.inp", "job1/x.inp", "job10/x.inp", "job2/x.inp", "m.dat", "m/z.dat", "m0.dat"} {
+		writeScanFile(t, root, filepath.FromSlash(f))
+	}
+
+	jobs := []string{"job/x.inp", "job-2/x.inp", "job1/x.inp", "job10/x.inp", "job2/x.inp"}
+	for _, tc := range []struct {
+		pattern string
+		want    []string
+	}{
+		{"**/x.inp", jobs},
+		{"*/x.inp", jobs},
+		{"**/*.dat", []string{"m/z.dat", "m.dat", "m0.dat"}},
+	} {
+		var got []string
+		for _, jf := range ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: tc.pattern}).Jobs {
+			got = append(got, filepath.ToSlash(jf.PrimaryRel))
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s: order %q, want %q", tc.pattern, got, tc.want)
+		}
 	}
 }

@@ -2,6 +2,7 @@
 package filescan
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,13 +26,14 @@ type SecondaryPattern struct {
 // ScanOptions configures a file scan operation.
 type ScanOptions struct {
 	RootDir           string             // Base directory to search in
-	PrimaryPattern    string             // Primary file pattern (e.g., "*.inp", "inputs/*.inp")
+	PrimaryPattern    string             // Primary file pattern (e.g., "*.inp", "inputs/*.inp", "**/*.inp")
 	SecondaryPatterns []SecondaryPattern // Secondary files to attach to each primary
 }
 
 // JobFiles represents files found for a single job.
 type JobFiles struct {
 	PrimaryFile string   // Path to the primary file
+	PrimaryRel  string   // PrimaryFile relative to the scan root, which is how messages name it
 	PrimaryDir  string   // Directory containing the primary file
 	PrimaryBase string   // Base name of primary file (without extension)
 	InputFiles  []string // All input files (primary + resolved secondary files)
@@ -62,15 +64,19 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		return ScanResult{Error: fmt.Sprintf("cannot resolve scan root: %v", err)}
 	}
 
-	primaryFiles, err := glob.UnderRoot(root, opts.PrimaryPattern)
+	primaryFiles, err := glob.FilesUnderRoot(root, opts.PrimaryPattern)
 	if err != nil {
 		return ScanResult{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
 	}
 
 	if len(primaryFiles) == 0 {
-		return ScanResult{
-			Error: fmt.Sprintf("no files found matching pattern: %s", opts.PrimaryPattern),
+		msg := fmt.Sprintf("no files found matching pattern: %s", opts.PrimaryPattern)
+		// A bare "*.xml" reads as "every .xml file", but it searches the root
+		// folder alone.
+		if !strings.Contains(opts.PrimaryPattern, "**") && !strings.Contains(filepath.ToSlash(opts.PrimaryPattern), "/") {
+			msg += "; to search subfolders too, use **/" + opts.PrimaryPattern
 		}
+		return ScanResult{Error: msg}
 	}
 
 	var jobs []JobFiles
@@ -78,15 +84,15 @@ func ScanFiles(opts ScanOptions) ScanResult {
 	var warnings []string
 
 	for _, primaryFile := range primaryFiles {
+		display := displayPath(root, primaryFile)
 		primaryDir := filepath.Dir(primaryFile)
 		primaryBase := strings.TrimSuffix(filepath.Base(primaryFile), filepath.Ext(primaryFile))
 
 		// A glob matches directories as readily as files, and "model.inp/" is
 		// not something the archive can carry: attaching it failed the job at
-		// tar time, after the run had started.
-		if info, err := os.Stat(primaryFile); err == nil && !info.Mode().IsRegular() {
-			skippedFiles = append(skippedFiles, fmt.Sprintf("%s: %s",
-				displayPath(primaryDir, primaryFile), notRegularReason(info)))
+		// tar time, after the run had started. So did a link to a missing file.
+		if info, err := os.Stat(primaryFile); err != nil || !info.Mode().IsRegular() {
+			skippedFiles = append(skippedFiles, fmt.Sprintf("%s: %s", display, notRegularReason(info, err)))
 			continue
 		}
 
@@ -100,18 +106,16 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		skipReason := ""
 
 		for _, secPattern := range opts.SecondaryPatterns {
-			secondaryFiles, warning, skip := ResolveSecondaryPattern(
-				primaryDir, primaryBase, primaryFile, secPattern,
-			)
+			secondaryFiles, warning, skip := ResolveSecondaryPattern(primaryDir, primaryBase, secPattern)
 
 			if skip != "" {
-				skipReason = fmt.Sprintf("%s: %s", displayPath(primaryDir, primaryFile), skip)
+				skipReason = fmt.Sprintf("%s: %s", display, skip)
 				skipJob = true
 				break
 			}
 
 			if warning != "" {
-				jobWarnings = append(jobWarnings, warning)
+				jobWarnings = append(jobWarnings, fmt.Sprintf("%s: %s", display, warning))
 			}
 
 			for _, secondaryFile := range secondaryFiles {
@@ -125,7 +129,7 @@ func ScanFiles(opts ScanOptions) ScanResult {
 				}
 				if taken {
 					skipReason = fmt.Sprintf("%s: %s and %s would both be archived as %q",
-						displayPath(primaryDir, primaryFile), existing, secondaryFile, name)
+						display, existing, secondaryFile, name)
 					skipJob = true
 					break
 				}
@@ -146,6 +150,7 @@ func ScanFiles(opts ScanOptions) ScanResult {
 
 		jobs = append(jobs, JobFiles{
 			PrimaryFile: primaryFile,
+			PrimaryRel:  display,
 			PrimaryDir:  primaryDir,
 			PrimaryBase: primaryBase,
 			InputFiles:  inputFiles,
@@ -163,12 +168,10 @@ func ScanFiles(opts ScanOptions) ScanResult {
 }
 
 // ResolveSecondaryPattern resolves a secondary file pattern relative to the primary file.
-// Returns: (matched files, warning message, skip reason)
+// Returns: (matched files, warning message, skip reason), for the caller to
+// put the primary file's name in front of.
 // If skip reason is non-empty, the job should be skipped.
-func ResolveSecondaryPattern(
-	primaryDir, primaryBase, primaryFile string,
-	pattern SecondaryPattern,
-) ([]string, string, string) {
+func ResolveSecondaryPattern(primaryDir, primaryBase string, pattern SecondaryPattern) ([]string, string, string) {
 	// A "*" stands for the primary file's stem, which is what attaches
 	// "case1.mesh" to "case1.inp"; a pattern without one names a fixed file
 	// every job in the scan shares.
@@ -186,17 +189,16 @@ func ResolveSecondaryPattern(
 		if pattern.Required {
 			return nil, "", fmt.Sprintf("required secondary file not found: %s", resolvedPattern)
 		}
-		return nil, fmt.Sprintf("%s: optional file not found: %s", displayPath(primaryDir, primaryFile), resolvedPattern), ""
+		return nil, fmt.Sprintf("optional file not found: %s", resolvedPattern), ""
 	}
 
 	// Existing but not a file: the same tar-time failure a directory primary
 	// causes, so it is caught here for the same reason.
 	if err == nil && !info.Mode().IsRegular() {
 		if pattern.Required {
-			return nil, "", fmt.Sprintf("required secondary file %s %s", resolvedPattern, notRegularReason(info))
+			return nil, "", fmt.Sprintf("required secondary file %s %s", resolvedPattern, notRegularReason(info, nil))
 		}
-		return nil, fmt.Sprintf("%s: optional file %s %s",
-			displayPath(primaryDir, primaryFile), resolvedPattern, notRegularReason(info)), ""
+		return nil, fmt.Sprintf("optional file %s %s", resolvedPattern, notRegularReason(info, nil)), ""
 	}
 
 	return []string{fullPath}, "", ""
@@ -204,21 +206,29 @@ func ResolveSecondaryPattern(
 
 // notRegularReason says why a matched path cannot be archived, naming the case
 // that actually happens rather than leaving the user to work out what a
-// non-regular file is.
-func notRegularReason(info os.FileInfo) string {
-	if info.IsDir() {
+// non-regular file is. err is from os.Stat, which is where a link to a missing
+// file fails.
+func notRegularReason(info os.FileInfo, err error) string {
+	switch {
+	case err != nil:
+		return fmt.Sprintf("cannot be read: %v", errors.Unwrap(err)) // the cause, without the path again
+	case info.IsDir():
 		return "is a directory, not a file"
 	}
 	return "is not a regular file"
 }
 
-// displayPath names a primary file as "<parent folder>/<basename>".
+// displayPath names a primary file by its path from the scan root.
 //
-// A bare base name is ambiguous exactly where these messages matter: the layout
-// a scan pattern like "*/model.inp" exists for gives every match the same base
-// name, so lines about two different files would otherwise be byte-identical —
-// indistinguishable to the reader, and one React key to the GUI list rendering
-// them.
-func displayPath(primaryDir, primaryFile string) string {
-	return filepath.Join(filepath.Base(primaryDir), filepath.Base(primaryFile))
+// Anything shorter is ambiguous exactly where these messages matter: the
+// layouts a pattern like "*/model.inp" or "**/vasprun.xml" exists for give
+// many matches the same base name, and often the same folder name too, so
+// lines about two different files would otherwise be byte-identical:
+// indistinguishable to the reader, and one React key to the GUI list
+// rendering them.
+func displayPath(root, primaryFile string) string {
+	if rel, err := filepath.Rel(root, primaryFile); err == nil {
+		return rel
+	}
+	return primaryFile
 }

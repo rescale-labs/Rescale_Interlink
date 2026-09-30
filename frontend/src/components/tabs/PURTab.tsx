@@ -1035,6 +1035,9 @@ export function PURTab() {
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p className="mt-1 text-xs text-gray-500">
+                  Use <code>**/</code> to search subfolders, e.g. <code>**/vasprun.xml</code>
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
                   Each matching file creates one job, whose upload holds only that
                   file and its secondaries. Use Common Files for inputs shared by
                   every job.
@@ -1183,7 +1186,7 @@ export function PURTab() {
             </div>
           )}
 
-          {/* A file scan globs one pattern under the root, so neither option applies there. */}
+          {/* A file scan's pattern sets how deep it looks ("**" reaches subfolders), so neither option applies there. */}
           {scanOptions.scanMode === 'folders' && (
           <div className="flex items-center gap-4 mb-6">
             <label className="flex items-center gap-2 cursor-pointer">
@@ -1497,8 +1500,9 @@ export function PURTab() {
               )}
               {scanWarnings.length > 0 && (
                 <ul className={clsx('list-disc ml-5 text-xs space-y-0.5', scanSkippedFiles.length > 0 && 'mt-2')}>
-                  {scanWarnings.map((warning) => (
-                    <li key={warning}>{warning}</li>
+                  {/* Two secondary patterns can give one file the same warning twice. */}
+                  {scanWarnings.map((warning, i) => (
+                    <li key={`${i}:${warning}`}>{warning}</li>
                   ))}
                 </ul>
               )}
