@@ -1,27 +1,24 @@
-# check.ps1 --- compile + test the Go code using the portable toolchain.
+# check.ps1 --- vet + test the Go code using the portable toolchain.
 #
 #   powershell -ExecutionPolicy Bypass -File build\windows_local_build\check.ps1
 #   powershell -ExecutionPolicy Bypass -File build\windows_local_build\check.ps1 -Test
-#   powershell -ExecutionPolicy Bypass -File build\windows_local_build\check.ps1 -Goos linux
 #
-# Mirrors the portable toolchain layout from _env.ps1. Builds the whole module
-# for the requested GOOS (default: windows), and optionally runs `go test`,
-# both in FIPS 140-3 mode (GOFIPS140=certified, -tags fips) as CI does.
-# Run install-deps.ps1 first to provision the toolchain.
+# Mirrors the portable toolchain layout from _env.ps1. Checks the packages CI
+# tests (.github/workflows/test.yml): all but the root package, which embeds
+# the frontend build that dist.ps1 makes. `go vet` compiles them and their
+# tests (`go build` refuses a package that has only tests), and -Test runs
+# `go test`, both in FIPS 140-3 mode (GOFIPS140=certified, -tags fips) as CI
+# does. Run install-deps.ps1 first to provision the toolchain.
 
 [CmdletBinding()]
 param(
-    # Target GOOS for the build (windows | linux | darwin).
-    [string]$Goos = 'windows',
-    # Also run `go test ./...`.
+    # Also run `go test`.
     [switch]$Test,
-    # Restrict build/test to these packages (default: ./...).
-    [string]$Packages = './...'
+    # Restrict vet/test to these packages (default: the packages CI tests).
+    [string]$Packages
 )
 
 . "$PSScriptRoot\_env.ps1"
-
-function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
 
 if (-not (Test-Path (Join-Path $Script:GoBin 'go.exe'))) {
     throw "Go not found in toolchain. Run: powershell -ExecutionPolicy Bypass -File build\windows_local_build\install-deps.ps1"
@@ -33,22 +30,23 @@ $go = Join-Path $Script:GoBin 'go.exe'
 Push-Location $Script:RepoRoot
 try {
     $env:GOFIPS140 = 'certified'
-    $env:GOOS = $Goos
-    # Tests must run on the host GOOS; clear cross-compile target for -Test.
-    Write-Step "go build ($Goos) $Packages"
-    & $go build -tags fips $Packages
-    if ($LASTEXITCODE -ne 0) { throw "go build failed ($LASTEXITCODE)" }
+    $pkgs = $Packages
+    if (-not $pkgs) {
+        $pkgs = & $go list -e ./... | Where-Object { $_ -ne 'github.com/rescale/rescale-int' }
+        if ($LASTEXITCODE -ne 0) { throw "go list failed ($LASTEXITCODE)" }
+    }
+    Write-Step "go vet"
+    & $go vet -tags fips $pkgs
+    if ($LASTEXITCODE -ne 0) { throw "go vet failed ($LASTEXITCODE)" }
 
     if ($Test) {
-        Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
-        Write-Step "go test $Packages"
-        & $go test -tags fips $Packages
+        Write-Step "go test"
+        & $go test -tags fips $pkgs
         if ($LASTEXITCODE -ne 0) { throw "go test failed ($LASTEXITCODE)" }
     }
     Write-Step "OK"
 }
 finally {
-    Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
     Remove-Item Env:\GOFIPS140 -ErrorAction SilentlyContinue
     Pop-Location
 }

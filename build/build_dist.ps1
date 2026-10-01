@@ -120,7 +120,6 @@ Write-Host "[3/7] Installing WiX Toolset v4..."
 $prevErrorAction = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 dotnet tool install --global wix --version 6.0.2 2>&1 | Out-Host
-$wixInstallExitCode = $LASTEXITCODE
 $ErrorActionPreference = $prevErrorAction
 
 # Exit code 0 = success, exit code 1 may just mean "already installed" - check if wix is available
@@ -230,34 +229,14 @@ Write-Host $wailsResult
 Write-Host ""
 Write-Host "[4/7] Building Wails application with FIPS 140-3..."
 
-# On GitHub Actions, the repo is already checked out to the workspace root.
-# On Rescale HPC, the script clones into $env:REPO_NAME and must cd into it.
-if ($env:REPO_NAME -and (Test-Path $env:REPO_NAME)) {
-    Set-Location $env:REPO_NAME
-}
-
 $BuildTime = Get-Date -Format "yyyy-MM-dd"
 $LdFlags = "-s -w -X github.com/rescale/rescale-int/internal/version.Version=$($ReleaseTag) -X github.com/rescale/rescale-int/internal/version.BuildTime=$BuildTime"
 
 Write-Host "Build flags: GOFIPS140=certified"
 Write-Host "LDFLAGS: $LdFlags"
 
-# Install frontend dependencies from the lockfile. `npm ci` is required (not
-# `npm install`) so release builds resolve to exactly the audited dependency
-# versions in package-lock.json.
-Write-Host "Installing frontend dependencies..."
-Set-Location (Join-Path $WorkDir "frontend")
-# Temporarily allow errors since npm writes progress to stderr.
-$prevErrorAction = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-cmd /c "npm ci 2>&1" | Out-Host
-$npmExitCode = $LASTEXITCODE
-$ErrorActionPreference = $prevErrorAction
+# The builds below take paths relative to the checkout.
 Set-Location $WorkDir
-
-if ($npmExitCode -ne 0) {
-    throw "npm ci failed with exit code: $npmExitCode"
-}
 
 # Build the CLI and tray while the checkout is still clean. wails build
 # regenerates frontend\wailsjs and writes build\windows\info.json, and a binary
@@ -285,6 +264,8 @@ if ($trayExitCode -ne 0 -or -not (Test-Path "$BinDir\rescale-int-tray.exe")) { t
 
 # Build GUI binary using Wails (required for embedded frontend assets)
 # NOTE: Must use wails build, not go build, because the app embeds frontend assets
+# wails.json's frontend:install is 'npm ci', so the frontend gets exactly what
+# package-lock.json pins.
 Write-Host "Building rescale-int-gui.exe with Wails..."
 $WailsExe = "$env:GOPATH\bin\wails.exe"
 # Wails shells out to `go`; force our FIPS-certified toolchain by putting it
@@ -423,62 +404,6 @@ try {
 Write-Host ""
 Write-Host "[5/7] Creating support files..."
 
-$ReadmeContent = @"
-Rescale Interlink $($ReleaseTag)
-============================
-
-Unified CLI and GUI for Rescale HPC platform.
-
-Installation Directory: %LOCALAPPDATA%\Rescale\Interlink\
-
-Components:
-- rescale-int-gui.exe  : GUI application (double-click to run)
-- rescale-int.exe      : CLI tool (run from command prompt)
-- rescale-int-tray.exe : System tray companion
-
-Usage:
-GUI Mode:
-  Double-click rescale-int-gui.exe, or run from Start Menu
-
-CLI Mode:
-  rescale-int --help
-  rescale-int jobs list
-  rescale-int upload file.txt
-
-Documentation: https://docs.rescale.com
-Source/issues: https://github.com/rescale-labs/Rescale_Interlink
-Support:       support@rescale.com
-
-Copyright (c) 2026 Rescale, Inc.
-"@
-
-# The package's text files keep Windows line endings whatever the checkout has.
-("$ReadmeContent`n" -replace "`r?`n", "`r`n") | Out-File -FilePath "$BinDir\README.txt" -Encoding UTF8 -NoNewline
-
-$LicenseContent = @"
-MIT License
-
-Copyright (c) 2026 Rescale, Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-"@
-
-("$LicenseContent`n" -replace "`r?`n", "`r`n") | Out-File -FilePath "$BinDir\LICENSE.txt" -Encoding UTF8 -NoNewline
+& (Join-Path $PSScriptRoot "write_support_files.ps1") -BinDir $BinDir -Version $ReleaseTag
 
 Write-Host "Support files created"

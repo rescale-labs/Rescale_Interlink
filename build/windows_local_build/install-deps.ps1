@@ -5,8 +5,9 @@
 # Downloads portable (zip) distributions of Go, Node.js, and the Wails CLI
 # into build\windows_local_build\.toolchain\ and sets process-local paths.
 # Nothing is installed system-wide, no registry/PATH changes persist, no
-# administrator rights are needed. Re-running is idempotent: present tools are
-# skipped (use -Force to re-download).
+# administrator rights are needed. Re-running is idempotent: a tool already at
+# its pinned version is skipped, one at another version is reinstalled (use
+# -Force to reinstall them all).
 
 [CmdletBinding()]
 param(
@@ -15,9 +16,9 @@ param(
 
 . "$PSScriptRoot\_env.ps1"
 
-function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
-function Write-Ok($msg)   { Write-Host "    $msg"  -ForegroundColor Green }
-function Write-Warn2($m)  { Write-Host "    $m"    -ForegroundColor Yellow }
+# Windows PowerShell 5.1 downloads and unzips many times slower while it
+# draws progress bars.
+$ProgressPreference = 'SilentlyContinue'
 
 # TLS 1.2 for older PowerShell on Windows.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -44,41 +45,44 @@ function Get-PinnedFile {
     Write-Ok "Checksum OK: $got"
 }
 
+# True, after saying so, when a tool is already at its pinned version and
+# -Force is not given. $Have is the version installed, empty if none is.
+function Test-Pinned([string]$Name, [string]$Have, [string]$Want) {
+    if ($Have -and $Have -ne $Want) { Write-Ok "$Name $Have found, pinned $Want --- reinstalling." }
+    if ($Force -or $Have -ne $Want) { return $false }
+    Write-Ok "$Name $Want already present --- skipping. (-Force to reinstall)"
+    return $true
+}
+
 # Download to a temp file then extract into a destination dir, flattening the
-# single top-level folder the archive usually contains.
+# single top-level folder the archive usually contains. Both stay inside the
+# toolchain dir: Windows PowerShell 5.1 cannot move a folder to another drive.
 function Install-FromZip {
     param(
         [string]$Name,
         [string]$Url,
         [string]$DestDir,
-        [string]$TopLevelFolder  # the folder inside the zip to flatten away ('' = none)
+        [string]$TopLevelFolder  # the folder inside the zip to flatten away
     )
-    if ((Test-Path $DestDir) -and -not $Force) {
-        Write-Ok "$Name already present ($DestDir) --- skipping. (-Force to re-download)"
-        return
-    }
     if (Test-Path $DestDir) { Remove-Item -Recurse -Force $DestDir }
 
-    $tmp = Join-Path $env:TEMP ("interlink-" + [IO.Path]::GetRandomFileName() + ".zip")
+    $tmp = Join-Path $Script:ToolchainDir 'download.zip'
     Write-Step "Downloading $Name"
     Get-PinnedFile -Url $Url -Path $tmp
 
     Write-Step "Extracting $Name"
-    $stage = Join-Path $env:TEMP ("interlink-stage-" + [IO.Path]::GetRandomFileName())
+    # A short name: the deepest paths in the Node archive come near MAX_PATH.
+    $stage = Join-Path $Script:ToolchainDir 'stage'
+    if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     Expand-Archive -Path $tmp -DestinationPath $stage -Force
 
-    if ($TopLevelFolder) {
-        # Archive contains one wrapper folder (e.g. go\, node-vXX-win-x64\).
-        $inner = Join-Path $stage $TopLevelFolder
-        if (-not (Test-Path $inner)) {
-            # Fall back to the single child dir if the name wasn't exact.
-            $inner = (Get-ChildItem $stage -Directory | Select-Object -First 1).FullName
-        }
-        Move-Item $inner $DestDir
-    } else {
-        New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
-        Move-Item (Join-Path $stage '*') $DestDir
+    # Archive contains one wrapper folder (e.g. go\, node-vXX-win-x64\).
+    $inner = Join-Path $stage $TopLevelFolder
+    if (-not (Test-Path $inner)) {
+        # Fall back to the single child dir if the name wasn't exact.
+        $inner = (Get-ChildItem $stage -Directory | Select-Object -First 1).FullName
     }
+    Move-Item $inner $DestDir
 
     Remove-Item -Force $tmp
     Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
@@ -87,21 +91,28 @@ function Install-FromZip {
 
 # --- Go ----------------------------------------------------------------------
 $goZipUrl = "https://go.dev/dl/go$($Script:GoVersion).windows-$arch.zip"
-Install-FromZip -Name "Go $($Script:GoVersion)" -Url $goZipUrl -DestDir $Script:GoRoot -TopLevelFolder 'go'
+$goVersionFile = Join-Path $Script:GoRoot 'VERSION'
+$have = if (Test-Path $goVersionFile) { (Get-Content $goVersionFile -TotalCount 1) -replace '^go' }
+if (-not (Test-Pinned 'Go' $have $Script:GoVersion)) {
+    Install-FromZip -Name "Go $($Script:GoVersion)" -Url $goZipUrl -DestDir $Script:GoRoot -TopLevelFolder 'go'
+}
 
 # --- Node.js -----------------------------------------------------------------
 $nodeFolder = "node-v$($Script:NodeVersion)-win-$nodeArch"
 $nodeZipUrl = "https://nodejs.org/dist/v$($Script:NodeVersion)/$nodeFolder.zip"
-Install-FromZip -Name "Node $($Script:NodeVersion)" -Url $nodeZipUrl -DestDir $Script:NodeDir -TopLevelFolder $nodeFolder
+$nodeExe = Join-Path $Script:NodeDir 'node.exe'
+$have = if (Test-Path $nodeExe) { (& $nodeExe --version) -replace '^v' }
+if (-not (Test-Pinned 'Node' $have $Script:NodeVersion)) {
+    Install-FromZip -Name "Node $($Script:NodeVersion)" -Url $nodeZipUrl -DestDir $Script:NodeDir -TopLevelFolder $nodeFolder
+}
 
 # Activate paths now so `go install` and version checks use the portable tools.
 Use-InterlinkToolchain
 
 # --- Wails CLI ---------------------------------------------------------------
 $wailsExe = Join-Path $Script:GoPathBin 'wails.exe'
-if ((Test-Path $wailsExe) -and -not $Force) {
-    Write-Ok "Wails CLI already present ($wailsExe) --- skipping."
-} else {
+$have = if (Test-Path $wailsExe) { & $wailsExe version | Select-Object -First 1 }
+if (-not (Test-Pinned 'Wails CLI' $have $Script:WailsVersion)) {
     Write-Step "Installing Wails CLI $($Script:WailsVersion) (go install)"
     & (Join-Path $Script:GoBin 'go.exe') install "github.com/wailsapp/wails/v2/cmd/wails@$($Script:WailsVersion)"
     if ($LASTEXITCODE -ne 0) { throw "wails install failed (exit $LASTEXITCODE)" }
@@ -115,14 +126,14 @@ if ((Test-Path $wailsExe) -and -not $Force) {
 # that exceed MAX_PATH (260 chars) under this deep toolchain dir, which those
 # APIs cannot create. bsdtar handles long paths.
 $dotnetExe = Join-Path $Script:DotnetDir 'dotnet.exe'
-if ((Test-Path $dotnetExe) -and -not $Force) {
-    Write-Ok ".NET SDK already present ($Script:DotnetDir) --- skipping. (-Force to re-download)"
-} else {
+# The SDK's folder under sdk\ is named for its version.
+$have = if (Test-Path $dotnetExe) { Get-ChildItem (Join-Path $Script:DotnetDir 'sdk') -Directory -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Name }
+if (-not (Test-Pinned '.NET SDK' $have $Script:DotnetVersion)) {
     Write-Step "Installing .NET SDK $($Script:DotnetVersion)"
     if (Test-Path $Script:DotnetDir) { Remove-Item -Recurse -Force $Script:DotnetDir }
     $dotnetArch = if ($arch -eq 'arm64') { 'arm64' } else { 'x64' }
     $dotnetZipUrl = "https://builds.dotnet.microsoft.com/dotnet/Sdk/$($Script:DotnetVersion)/dotnet-sdk-$($Script:DotnetVersion)-win-$dotnetArch.zip"
-    $dotnetZip = Join-Path $env:TEMP ("dotnet-sdk-" + [IO.Path]::GetRandomFileName() + ".zip")
+    $dotnetZip = Join-Path $Script:ToolchainDir 'download.zip'
     Get-PinnedFile -Url $dotnetZipUrl -Path $dotnetZip
 
     New-Item -ItemType Directory -Force -Path $Script:DotnetDir | Out-Null
@@ -145,9 +156,9 @@ Use-InterlinkToolchain
 # which dotnet keeps under the user profile by default; that's fine -- they're
 # small and idempotent.
 $wixExe = Join-Path $Script:DotnetTools 'wix.exe'
-if ((Test-Path $wixExe) -and -not $Force) {
-    Write-Ok "WiX already present ($wixExe) --- skipping. (-Force to re-download)"
-} else {
+# wix --version may add "+" and a commit to the version.
+$have = if (Test-Path $wixExe) { (& $wixExe --version | Select-Object -First 1) -replace '\+.*' }
+if (-not (Test-Pinned 'WiX' $have $Script:WixVersion)) {
     Write-Step "Installing WiX $($Script:WixVersion) (.NET tool)"
     if (Test-Path $wixExe) {
         & $dotnetExe tool uninstall wix --tool-path $Script:DotnetTools 2>&1 | Out-Null
@@ -172,6 +183,6 @@ Write-Host ""
 Write-Ok "All dependencies live under: $($Script:ToolchainDir)"
 Write-Ok "Next:"
 Write-Ok "  dev.ps1        -- run the GUI with hot reload"
-Write-Ok "  check.ps1      -- compile + test the Go code"
+Write-Ok "  check.ps1      -- vet the Go packages CI tests; -Test also runs their tests"
 Write-Ok "  dist.ps1       -- build GUI + CLI + tray binaries"
 Write-Ok "  installer.ps1  -- build the MSI (uses the bundled .NET SDK + WiX)"

@@ -24,9 +24,6 @@ param(
 
 . "$PSScriptRoot\_env.ps1"
 
-function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
-function Write-Ok($msg)   { Write-Host "    $msg"  -ForegroundColor Green }
-
 # Sanity: toolchain present?
 if (-not (Test-Path (Join-Path $Script:GoBin 'go.exe'))) {
     throw "Go not found in toolchain. Run: powershell -ExecutionPolicy Bypass -File build\windows_local_build\install-deps.ps1"

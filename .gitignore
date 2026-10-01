@@ -1,21 +1,6 @@
-# ═══════════════════════════════════════════════════════════════════
-# WHITELIST-BASED APPROACH
-# ═══════════════════════════════════════════════════════════════════
-#
-# Philosophy: This is a PUBLIC repository
-# - Production code and public docs: ALLOWED
-# - Internal dev files, scripts, logs: BLOCKED
-#
-# ALLOWED directories:
-#   cmd/, internal/, frontend/, installer/, .github/
-# ALLOWED config files:
-#   go.mod, go.sum, Makefile, wails.json, .gitignore
-# ALLOWED docs:
-#   README.md, LICENSE, CLI_GUIDE.md, ARCHITECTURE.md, CONTRIBUTING.md,
-#   TESTING.md, RELEASE_NOTES.md, FEATURE_SUMMARY.md
-#
-# Everything else is BLOCKED by default
-# ═══════════════════════════════════════════════════════════════════
+# What git leaves out of this public repository: build output and tool state,
+# local scripts, notes and logs, files that may hold credentials, every .txt
+# file, and every .md file but the public docs listed at the end.
 
 # Binaries (in project root, not in bin/)
 /rescale-int
@@ -50,16 +35,12 @@ bin/
 dist/
 _build/
 
-# Portable local-build toolchain (Go/Node/Wails/.NET/WiX) and its outputs.
+# Portable local-build toolchain (Go/Node/Wails/.NET/WiX).
 # Provisioned by build/windows_local_build/install-deps.ps1; never committed.
 build/windows_local_build/.toolchain/
-build/windows_local_build/dist/
-build/windows_local_build/*.log
 
 # Node.js dependencies (install with npm install)
-node_modules/
-frontend/node_modules/
-frontend/node_modules
+node_modules
 
 # Frontend build cache (regenerated on each build)
 frontend/package.json.md5
@@ -108,8 +89,6 @@ BINARY_SIZE_INVESTIGATION.md
 CHECKPOINT_SESSION.md
 # Session checkpoint files
 CHECKPOINT_*.md
-# Root binary (wrong location) - must have leading slash to not match cmd/rescale-int/
-/rescale-int
 CONTINUATION_PLAN*.md
 
 # Local assistant files (never commit)

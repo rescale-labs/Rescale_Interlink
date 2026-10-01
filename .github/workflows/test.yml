@@ -17,11 +17,12 @@ defaults:
   run:
     shell: bash
 
-# Both jobs leave out the root package: it embeds frontend/dist, which is not
-# in the repository, and it has no tests. Each job then reruns, verbosely, the
-# tests that only mean something on its platform and fails unless each passed.
-# That check runs after a failure elsewhere too, so every run reports on them.
-# So does the Go cache save, which a plain actions/cache step skips on failure.
+# The Linux and Windows jobs leave out the root package: it embeds
+# frontend/dist, which is not in the repository, and it has no tests. Each then
+# reruns, verbosely, the tests that only mean something on its platform and
+# fails unless each passed. That check runs after a failure elsewhere too, so
+# every run reports on them. So does the Go cache save, which a plain
+# actions/cache step skips on failure.
 jobs:
   linux:
     name: Linux
@@ -62,19 +63,25 @@ jobs:
       - name: Check the Linux-only tests ran
         if: ${{ !cancelled() }}
         env:
-          # piddomain_linux_test.go, and the test that reads this machine's own
-          # identifier and PID namespace.
+          # package:test for piddomain_linux_test.go, and the test that reads
+          # this machine's own identifier and PID namespace.
           PLATFORM_TESTS: >-
-            TestReadPIDDomain_TellsTwoNamespacesOfOneMachineApart
-            TestReadPIDDomain_WithoutTheParts
-            TestReadPIDDomain_RefusesAMachineIDThatIsNotOne
-            TestReadPIDDomain_PassesAnInvalidMachineIDForTheFallback
-            TestReadPIDDomain_FallsBackToTheSecondMachineIDFile
-            TestReadPIDDomain_TheSystemNamesOneAndGoesOnNamingIt
+            ./internal/cloud/state:TestReadPIDDomain_TellsTwoNamespacesOfOneMachineApart
+            ./internal/cloud/state:TestReadPIDDomain_WithoutTheParts
+            ./internal/cloud/state:TestReadPIDDomain_RefusesAMachineIDThatIsNotOne
+            ./internal/cloud/state:TestReadPIDDomain_PassesAnInvalidMachineIDForTheFallback
+            ./internal/cloud/state:TestReadPIDDomain_FallsBackToTheSecondMachineIDFile
+            ./internal/cloud/state:TestReadPIDDomain_TheSystemNamesOneAndGoesOnNamingIt
         run: |
-          GOFIPS140=certified go test -tags fips -count=1 -race -v -run "^(${PLATFORM_TESTS// /|})\$" ./internal/cloud/state | tee state.log
-          for test in $PLATFORM_TESTS; do
-            grep -q -F -- "--- PASS: $test (" state.log || { echo "::error::$test did not run and pass"; exit 1; }
+          # Each package runs once, verbosely; each of its listed tests must pass.
+          names=$(for pt in $PLATFORM_TESTS; do printf '%s|' "${pt#*:}"; done)
+          pkgs=$(for pt in $PLATFORM_TESTS; do echo "${pt%%:*}"; done | sort -u)
+          for pkg in $pkgs; do
+            GOFIPS140=certified go test -tags fips -count=1 -race -v -run "^(${names%|})\$" "$pkg" | tee test.log
+            for pt in $PLATFORM_TESTS; do
+              [ "${pt%%:*}" = "$pkg" ] || continue
+              grep -q -F -- "--- PASS: ${pt#*:} (" test.log || { echo "::error::$pt did not run and pass"; exit 1; }
+            done
           done
 
       - name: Save Go modules and build output
@@ -123,37 +130,25 @@ jobs:
             grep -v -x -F github.com/rescale/rescale-int |
             GOFIPS140=certified xargs go test -tags fips -count=1
 
-      - name: Check the Windows liveness tests ran
+      - name: Check the Windows-only tests ran
         if: ${{ !cancelled() }}
         env:
-          # The Windows-only exited-child test, and the tests that reach
-          # piddomain_windows.go and, for a live PID, liveness_windows.go.
+          # package:test for the Windows-only exited-child test; the tests that
+          # reach piddomain_windows.go and, for a live PID, liveness_windows.go;
+          # the Windows-only tests of the retired service, the per-user pipes,
+          # the tray and drive-relative scan roots; and the tests that reach the
+          # Windows process checks of 'daemon stop --force'.
           PLATFORM_TESTS: >-
-            TestWindowsOpenProcessLiveness
-            TestProbeProcessLiveness_AnswersAboutThisProcess
-            TestProbeProcessLiveness_AnExitedChildStillHeldOpenIsDead
-            TestReadPIDDomain_TheSystemNamesOneAndGoesOnNamingIt
-        run: |
-          GOFIPS140=certified go test -tags fips -count=1 -v -run "^(${PLATFORM_TESTS// /|})\$" ./internal/cloud/state | tee state.log
-          for test in $PLATFORM_TESTS; do
-            grep -q -F -- "--- PASS: $test (" state.log || { echo "::error::$test did not run and pass"; exit 1; }
-          done
-
-      - name: Check the Windows service, pipe and tray tests ran
-        if: ${{ !cancelled() }}
-        env:
-          # package:test for the Windows-only tests of the retired service, the
-          # per-user pipes, the tray and drive-relative scan roots, and the tests
-          # that reach the Windows process checks of 'daemon stop --force'.
-          PLATFORM_TESTS: >-
-            ./cmd/rescale-int-tray:TestFailedActionsReturn
             ./cmd/rescale-int-tray:TestStartRefusalsAreShown
             ./cmd/rescale-int-tray:TestStartupStartsOnlyWhenEnabledAndShowsWhy
             ./cmd/rescale-int-tray:TestStartupWaitsForTheDownloadFolder
+            ./internal/cloud/state:TestWindowsOpenProcessLiveness
+            ./internal/cloud/state:TestProbeProcessLiveness_AnswersAboutThisProcess
+            ./internal/cloud/state:TestProbeProcessLiveness_AnExitedChildStillHeldOpenIsDead
+            ./internal/cloud/state:TestReadPIDDomain_TheSystemNamesOneAndGoesOnNamingIt
             ./internal/daemon:TestKillDaemon_EndsOnlyThisUsersDaemon
             ./internal/daemon:TestProcessInfo_ReadsAnotherProcesssCommandLine
             ./internal/ipc:TestDialUserPipe_RefusesAnotherUsersPipe
-            ./internal/ipc:TestEveryPath_UsesThePipeNamedForTheUser
             ./internal/ipc:TestListenUserPipe_DoesNotJoinAnExistingPipe
             ./internal/ipc:TestNoSID_NoPipe
             ./internal/ipc:TestPipeOwnedByAnotherUser
@@ -168,10 +163,15 @@ jobs:
             ./internal/util/multipart:TestScanDirectories_DriveRelativeRoots
             ./internal/wailsapp:TestStartDaemonSaysWhyItCannotStart
         run: |
-          for pt in $PLATFORM_TESTS; do
-            pkg=${pt%%:*} test=${pt#*:}
-            GOFIPS140=certified go test -tags fips -count=1 -v -run "^${test}\$" "$pkg" | tee test.log
-            grep -q -F -- "--- PASS: $test (" test.log || { echo "::error::$test did not run and pass"; exit 1; }
+          # Each package runs once, verbosely; each of its listed tests must pass.
+          names=$(for pt in $PLATFORM_TESTS; do printf '%s|' "${pt#*:}"; done)
+          pkgs=$(for pt in $PLATFORM_TESTS; do echo "${pt%%:*}"; done | sort -u)
+          for pkg in $pkgs; do
+            GOFIPS140=certified go test -tags fips -count=1 -v -run "^(${names%|})\$" "$pkg" | tee test.log
+            for pt in $PLATFORM_TESTS; do
+              [ "${pt%%:*}" = "$pkg" ] || continue
+              grep -q -F -- "--- PASS: ${pt#*:} (" test.log || { echo "::error::$pt did not run and pass"; exit 1; }
+            done
           done
 
       - name: Save Go modules and build output
@@ -182,3 +182,50 @@ jobs:
             ~/go/pkg/mod
             ~/AppData/Local/go-build
           key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # release.yml's verify job less the Go tests, which the jobs above run: the
+  # frontend's tests, lint and build, then go vet, which needs that build for
+  # the root package. On macOS as there, since on Linux the root package would
+  # need the WebKitGTK headers.
+  frontend-and-vet:
+    name: Frontend and go vet
+    runs-on: macos-14  # Apple Silicon (M1) runner
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Go 1.26.7
+        run: |
+          curl -fL -o go1.26.7.darwin-arm64.tar.gz https://go.dev/dl/go1.26.7.darwin-arm64.tar.gz
+          # Official sha256 from https://go.dev/dl/?mode=json&include=all
+          echo "020a1e8224811be75163e920bc77e0926a1390a6aeea19bdcf23f74b9d749f6d  go1.26.7.darwin-arm64.tar.gz" | shasum -a 256 -c -
+          sudo rm -rf /usr/local/go
+          sudo tar -C /usr/local -xzf go1.26.7.darwin-arm64.tar.gz
+          rm go1.26.7.darwin-arm64.tar.gz
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6.4.0
+        with:
+          node-version: '24.21.0'
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Run frontend tests
+        run: npm run test:run
+        working-directory: frontend
+
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: frontend
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      - name: Vet Go sources
+        run: GOFIPS140=certified go vet -tags fips ./...

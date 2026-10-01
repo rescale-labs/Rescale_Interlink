@@ -25,9 +25,6 @@ param(
 
 . "$PSScriptRoot\_env.ps1"
 
-function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
-function Write-Ok($msg)   { Write-Host "    $msg"  -ForegroundColor Green }
-
 Use-InterlinkToolchain
 
 $distDir      = Join-Path $PSScriptRoot 'dist'

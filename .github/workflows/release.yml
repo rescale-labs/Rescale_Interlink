@@ -315,9 +315,6 @@ jobs:
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
 
-      - name: Install frontend dependencies
-        run: cd frontend && npm ci
-
       # Build the CLI while the checkout is still clean. wails build regenerates
       # frontend/wailsjs, and a CLI built after it is stamped vcs.modified=true.
       - name: Build standalone CLI binary
@@ -330,6 +327,8 @@ jobs:
           GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             go build -trimpath -tags fips -ldflags "$LDFLAGS" -o rescale-int ./cmd/rescale-int
 
+      # wails.json's frontend:install is 'npm ci', so the frontend gets exactly
+      # what package-lock.json pins.
       - name: Build Wails GUI application
         run: |
           BUILD_TIME=$(date +%Y-%m-%d)
@@ -337,10 +336,6 @@ jobs:
           export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
           export CC="$(xcrun --find clang)"
           export CXX="$(xcrun --find clang++)"
-          echo "CC=$CC"
-          echo "CXX=$CXX"
-          echo "which clang: $(which clang)"
-          echo "xcrun clang: $(xcrun --find clang)"
           GOFIPS140=certified CGO_LDFLAGS="-framework UniformTypeIdentifiers" \
             wails build -trimpath -tags fips -platform darwin/arm64 -ldflags "$LDFLAGS"
 

@@ -7,9 +7,9 @@
 #
 # Mirrors the `release (windows)` dist job (build\build_dist.ps1): FIPS 140-3
 # is built in (GOFIPS140=certified, -tags fips) because the app enforces FIPS
-# at startup and refuses to run otherwise. The only differences from release
-# are: no code signing, and it uses the portable toolchain from _env.ps1
-# instead of system Go/Node.
+# at startup and refuses to run otherwise. It differs from release in that it
+# signs nothing, uses the portable toolchain from _env.ps1 instead of system
+# Go/Node, runs npm ci itself, and bundles no WebView2 runtime (see below).
 #
 # Produces three binaries + support files into the bin dir consumed by
 # installer.ps1:
@@ -35,9 +35,6 @@ param(
 
 . "$PSScriptRoot\_env.ps1"
 
-function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
-function Write-Ok($msg)   { Write-Host "    $msg"  -ForegroundColor Green }
-
 # Sanity: toolchain present?
 if (-not (Test-Path (Join-Path $Script:GoBin 'go.exe'))) {
     throw "Go not found in toolchain. Run: powershell -ExecutionPolicy Bypass -File build\windows_local_build\install-deps.ps1"
@@ -59,7 +56,10 @@ New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 
 Push-Location $Script:RepoRoot
 try {
-    # --- Frontend deps (release.yml: npm ci) ---------------------------------
+    # --- Frontend deps (npm ci) ----------------------------------------------
+    # Not left to wails build, which installs only when package.json itself
+    # changes: in this long-lived checkout, a lock-file-only update would keep
+    # the old packages.
     if ($SkipNpmInstall -and (Test-Path (Join-Path $frontend 'node_modules'))) {
         Write-Ok "Skipping npm ci (node_modules present)."
     } else {
@@ -81,6 +81,22 @@ try {
         finally { Pop-Location }
     }
 
+    # --- Build standalone CLI ------------------------------------------------
+    # The CLI and tray go first, as in build_dist.ps1: wails build rewrites
+    # files in the checkout, and a binary built after it is stamped
+    # vcs.modified=true.
+    Write-Step "Building rescale-int.exe (CLI, FIPS)"
+    $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:GOFIPS140 = 'certified'
+    & $go build -trimpath -tags fips -ldflags $ldflags -o (Join-Path $binDir 'rescale-int.exe') .\cmd\rescale-int
+    if ($LASTEXITCODE -ne 0) { throw "CLI build failed ($LASTEXITCODE)" }
+    Write-Ok "CLI binary built."
+
+    # --- Build tray companion (windowsgui subsystem) -------------------------
+    Write-Step "Building rescale-int-tray.exe (tray, FIPS)"
+    & $go build -trimpath -tags fips -ldflags "$ldflags -H=windowsgui" -o (Join-Path $binDir 'rescale-int-tray.exe') .\cmd\rescale-int-tray
+    if ($LASTEXITCODE -ne 0) { throw "tray build failed ($LASTEXITCODE)" }
+    Write-Ok "Tray binary built."
+
     # --- Build GUI with Wails (embeds frontend assets) -----------------------
     # FIPS 140-3 is required: the app exits at startup (including during Wails
     # binding generation) unless built with GOFIPS140=certified -tags fips.
@@ -97,66 +113,9 @@ try {
     Copy-Item $wailsOut -Destination (Join-Path $binDir 'rescale-int-gui.exe') -Force
     Write-Ok "GUI binary built."
 
-    # --- Build standalone CLI ------------------------------------------------
-    Write-Step "Building rescale-int.exe (CLI, FIPS)"
-    $env:GOOS = 'windows'; $env:GOARCH = 'amd64'; $env:GOFIPS140 = 'certified'
-    & $go build -trimpath -tags fips -ldflags $ldflags -o (Join-Path $binDir 'rescale-int.exe') .\cmd\rescale-int
-    if ($LASTEXITCODE -ne 0) { throw "CLI build failed ($LASTEXITCODE)" }
-    Write-Ok "CLI binary built."
-
-    # --- Build tray companion (windowsgui subsystem) -------------------------
-    Write-Step "Building rescale-int-tray.exe (tray, FIPS)"
-    & $go build -trimpath -tags fips -ldflags "$ldflags -H=windowsgui" -o (Join-Path $binDir 'rescale-int-tray.exe') .\cmd\rescale-int-tray
-    if ($LASTEXITCODE -ne 0) { throw "tray build failed ($LASTEXITCODE)" }
-    Write-Ok "Tray binary built."
-
     # --- Support files -------------------------------------------------------
     Write-Step "Writing support files"
-    $readme = @"
-Rescale Interlink $Version
-============================
-
-Unified CLI and GUI for Rescale HPC platform.
-
-Installation Directory: %LOCALAPPDATA%\Rescale\Interlink\
-
-Components:
-- rescale-int-gui.exe  : GUI application (double-click to run)
-- rescale-int.exe      : CLI tool (run from command prompt)
-- rescale-int-tray.exe : System tray companion (auto-download)
-
-Documentation: https://docs.rescale.com/
-Support:       support@rescale.com
-
-Copyright (c) 2026 Rescale, Inc.
-"@
-    # The package's text files keep Windows line endings whatever the checkout has.
-    ("$readme`n" -replace "`r?`n", "`r`n") | Out-File -FilePath (Join-Path $binDir 'README.txt') -Encoding UTF8 -NoNewline
-
-    $license = @"
-MIT License
-
-Copyright (c) 2026 Rescale, Inc.
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-"@
-    ("$license`n" -replace "`r?`n", "`r`n") | Out-File -FilePath (Join-Path $binDir 'LICENSE.txt') -Encoding UTF8 -NoNewline
+    & (Join-Path $Script:RepoRoot 'build\write_support_files.ps1') -BinDir $binDir -Version $Version
 
     Write-Step "Distribution ready"
     Write-Ok $binDir

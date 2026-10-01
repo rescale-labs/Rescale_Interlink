@@ -1,20 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Rescale Interlink Windows Installer
-  WiX v4 Configuration
-
-  Build requirements:
-  * WiX Toolset v4+ (dotnet tool install global wix)
-  * Windows SDK (for signtool)
-
-  Build command:
-    wix build installer\rescale-interlink.wxs -o bin\RescaleInterlink.msi
+  Rescale Interlink Windows installer. build\build_installer.ps1 (release) and
+  build\windows_local_build\installer.ps1 (local) build it with the WiX UI
+  extension, passing BuildDir, SourceDir and Version.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <!-- Product definition -->
-  <!-- v4.3.0: Changed to perUser for no-admin installation -->
+  <!-- Per user, so installing needs no administrator rights -->
   <Package Name="Rescale Interlink"
            Manufacturer="Rescale, Inc."
            Version="$(var.Version).0"
@@ -106,14 +100,14 @@
     <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
     <ui:WixUI Id="WixUI_FeatureTree" />
 
-    <!-- v4.0.8: Product icon for shortcuts and Add/Remove Programs -->
+    <!-- Product icon for shortcuts and Add/Remove Programs -->
     <Icon Id="ProductIcon.ico" SourceFile="rescale-interlink.ico" />
     <Property Id="ARPPRODUCTICON" Value="ProductIcon.ico" />
 
   </Package>
 
   <!-- Directory structure -->
-  <!-- v4.3.0: Changed to LocalAppDataFolder for per-user install (no admin required) -->
+  <!-- Under LocalAppData, for the per-user install -->
   <Fragment>
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="MANUFACTURERFOLDER" Name="Rescale">
@@ -131,10 +125,10 @@
   <!-- Main application components -->
   <Fragment>
     <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
-      <!-- v4.0.2: GUI application (Wails-based, with embedded frontend) -->
+      <!-- GUI application (Wails-based, with embedded frontend) -->
       <Component Id="GuiExecutable" Guid="1A2B3C4D-5E6F-7A8B-9C0D-E1F2A3B4C5D6">
         <File Id="RescaleIntGuiExe" Source="$(var.BuildDir)\rescale-int-gui.exe" KeyPath="yes">
-          <!-- v4.0.8: Desktop shortcut with explicit icon -->
+          <!-- Desktop shortcut with explicit icon -->
           <Shortcut Id="DesktopShortcut"
                     Directory="DesktopFolder"
                     Name="Rescale Interlink"
@@ -144,12 +138,12 @@
         </File>
       </Component>
 
-      <!-- v4.0.2: CLI tool (standalone Go binary) -->
+      <!-- CLI tool (standalone Go binary) -->
       <Component Id="CliExecutable" Guid="1A2B3C4D-5E6F-7A8B-9C0D-E1F2A3B4C5D7">
         <File Id="RescaleIntExe" Source="$(var.BuildDir)\rescale-int.exe" KeyPath="yes" />
       </Component>
 
-      <!-- v4.0.8: Icon file for shortcuts (multi-resolution 16-256px) -->
+      <!-- Icon file for shortcuts (multi-resolution 16-256px) -->
       <Component Id="IconFile" Guid="7A8B9C0D-1E2F-3A4B-5C6D-E7F8A9B0C1D2">
         <File Id="ProductIconFile" Source="rescale-interlink.ico" KeyPath="yes" />
       </Component>
@@ -201,7 +195,7 @@
   <Fragment>
     <ComponentGroup Id="StartMenuShortcuts" Directory="ApplicationProgramsFolder">
       <Component Id="ApplicationShortcut" Guid="6F7A8B9C-0D1E-2F3A-4B5C-D6E7F8A9B0C1">
-        <!-- v4.0.8: Updated to use rescale-int-gui.exe with explicit icon -->
+        <!-- GUI shortcut with explicit icon -->
         <Shortcut Id="ApplicationStartMenuShortcut"
                   Name="Rescale Interlink"
                   Description="Unified CLI and GUI for Rescale HPC platform"
@@ -209,7 +203,7 @@
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="ProductIcon.ico" />
 
-        <!-- v4.0.8: CLI shortcut with explicit icon -->
+        <!-- CLI shortcut with explicit icon -->
         <Shortcut Id="CLIStartMenuShortcut"
                   Name="Rescale Interlink (Command Line)"
                   Description="Open command prompt with Rescale Interlink CLI"

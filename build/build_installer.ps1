@@ -42,7 +42,7 @@ Write-Host "Building MSI: $MsiPath"
 # Build the wix command string and execute via cmd /c to avoid transcript console buffer conflicts
 $VersionNum = $ReleaseTag -replace '^v', ''
 $WxsFile = "$InstallerDir\rescale-interlink.wxs"
-# v4.0.8: Add -bindpath to tell WiX where to find License.rtf
+# -bindpath points WiX at installer\ so it resolves License.rtf and the icon.
 $wixBuildCmd = "wix build `"$WxsFile`" -d BuildDir=`"$BinDir`" -d SourceDir=`"$BinDir`" -d Version=`"$VersionNum`" -ext WixToolset.UI.wixext -bindpath `"$InstallerDir`" -o `"$MsiPath`""
 
 Write-Host "Running: $wixBuildCmd"
@@ -58,9 +58,3 @@ if (-not (Test-Path $MsiPath)) { throw "Failed to build MSI - file not created" 
 
 Write-Host "MSI built successfully"
 Get-Item $MsiPath | Format-List Name, Length
-
-# Generate checksum
-$hash = (Get-FileHash -Path $MsiPath -Algorithm SHA256).Hash.ToLower()
-$checksumFile = "$MsiName.sha256"
-"$hash  $MsiName" | Out-File -FilePath (Join-Path $WorkDir $checksumFile) -Encoding ASCII
-Write-Host "Checksum: $hash"

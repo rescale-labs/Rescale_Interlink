@@ -1,6 +1,6 @@
 # _env.ps1 --- shared toolchain layout + PATH setup for the portable Windows build.
 #
-# Dot-source this from install-deps.ps1 and build.ps1:
+# Every script in this folder dot-sources it:
 #     . "$PSScriptRoot\_env.ps1"
 #
 # Everything lives under a SINGLE directory (build\windows_local_build\.toolchain)
@@ -14,11 +14,11 @@ Set-StrictMode -Version Latest
 # --- Pinned versions (mirror .github/workflows/release.yml) ------------------
 # Go 1.26.7 (go.mod requires 1.26.7), Node 24.21.0, Wails CLI v2.12.0, WiX 6.0.2.
 # .NET SDK is needed only for the WiX MSI tool; channel 8.0 (LTS) is fine.
-$Script:GoVersion     = $env:INTERLINK_GO_VERSION;     if (-not $Script:GoVersion)     { $Script:GoVersion     = '1.26.7' }
-$Script:NodeVersion   = $env:INTERLINK_NODE_VERSION;   if (-not $Script:NodeVersion)   { $Script:NodeVersion   = '24.21.0' }
-$Script:WailsVersion  = $env:INTERLINK_WAILS_VERSION;  if (-not $Script:WailsVersion)  { $Script:WailsVersion  = 'v2.12.0' }
-$Script:DotnetVersion = $env:INTERLINK_DOTNET_VERSION; if (-not $Script:DotnetVersion) { $Script:DotnetVersion = '8.0.404' }
-$Script:WixVersion    = $env:INTERLINK_WIX_VERSION;    if (-not $Script:WixVersion)    { $Script:WixVersion    = '6.0.2' }
+$Script:GoVersion     = '1.26.7'
+$Script:NodeVersion   = '24.21.0'
+$Script:WailsVersion  = 'v2.12.0'
+$Script:DotnetVersion = '8.0.404'
+$Script:WixVersion    = '6.0.2'
 
 # SHA-256 of each archive install-deps.ps1 downloads, by file name: from
 # go.dev/dl, nodejs.org's SHASUMS256.txt, and (for .NET, which publishes
@@ -49,6 +49,10 @@ $Script:GoBin         = Join-Path $Script:GoRoot 'bin'
 $Script:GoPathBin     = Join-Path $Script:GoPath 'bin'
 $Script:DotnetDir     = Join-Path $Script:ToolchainDir 'dotnet'
 $Script:DotnetTools   = Join-Path $Script:DotnetDir 'tools'
+
+# Progress lines for those scripts.
+function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
+function Write-Ok($msg)   { Write-Host "    $msg"  -ForegroundColor Green }
 
 # Apply the toolchain to the CURRENT process environment only.
 function Use-InterlinkToolchain {
