@@ -586,9 +586,6 @@ function getShortErrorLabel(task: TransferTask): string {
   return task.error
 }
 
-// Plan 3: DaemonBatchRow removed. Daemon-initiated transfers now render in
-// the unified batch list with a Daemon badge (see BatchRow).
-
 function DiskSpaceBanner({ incident, onDismiss }: {
   incident: { count: number; available: string; needed: string }
   onDismiss: () => void
@@ -924,8 +921,8 @@ export function TransfersTab() {
               />
             ))}
 
-            {/* Plan 3: daemon batches are merged into `batches` above and
-                rendered via BatchRow with a Daemon badge. */}
+            {/* Daemon batches are in `batches` above, rendered by BatchRow
+                with a Daemon badge. */}
 
             {/* Ungrouped transfer rows */}
             {tasks.map((task) => (

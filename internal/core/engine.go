@@ -101,11 +101,6 @@ type Engine struct {
 	transferService *services.TransferService
 	fileService     *services.FileService
 
-	// Job monitoring
-	monitorTicker *time.Ticker
-	monitorStop   chan struct{}
-	monitorWg     sync.WaitGroup
-
 	// Event publishing control (to prevent deadlocks)
 	publishEvents bool
 	eventMu       sync.RWMutex
@@ -140,7 +135,6 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		apiClient:       apiClient,
 		transferService: transferService,
 		fileService:     fileService,
-		monitorStop:     make(chan struct{}),
 		publishEvents:   true, // Enable by default
 	}, nil
 }
@@ -238,20 +232,6 @@ func (e *Engine) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 		return nil, fmt.Errorf("API client not initialized")
 	}
 	return e.apiClient.GetAnalyses(ctx)
-}
-
-// SaveConfig saves configuration to a CSV file
-func (e *Engine) SaveConfig(path string) error {
-	e.mu.RLock()
-	cfg := e.config
-	e.mu.RUnlock()
-
-	if err := config.SaveConfigCSV(cfg, path); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
-	}
-
-	e.publishLog(events.InfoLevel, fmt.Sprintf("Configuration saved to %s", path), "config", "")
-	return nil
 }
 
 // reDirNumber matches the first run of digits in a run directory's base name.
@@ -593,9 +573,6 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 	err = pip.Run(ctx)
 	duration := time.Since(startTime)
 
-	// Stop monitoring
-	e.stopMonitoring()
-
 	// Emit completion event
 	stats := e.publishComplete(duration)
 
@@ -629,72 +606,6 @@ func (e *Engine) Stop() {
 		e.publishLog(events.InfoLevel, "Stopping pipeline...", "", "")
 		cancel()
 	}
-
-	e.stopMonitoring()
-}
-
-// GetJobStatus gets current status of a specific job from Rescale
-func (e *Engine) GetJobStatus(jobID string) (string, error) {
-	ctx := context.Background()
-	job, err := e.apiClient.GetJob(ctx, jobID)
-	if err != nil {
-		return "", err
-	}
-	return job.JobStatus.Status, nil
-}
-
-// StartJobMonitoring starts monitoring job statuses on Rescale
-func (e *Engine) StartJobMonitoring(interval time.Duration) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.monitorTicker != nil {
-		return // Already monitoring
-	}
-
-	e.monitorTicker = time.NewTicker(interval)
-	tickerC := e.monitorTicker.C // Capture channel to avoid race with StopJobMonitoring
-	stopC := e.monitorStop       // Capture stop channel as well
-
-	e.monitorWg.Add(1)
-	go func() {
-		defer e.monitorWg.Done()
-		for {
-			select {
-			case <-tickerC:
-				e.checkJobStatuses()
-			case <-stopC:
-				return
-			}
-		}
-	}()
-
-	e.publishLog(events.InfoLevel, fmt.Sprintf("Started job monitoring (interval: %v)", interval), "", "")
-}
-
-// StopJobMonitoring stops job status monitoring.
-// Waits for the goroutine to exit before returning to prevent race conditions.
-func (e *Engine) StopJobMonitoring() {
-	e.mu.Lock()
-	if e.monitorTicker == nil {
-		e.mu.Unlock()
-		return
-	}
-
-	e.monitorTicker.Stop()
-	e.monitorTicker = nil
-	close(e.monitorStop)
-	e.mu.Unlock()
-
-	// Wait for goroutine to actually exit before creating new channel.
-	// This prevents race conditions when start is called immediately after stop.
-	e.monitorWg.Wait()
-
-	e.mu.Lock()
-	e.monitorStop = make(chan struct{})
-	e.mu.Unlock()
-
-	e.publishLog(events.InfoLevel, "Stopped job monitoring", "", "")
 }
 
 // GetState returns the current state
@@ -891,51 +802,6 @@ func (e *Engine) publishLog(level events.LogLevel, message, stage, jobName strin
 
 	if enabled {
 		e.eventBus.PublishLog(level, message, stage, jobName, nil)
-	}
-}
-
-func (e *Engine) stopMonitoring() {
-	// Already handled by context cancellation
-}
-
-func (e *Engine) checkJobStatuses() {
-	e.mu.RLock()
-	st := e.state
-	e.mu.RUnlock()
-
-	if st == nil {
-		return
-	}
-
-	jobs := st.GetAllStates()
-	for _, job := range jobs {
-		if job.JobID != "" && job.SubmitStatus == "success" {
-			// Check status on Rescale
-			status, err := e.GetJobStatus(job.JobID)
-			if err != nil {
-				e.publishLog(events.WarnLevel,
-					fmt.Sprintf("Failed to get status for job %s: %v", job.JobName, err),
-					"monitor", job.JobName)
-				continue
-			}
-
-			// Emit status update event (this will update the UI table)
-			e.eventBus.Publish(&events.StateChangeEvent{
-				BaseEvent: events.BaseEvent{
-					EventType: events.EventStateChange,
-					Time:      time.Now(),
-				},
-				JobName:      job.JobName,
-				Stage:        "status",
-				NewStatus:    status,
-				JobID:        job.JobID,
-				ErrorMessage: "",
-			})
-
-			e.publishLog(events.DebugLevel,
-				fmt.Sprintf("Job %s status: %s", job.JobName, status),
-				"monitor", job.JobName)
-		}
 	}
 }
 

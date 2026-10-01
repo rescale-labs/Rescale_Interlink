@@ -20,8 +20,8 @@ import (
 // with the reason, and does no transfer work: an entry the scan refused by
 // name, the empty name included, and a link where a file belongs, which merge
 // mode took for the file already downloaded. Merge mode skips a regular file
-// already there only when it is complete: a truncated one, like a missing one,
-// is downloaded.
+// already there only when it is the remote file's size: a truncated or an
+// oversized one, like a missing one, is downloaded.
 func TestFolderDownloadShowsEveryRefusedEntryAsAFailedRow(t *testing.T) {
 	entry := func(kind, id, name string) map[string]any {
 		return map[string]any{"type": kind, "item": map[string]any{"id": id, "name": name, "decryptedSize": 4}}
@@ -34,7 +34,8 @@ func TestFolderDownloadShowsEveryRefusedEntryAsAFailedRow(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]any{
 			entry("folder", "bad", "run:1"), entry("file", "f1", "."), entry("file", "f2", ".."), entry("file", "f3", ""),
-			entry("file", "f4", "results."), entry("file", "f5", "linked.dat"), entry("file", "f6", "kept.dat"), entry("file", "f7", "ok.dat"), entry("file", "f8", "short.dat")}})
+			entry("file", "f4", "results."), entry("file", "f5", "linked.dat"), entry("file", "f6", "kept.dat"), entry("file", "f7", "ok.dat"), entry("file", "f8", "short.dat"),
+			entry("file", "f9", "long.dat")}})
 	}))
 	defer server.Close()
 	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
@@ -46,7 +47,7 @@ func TestFolderDownloadShowsEveryRefusedEntryAsAFailedRow(t *testing.T) {
 	dest := t.TempDir()
 	root := filepath.Join(dest, "FOLDER")
 	victim := filepath.Join(t.TempDir(), "victim.txt")
-	for path, content := range map[string]string{filepath.Join(root, "kept.dat"): "keep", filepath.Join(root, "short.dat"): "k", victim: "keep"} {
+	for path, content := range map[string]string{filepath.Join(root, "kept.dat"): "keep", filepath.Join(root, "short.dat"): "k", filepath.Join(root, "long.dat"): "keep+more", victim: "keep"} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -62,6 +63,7 @@ func TestFolderDownloadShowsEveryRefusedEntryAsAFailedRow(t *testing.T) {
 	}
 
 	want := []string{"", ".", "..", "linked.dat", "results.", "run:1"}
+	wantStarted := []string{"long.dat", "ok.dat", "short.dat"}
 	var refused, started []string
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		refused, started = nil, nil
@@ -79,12 +81,12 @@ func TestFolderDownloadShowsEveryRefusedEntryAsAFailedRow(t *testing.T) {
 			}
 		}
 		slices.Sort(started)
-		if slices.Sort(refused); slices.Equal(refused, want) && slices.Equal(started, []string{"ok.dat", "short.dat"}) {
+		if slices.Sort(refused); slices.Equal(refused, want) && slices.Equal(started, wantStarted) {
 			break
 		}
 	}
-	if !slices.Equal(refused, want) || !slices.Equal(started, []string{"ok.dat", "short.dat"}) {
-		t.Errorf("refused rows %q and transfers %q, want refused rows %q, each with its reason and never started, and transfers of ok.dat and the truncated short.dat only", refused, started, want)
+	if !slices.Equal(refused, want) || !slices.Equal(started, wantStarted) {
+		t.Errorf("refused rows %q and transfers %q, want refused rows %q, each with its reason and never started, and transfers %q only", refused, started, want, wantStarted)
 	}
 	if info, err := os.Lstat(filepath.Join(root, "linked.dat")); err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Errorf("the link was not left in place: %v", err)

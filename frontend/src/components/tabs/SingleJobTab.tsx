@@ -27,6 +27,7 @@ import { TemplateBuilder, RemoteFilePicker, JobsTable } from '../widgets'
 import { formatSize } from '../../utils/formatSize'
 import { normalizeJobSpec } from '../../utils/jobs'
 import * as App from '../../../wailsjs/go/wailsapp/App'
+import type { wailsapp } from '../../../wailsjs/go/models'
 
 // Selected inputs always have a byte count, so nothing to show reads as empty.
 function formatFileSize(bytes: number): string {
@@ -49,7 +50,6 @@ export function SingleJobTab() {
   // below that named the store object was rebuilt on the same schedule.
   const loadMemory = useJobStore((s) => s.loadMemory)
   const saveJobToJSON = useJobStore((s) => s.saveJobToJSON)
-  const loadJobFromSGE = useJobStore((s) => s.loadJobFromSGE)
   const saveJobToSGE = useJobStore((s) => s.saveJobToSGE)
 
   const config = useConfigStore((s) => s.config)
@@ -151,32 +151,15 @@ export function SingleJobTab() {
     setShowTemplateBuilder(false)
   }, [setJob, setState, setShowTemplateBuilder])
 
-  // Load from CSV
-  const handleLoadFromCSV = useCallback(async () => {
+  // Loads a job file's first job as the template, whatever its format, and
+  // shows why a file could not be loaded.
+  const loadFirstJob = useCallback(async (title: string, load: (path: string) => Promise<wailsapp.JobSpecDTO[]>) => {
     setShowLoadMenu(false)
     try {
-      const path = await App.SelectFile('Select Jobs CSV File')
+      const path = await App.SelectFile(title)
       if (!path) return
 
-      const jobs = await App.LoadJobsFromCSV(path)
-      if (jobs && jobs.length > 0) {
-        // Take the first job as the template
-        setJob(normalizeJobSpec(jobs[0]))
-        setState('jobConfigured')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [setShowLoadMenu, setJob, setState, setError])
-
-  // Load from JSON: a single job or a jobs list, whose first job is the template
-  const handleLoadFromJSON = useCallback(async () => {
-    setShowLoadMenu(false)
-    try {
-      const path = await App.SelectFile('Select Job JSON File')
-      if (!path) return
-
-      const jobs = await App.LoadJobsFromJSON(path)
+      const jobs = await load(path)
       if (jobs && jobs.length > 0) {
         const first = normalizeJobSpec(jobs[0])
         setJob(first)
@@ -187,23 +170,9 @@ export function SingleJobTab() {
       setError(err instanceof Error ? err.message : String(err))
     }
   }, [setShowLoadMenu, setJob, setState, setError])
-
-  // Load from SGE script
-  const handleLoadFromSGE = useCallback(async () => {
-    setShowLoadMenu(false)
-    try {
-      const path = await App.SelectFile('Select SGE Script')
-      if (!path) return
-
-      const loadedJob = await loadJobFromSGE(path)
-      if (loadedJob) {
-        setJob(loadedJob)
-        setState('jobConfigured')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [setShowLoadMenu, setJob, setState, setError, loadJobFromSGE])
+  const handleLoadFromCSV = () => loadFirstJob('Select Jobs CSV File', App.LoadJobsFromCSV)
+  const handleLoadFromJSON = () => loadFirstJob('Select Job JSON File', App.LoadJobsFromJSON)
+  const handleLoadFromSGE = () => loadFirstJob('Select SGE Script', async (path) => [await App.LoadJobFromSGE(path)])
 
   // Save to JSON
   const handleSaveToJSON = useCallback(async () => {

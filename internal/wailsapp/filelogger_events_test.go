@@ -14,6 +14,7 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/core"
 	"github.com/rescale/rescale-int/internal/events"
 )
@@ -106,7 +107,9 @@ func TestLogFileKeepsABurstAtShutdown(t *testing.T) {
 	defer func(orig *os.File) { os.Stdout = orig }(os.Stdout)
 	os.Stdout = devNull // App.log prints every line too
 
-	const fromBus, fromApp = 400, 1500 // together more than the bus buffers for the bridge
+	// The bus holds at most EventBusMaxBuffer events for the bridge, which
+	// drains them slowly here, so it drops the last of App.log's.
+	const fromBus, fromApp = 400, constants.EventBusMaxBuffer
 	for i := range fromBus {
 		a.engine.Events().PublishLog(events.InfoLevel, fmt.Sprintf("bus-%04d", i), "transfer", "", nil)
 	}

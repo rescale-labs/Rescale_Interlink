@@ -135,22 +135,35 @@ describe('SingleJobTab with an unconfirmed creation', () => {
   })
 })
 
-// A jobs-list JSON loads its first job as the template, as the CSV loader and
-// PUR do, and says so when the list had others.
-describe('SingleJobTab loading job settings from JSON', () => {
+// A jobs list loads its first job as the template, from JSON as from CSV, as
+// PUR does, and says so when the list had others. A file that cannot be loaded
+// says why, whatever its format.
+describe('SingleJobTab loading job settings from a file', () => {
   it.each([
-    ['a jobs list', ['Sim_A', 'Sim_B'], 'Loaded the first of 2 jobs as the template.'],
-    ['a single job', ['Sim_A'], null],
-  ])('takes the first job of %s', async (_, names, notice) => {
-    vi.mocked(App.SelectFile).mockResolvedValueOnce('/fake/jobs.json')
-    vi.mocked(App.LoadJobsFromJSON).mockResolvedValueOnce(names.map((jobName) => ({ jobName })) as wailsapp.JobSpecDTO[])
+    ['JSON File', 'LoadJobsFromJSON', ['Sim_A', 'Sim_B'], 'Loaded the first of 2 jobs as the template.'],
+    ['JSON File', 'LoadJobsFromJSON', ['Sim_A'], null],
+    ['CSV File', 'LoadJobsFromCSV', ['Sim_A', 'Sim_B'], 'Loaded the first of 2 jobs as the template.'],
+  ] as const)('takes the first job from a %s (%s of %j)', async (button, loader, names, notice) => {
+    vi.mocked(App.SelectFile).mockResolvedValueOnce('/fake/jobs')
+    vi.mocked(App[loader]).mockResolvedValueOnce(names.map((jobName) => ({ jobName })) as wailsapp.JobSpecDTO[])
 
     render(<SingleJobTab />)
     fireEvent.click(screen.getByRole('button', { name: /Load Existing Job Settings/ }))
-    fireEvent.click(screen.getByRole('button', { name: 'JSON File' }))
+    fireEvent.click(screen.getByRole('button', { name: button }))
 
     await vi.waitFor(() => expect(useSingleJobStore.getState().job?.jobName).toBe('Sim_A'))
     expect(useSingleJobStore.getState().state).toBe('jobConfigured')
     expect(screen.queryByText(/Loaded the first of/)?.textContent ?? null).toBe(notice)
+  })
+
+  it('says why an SGE script could not be loaded', async () => {
+    vi.mocked(App.SelectFile).mockResolvedValueOnce('/fake/job.sh')
+    vi.mocked(App.LoadJobFromSGE).mockRejectedValueOnce(new Error('FAKE: not an SGE script'))
+
+    render(<SingleJobTab />)
+    fireEvent.click(screen.getByRole('button', { name: /Load Existing Job Settings/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'SGE Script' }))
+
+    expect(await screen.findByText('FAKE: not an SGE script')).toBeInTheDocument()
   })
 })

@@ -140,7 +140,8 @@ func RedactedLogger(mode string, w io.Writer) *logging.Logger {
 // RedactedError is err without the credentials its text can quote, such as a
 // redirect's URL or a Location net/http could not parse. The retry and report
 // classifiers still see the cause: errors.Is and As reach it, and it answers
-// Timeout and Temporary for the net.Error they would have found in its chain.
+// Timeout for the net.Error in its chain, since url.Error's Timeout asks its
+// Err directly rather than through errors.As.
 // An error it made comes back unchanged, but not one wrapping such an error:
 // the wrapper's own text may quote a credential.
 func RedactedError(err error) error {
@@ -158,11 +159,6 @@ func (e redactedError) Unwrap() error { return e.error }
 func (e redactedError) Timeout() bool {
 	var n net.Error
 	return errors.As(e.error, &n) && n.Timeout()
-}
-
-func (e redactedError) Temporary() bool {
-	var n net.Error
-	return errors.As(e.error, &n) && n.Temporary()
 }
 
 // Regex patterns for redaction

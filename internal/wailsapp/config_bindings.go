@@ -202,7 +202,7 @@ func (a *App) UpdateConfig(cfg ConfigDTO) error {
 	}
 
 	if apiKeyChanged {
-		a.ClearCatalogCache()
+		a.clearCatalogCache()
 	}
 
 	// Update timing system when DetailedLogging changes
@@ -429,7 +429,7 @@ func (a *App) TestConnection() ConnectionResultDTO {
 		if result.Success {
 			a.logInfo("connection", fmt.Sprintf("Connected successfully - %s (%s)", result.Email, result.WorkspaceName))
 			// Clear catalog cache when connection succeeds - user may have switched accounts
-			a.ClearCatalogCache()
+			a.clearCatalogCache()
 		} else {
 			a.logError("connection", fmt.Sprintf("Connection failed: %s", result.Error))
 		}

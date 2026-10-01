@@ -43,7 +43,7 @@ const RESOLVED_CREATE_STATUSES = new Set(['completed', 'success', 'failed'])
  */
 export function isUnconfirmedRow(row: JobRow): boolean {
   const submit = row.submitStatus
-  if (submit === 'completed' || submit === 'success' || submit === 'skipped' || submit === 'failed') {
+  if (isCompletedRow(row) || submit === 'failed') {
     return false
   }
   // A known job id, or a create call that was answered, resolves the row
@@ -59,10 +59,16 @@ interface TerminalCounts {
   unconfirmed: number
 }
 
+/** Whether a row's job is done: submitted, or skipped as done already. */
+export function isCompletedRow(j: JobRow): boolean {
+  return j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
+}
+
 /**
- * Whether a row has failed. A create call answered with a rejection is a
- * failure even while the row's submit status is a poll's stale 'creating' — the
- * same answer that stops isUnconfirmedRow counting the row as unresolved.
+ * Whether a row has failed, in every view. A create call answered with a
+ * rejection is a failure even while the row's submit status is a poll's stale
+ * 'creating' — the same answer that stops isUnconfirmedRow counting the row as
+ * unresolved.
  */
 export function isFailedRow(j: JobRow): boolean {
   return j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' ||
@@ -71,9 +77,7 @@ export function isFailedRow(j: JobRow): boolean {
 
 function countRows(rows: JobRow[]): TerminalCounts {
   return {
-    completed: rows.filter((j) =>
-      j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-    ).length,
+    completed: rows.filter(isCompletedRow).length,
     failed: rows.filter(isFailedRow).length,
     unconfirmed: rows.filter(isUnconfirmedRow).length,
   }
@@ -235,7 +239,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
     const { activeRun, stopPolling } = get()
     if (!activeRun || activeRun.status !== 'active') return
 
-    // C1: Set cancelled immediately (frontend-optimistic)
+    // Set cancelled at once, before the backend confirms it
     set((prev) => ({
       activeRun: prev.activeRun ? { ...prev.activeRun, status: 'cancelled' as RunState } : null,
     }))
@@ -250,7 +254,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       }
     }
 
-    // C1: Wait up to 5s for interlink:complete event to reconcile
+    // Wait up to 5s for the interlink:complete event to reconcile
     await sleep(5000)
 
     // If still in cancelled state (complete event didn't override), force-finalize
@@ -287,7 +291,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       return () => {} // Already set up
     }
 
-    // C9: Use unsub callbacks, NEVER EventsOff (would remove logStore's listeners)
+    // Unsubscribe callbacks, never EventsOff, which would remove logStore's listeners too
     const unsubStateChange = EventsOn(EVENT_NAMES.STATE_CHANGE, (data: StateChangeEventDTO) => {
       const { activeRun } = get()
       if (!activeRun || activeRun.status !== 'active') return
@@ -331,7 +335,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       })
     })
 
-    // C5: Use correct field names from LogEventDTO (jobName, stage — NOT detail, category)
+    // LogEventDTO's fields are jobName and stage, not detail or category
     const unsubLog = EventsOn(EVENT_NAMES.LOG, (data: LogEventDTO) => {
       const { activeRun } = get()
       if (!activeRun || activeRun.status !== 'active') return
@@ -409,7 +413,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
 
       try { localStorage.removeItem(ACTIVE_RUN_KEY) } catch { /* ignore */ }
 
-      // C2: Auto-start queued job with retry-with-backoff
+      // Auto-start the queued job, retrying with backoff
       if (queuedJob) {
         startQueuedJobWithRetry()
       }
@@ -418,7 +422,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
     set({ _eventListenersSetup: true })
 
     return () => {
-      // C9: Only remove OUR listeners via unsub callbacks
+      // Only this store's listeners, through their unsubscribe callbacks
       unsubStateChange()
       unsubLog()
       unsubComplete()
@@ -427,7 +431,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
   },
 
   recoverFromRestart: async () => {
-    // C3: Read localStorage for persisted active run
+    // Read the persisted active run from localStorage
     let persisted: PersistedActiveRun | null = null
     try {
       const raw = localStorage.getItem(ACTIVE_RUN_KEY)
@@ -668,7 +672,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
   },
 }))
 
-// C2: Queued job auto-start with retry/backoff (module-level helper)
+// Auto-start of the queued job, retrying with backoff
 async function startQueuedJobWithRetry(maxAttempts = 5) {
   const store = useRunStore.getState()
   const queuedJob = store.queuedJob

@@ -104,6 +104,9 @@ type LogEvent struct {
 	Stage   string
 	JobName string
 	Error   error
+	// InLogFile is set by a publisher that has written the message to the
+	// GUI's log file itself, so the event bridge does not write it again.
+	InLogFile bool
 }
 
 // StateChangeEvent represents job state transitions

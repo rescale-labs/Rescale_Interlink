@@ -95,7 +95,7 @@ func Classify(err error, category ErrorCategory, operation, backend string) *Cla
 // unclassified internal errors, and batch/pipeline wipeouts where something
 // genuinely broke.
 func IsReportable(err error, category ErrorCategory) bool {
-	if err = reportedError(err, category); err == nil {
+	if err = reportedError(err, category); err == nil || IsUsageError(err) {
 		return false
 	}
 
@@ -246,11 +246,8 @@ func classifyMessage(msg string, status int, response string) ErrorClass {
 	switch {
 	case strings.Contains(lower, "unauthorized") || strings.Contains(lower, "forbidden"):
 		return ClassAuth
-	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded"):
-		return ClassTimeout
-	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host") ||
-		strings.Contains(lower, "network") || strings.Contains(lower, "dns"):
-		return ClassNetwork
+	// The local file system's words come before the network and timeout
+	// words, which a path can hold: ".../timeout_study/in.dat: permission denied".
 	// "disc quota" is the macOS/BSD spelling of EDQUOT; Linux says "disk quota".
 	case strings.Contains(lower, "no space left") || strings.Contains(lower, "disk quota") ||
 		strings.Contains(lower, "disc quota") || strings.Contains(lower, "not enough space on the disk"):
@@ -261,7 +258,8 @@ func classifyMessage(msg string, status int, response string) ErrorClass {
 	// never a Rescale failure worth a report; nor is a download's refusal to
 	// write through a link or special file there. Deliberately absent: "too many
 	// open files" (fd exhaustion is usually our own descriptor leak) and I/O
-	// errors, which stay reportable.
+	// errors, which stay reportable and so are settled next, before a path's
+	// network or timeout words can claim them.
 	case strings.Contains(lower, "permission denied") ||
 		strings.Contains(lower, "refusing to download to") ||
 		strings.Contains(lower, "operation not permitted") ||
@@ -274,6 +272,13 @@ func classifyMessage(msg string, status int, response string) ErrorClass {
 		strings.Contains(lower, "the system cannot find the") ||
 		strings.Contains(lower, "access is denied"):
 		return ClassLocalFS
+	case strings.Contains(lower, "input/output error"), strings.Contains(lower, "i/o device error"):
+		return ClassInternal
+	case strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline exceeded"):
+		return ClassTimeout
+	case strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "network") || strings.Contains(lower, "dns"):
+		return ClassNetwork
 	case strings.Contains(lower, "internal server"):
 		return ClassServerError
 	default:

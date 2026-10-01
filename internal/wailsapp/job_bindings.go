@@ -715,7 +715,7 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 			}
 
 			if len(expandedPaths) == 0 {
-				a.failSingleJob(jobSpec.JobName, errors.New("No files found in the selected paths"))
+				a.failSingleJob(jobSpec.JobName, reporting.UsageError(errors.New("No files found in the selected paths")))
 				return
 			}
 

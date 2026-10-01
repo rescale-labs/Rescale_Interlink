@@ -20,6 +20,8 @@ const app = vi.hoisted(() => ({
   SaveDaemonConfig: vi.fn(() => Promise.resolve()),
   StartDaemon: vi.fn(() => Promise.resolve()),
   StopDaemon: vi.fn(() => Promise.resolve()),
+  ValidateAutoDownloadPreFlight: vi.fn(() => Promise.resolve({ apiKeyOk: true, folderOk: true })),
+  ValidateAutoDownloadSetup: vi.fn(() => Promise.resolve({ hasAutoDownloadField: true, errors: [] })),
   UpdateConfig: vi.fn(() => Promise.resolve()),
   SaveConfig: vi.fn(() => Promise.resolve()),
   SetFlattenJobDownload: vi.fn(() => Promise.resolve()),
@@ -50,21 +52,97 @@ describe('SetupTab auto-download controls', () => {
     expect(screen.queryByRole('button', { name: /Install|Service/ })).toBeNull()
   })
 
-  it('names the per-user controls without the word service', async () => {
-    app.GetDaemonStatus.mockResolvedValue({ running: true, ipcConnected: true, state: 'running' })
+  // One panel while it runs: its state, each control once, named as in the
+  // tray, the PID, and the error once.
+  it('shows one set of controls while auto-download runs', async () => {
+    app.GetDaemonStatus.mockResolvedValue({
+      running: true, ipcConnected: true, userState: 'running', pid: 4242, error: 'FAKE scan failed', lastErrorTime: '',
+    })
     await openAdvanced()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Stop Auto-Download' }))
     await vi.waitFor(() => expect(app.StopDaemon).toHaveBeenCalledTimes(1))
+    for (const name of ['Pause Auto-Download', 'Scan Now', 'Stop Auto-Download']) {
+      expect(screen.getAllByRole('button', { name })).toHaveLength(1)
+    }
+    expect(screen.getAllByText('Auto-Download Control')).toHaveLength(1)
+    expect(screen.queryByText('My Downloads')).toBeNull()
+    expect(screen.getByText('PID: 4242')).toBeInTheDocument()
+    expect(screen.getAllByText(/FAKE scan failed/)).toHaveLength(1)
     expect(screen.queryByText('Service Control')).toBeNull()
   })
 
+  // The daemon's facts show whenever it answers, whatever the user's state.
+  it.each(['pending', 'error', 'paused'])('shows the daemon\'s facts while it answers, %s', async (userState) => {
+    app.GetDaemonStatus.mockResolvedValue({
+      running: true, ipcConnected: true, userState, uptime: 'FAKE-UPTIME', jobsDownloaded: 3, activeDownloads: 1,
+    })
+    await openAdvanced()
+
+    expect(await screen.findByText('FAKE-UPTIME')).toBeInTheDocument()
+    expect(screen.getByText('3 jobs downloaded')).toBeInTheDocument()
+  })
+
+  it('gives a slow start\'s advice once', async () => {
+    app.GetDaemonStatus.mockResolvedValue({
+      running: true, ipcConnected: false, userState: 'error', errorCode: 'transient_timeout',
+      userStateDetail: 'Error: FAKE slow start. If this persists, click Retry, or Open Logs.',
+    })
+    await openAdvanced()
+
+    expect(await screen.findAllByText(/If this persists/)).toHaveLength(1)
+  })
+
+  // A daemon that runs but does not answer is not one that needs starting.
+  it('says a Retry found the running daemon not answering', async () => {
+    app.GetDaemonStatus.mockResolvedValue({ running: true, ipcConnected: false, userState: 'pending', pid: 4242 })
+    app.ReloadDaemonConfig.mockResolvedValueOnce({ error: 'daemon not running' })
+    await openAdvanced()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Settings reloaded (auto-download does not answer)')).toBeInTheDocument()
+  })
+
+  it('offers Resume while paused, and no control without IPC', async () => {
+    app.GetDaemonStatus.mockResolvedValue({ running: true, ipcConnected: true, userState: 'paused' })
+    await openAdvanced()
+    expect(await screen.findByRole('button', { name: 'Resume Auto-Download' })).toBeInTheDocument()
+    cleanup()
+
+    app.GetDaemonStatus.mockResolvedValue({ running: true, ipcConnected: false, userState: 'pending', pid: 4242 })
+    await openAdvanced()
+    expect(await screen.findByText('IPC unavailable - controls disabled')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Pause|Resume|Scan Now|Stop/ })).toBeNull()
+  })
+
   it('says where the API key is set when auto-download cannot find it', async () => {
-    app.GetDaemonStatus.mockResolvedValue({ running: true, ipcConnected: true, userState: 'error', errorCode: 'no_api_key' })
+    app.GetDaemonStatus.mockResolvedValue({
+      running: true, ipcConnected: true, userState: 'error', errorCode: 'no_api_key', error: 'FAKE no API key',
+    })
     await openAdvanced()
 
     expect(await screen.findByText('Auto-download cannot find your API key')).toBeInTheDocument()
     expect(screen.getByText('Ensure API Configuration is saved and Test Connection succeeds.')).toBeInTheDocument()
+    expect(screen.queryByText(/FAKE no API key/)).toBeNull()
+  })
+
+  // ReloadDaemonConfig answers, never throws: the status line says what it did.
+  it('says enabled auto-download needs starting when none runs', async () => {
+    app.GetDaemonConfig.mockResolvedValueOnce({ enabled: false, downloadFolder: 'FAKE-DIR' })
+    app.ReloadDaemonConfig.mockResolvedValueOnce({ error: 'daemon not running' })
+    await openAdvanced()
+
+    fireEvent.click(await screen.findByLabelText('Enable Auto-Download'))
+    expect(await screen.findByText('Auto-download enabled; auto-download needs starting')).toBeInTheDocument()
+  })
+
+  it('says what a Retry did', async () => {
+    app.GetDaemonStatus.mockResolvedValue({ running: true, ipcConnected: true, userState: 'error', error: 'FAKE scan failed' })
+    app.ReloadDaemonConfig.mockResolvedValueOnce({ deferred: true, activeDownloads: 2 })
+    await openAdvanced()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Settings reloaded (will apply when 2 downloads finish)')).toBeInTheDocument()
   })
 
   // Workspace folders are opt-in, and flattening applies only to them: it is
@@ -85,11 +163,6 @@ describe('SetupTab auto-download controls', () => {
     await vi.waitFor(() => expect(app.SaveDaemonConfig).toHaveBeenLastCalledWith(
       expect.objectContaining({ includeWorkspaceFolders: false, flattenFolderStructure: false })), { timeout: 3000 })
     expect(flatten).toBeDisabled()
-  })
-
-  it('says a job\'s own download path must be inside the Download Folder', async () => {
-    await openAdvanced()
-    expect(await screen.findByText(/"Auto Download Path" \(per-job download location, must be inside the Download Folder\)/)).toBeInTheDocument()
   })
 })
 

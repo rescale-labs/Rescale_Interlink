@@ -88,11 +88,6 @@ type DOEMethodDTO struct {
 	MaxParameters    int    `json:"maxParameters"`
 }
 
-// DefaultDOEMaxCases exposes the sweep size cap so the UI can show it.
-func (a *App) DefaultDOEMaxCases() int {
-	return doe.DefaultMaxCases
-}
-
 // GetDOEMethods returns the supported sampling methods. Sourced from the doe
 // package so the menu cannot drift from what generation accepts.
 func (a *App) GetDOEMethods() []DOEMethodDTO {

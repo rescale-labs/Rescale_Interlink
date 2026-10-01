@@ -35,16 +35,12 @@ import {
   GetFileLoggingSettings,
   SetFileLoggingEnabled,
   SetFlattenJobDownload,
-  TriggerProfileRescan,
   ReloadDaemonConfig,
   ValidateAutoDownloadPreFlight,
   OpenLogsDirectory,
 } from '../../../wailsjs/go/wailsapp/App';
 import { wailsapp } from '../../../wailsjs/go/models';
-import {
-  CodeNoAPIKey,
-  CodeTransientTimeout,
-} from '../../lib/errors';
+import { CodeNoAPIKey } from '../../lib/errors';
 
 const PROXY_MODES = ['no-proxy', 'system', 'ntlm', 'basic'] as const;
 
@@ -77,6 +73,21 @@ const PLATFORM_URLS = [
       ]
     : []),
 ] as const;
+
+// What ReloadDaemonConfig did with the settings just saved, as the end of the
+// status line. "daemon not running" is its answer when no daemon answers,
+// which a daemon whose process runs (running) can also give.
+const reloadNote = (result: wailsapp.ReloadConfigResultDTO, enabled: boolean, running: boolean): string => {
+  if (result.deferred) {
+    return ` (will apply when ${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} finish)`;
+  }
+  if (result.applied) return ' and applied';
+  if (result.error === 'daemon not running') {
+    if (running) return ' (auto-download does not answer)';
+    return enabled ? '; auto-download needs starting' : '';
+  }
+  return result.error ? ` (auto-download: ${result.error})` : '';
+};
 
 export function SetupTab() {
   const {
@@ -128,15 +139,14 @@ export function SetupTab() {
   const [fileLoggingEnabled, setFileLoggingEnabled] = useState(false);
   const [logFilePath, setLogFilePath] = useState('');
 
-  // pendingStartTime / pendingElapsed were replaced by the shared
-  // service.Computer, which flips userState to 'error' after the 10s
-  // transient-pending timeout. The frontend just renders whatever userState
-  // + userStateDetail the DTO says.
-
   const [isDaemonConfigSaving, setIsDaemonConfigSaving] = useState(false);
   const [lastSavedConfig, setLastSavedConfig] = useState<wailsapp.DaemonConfigDTO | null>(null);
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const prevLookbackRef = useRef<number | null>(null);
+  // Read by the debounced save, whose callback outlives the render it was made in.
+  const daemonRunningRef = useRef(false);
+  useEffect(() => {
+    daemonRunningRef.current = !!daemonStatus?.running;
+  }, [daemonStatus?.running]);
 
   // Fetch initial data
   useEffect(() => {
@@ -200,7 +210,6 @@ export function SetupTab() {
         }
         setDaemonConfig(cfg);
         setLastSavedConfig({ ...cfg });
-        prevLookbackRef.current = cfg.lookbackDays;
       } catch (err) {
         console.error('Failed to fetch daemon config:', err);
       }
@@ -220,23 +229,7 @@ export function SetupTab() {
         setIsDaemonConfigSaving(true);
         await SaveDaemonConfig(config);
         setLastSavedConfig({ ...config });
-
-        // Notify daemon of config changes after every save
-        try {
-          const result = await ReloadDaemonConfig();
-          if (result.deferred) {
-            setStatusMessage(`Settings saved (will apply when ${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} finish)`);
-          } else if (result.applied) {
-            setStatusMessage('Settings saved and applied');
-          } else if (result.error) {
-            setStatusMessage(`Settings saved (daemon: ${result.error})`);
-          } else {
-            setStatusMessage('Settings saved');
-          }
-        } catch {
-          // Daemon may not be running — that's fine, save succeeded
-          setStatusMessage('Settings saved');
-        }
+        setStatusMessage(`Settings saved${reloadNote(await ReloadDaemonConfig(), config.enabled, daemonRunningRef.current)}`);
       } catch (err) {
         setStatusMessage(`Failed to save settings: ${err}`);
       } finally {
@@ -255,12 +248,6 @@ export function SetupTab() {
     }
   }, [daemonConfig, lastSavedConfig, debouncedSaveDaemonConfig]);
 
-  // ReloadDaemonConfig() is called after every debounced save, handling all config
-  // propagation including lookback changes. Track prevLookbackRef for potential future use.
-  useEffect(() => {
-    prevLookbackRef.current = daemonConfig?.lookbackDays ?? null;
-  }, [daemonConfig?.lookbackDays]);
-
   useEffect(() => {
     return () => {
       if (debounceTimeoutRef.current) {
@@ -268,8 +255,6 @@ export function SetupTab() {
       }
     };
   }, []);
-
-  // Pending-elapsed tracking lives in the Go-side service.Computer now.
 
   useEffect(() => {
     const fetchFileLoggingSettings = async () => {
@@ -356,18 +341,7 @@ export function SetupTab() {
         // Writing daemon.conf does not change a running daemon's behaviour;
         // it keeps its old settings until it is restarted. Ask it to reload and
         // report what actually happened instead of claiming a bare success.
-        try {
-          const result = await ReloadDaemonConfig();
-          if (result.deferred) {
-            daemonDetail = ` (auto-download settings apply when ${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} finish)`;
-          } else if (result.applied) {
-            daemonDetail = ' and applied to the running daemon';
-          } else if (result.error) {
-            daemonDetail = ` (daemon: ${result.error})`;
-          }
-        } catch {
-          // Daemon may not be running — the save itself still succeeded.
-        }
+        daemonDetail = reloadNote(await ReloadDaemonConfig(), daemonConfig.enabled, daemonRunningRef.current);
       }
 
       setStatusMessage(`All settings saved${defaultConfigPath ? ` to ${defaultConfigPath}` : ''}${daemonDetail}`);
@@ -475,6 +449,11 @@ export function SetupTab() {
     }
   };
 
+  // Retry reloads the saved settings into auto-download, which restarts it.
+  const handleRetry = async () => {
+    setStatusMessage(`Settings reloaded${reloadNote(await ReloadDaemonConfig(), daemonConfig?.enabled ?? false, daemonRunningRef.current)}`);
+  };
+
   const handlePauseDaemon = async () => {
     try {
       setIsDaemonLoading(true);
@@ -523,7 +502,7 @@ export function SetupTab() {
         return;
       }
 
-      // Workspace-setup gate (Plan 1 D1): before enabling auto-download,
+      // Workspace-setup gate: before enabling auto-download,
       // verify the Rescale workspace has the required Auto Download custom
       // field. Block on any validation error, not only the missing-field
       // case — wrong field type and missing options are also runtime
@@ -570,14 +549,7 @@ export function SetupTab() {
       setLastSavedConfig({ ...newConfig });
 
       if (checked) {
-        try {
-          await ReloadDaemonConfig();
-          setStatusMessage('Auto-download enabled. Scanning for your jobs now...');
-        } catch {
-          // Daemon may not be running yet — that's fine for config-first workflow
-          try { await TriggerProfileRescan(); } catch { /* silent */ }
-          setStatusMessage('Auto-download enabled.');
-        }
+        setStatusMessage(`Auto-download enabled${reloadNote(await ReloadDaemonConfig(), true, daemonRunningRef.current)}`);
       } else {
         setStatusMessage('Auto-download disabled. You will no longer receive automatic job downloads.');
       }
@@ -594,7 +566,7 @@ export function SetupTab() {
   };
 
   const canUserPerformActions = () => {
-    // User must be configured AND registered with service
+    // The daemon answers for this user and is running or paused
     return daemonStatus?.userState === 'running' || daemonStatus?.userState === 'paused';
   };
 
@@ -1058,7 +1030,7 @@ export function SetupTab() {
                 </p>
               </div>
             )}
-            {/* Info Banner explaining per-job mode - evergreen, no version refs */}
+            {/* Info Banner explaining per-job mode */}
             <div className="p-3 rounded-md bg-blue-50 text-blue-800 text-sm">
               <p>
                 Jobs are downloaded based on the <strong>"Auto Download"</strong> custom field in your Rescale workspace:
@@ -1304,11 +1276,43 @@ export function SetupTab() {
               </span>
             </div>
 
-            {/* My Downloads: show when daemon is running (IPC connected) */}
-            {(daemonStatus?.ipcConnected || daemonStatus?.running) && (
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">My Downloads</h4>
-
+            {/* Auto-download in the user's own session: Start while it is stopped, its state and controls while it runs */}
+            <div className="border-t border-gray-200 pt-4 mt-4">
+              <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download Control</h4>
+              {!daemonStatus?.running && (
+                <>
+                  <div className="p-4 rounded-lg bg-gray-50">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-3 h-3 rounded-full bg-gray-400" />
+                        <div className="font-medium text-gray-900">Stopped</div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {!daemonConfig?.enabled && (
+                          <div className="text-sm text-amber-600 bg-amber-50 px-3 py-1 rounded-md mr-2">
+                            Enable "Auto-Download" above to start.
+                          </div>
+                        )}
+                        <button
+                          onClick={handleStartDaemon}
+                          disabled={isDaemonLoading || !daemonConfig?.enabled}
+                          className={clsx(
+                            "btn-primary text-sm",
+                            !daemonConfig?.enabled && "opacity-50 cursor-not-allowed"
+                          )}
+                          title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download in your session'}
+                        >
+                          {isDaemonLoading ? 'Starting...' : 'Start Auto-Download'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="mt-2 text-xs text-gray-500">
+                    Auto-download runs in the background in your session and downloads completed jobs.
+                  </p>
+                </>
+              )}
+              {daemonStatus?.running && (
                 <div className={clsx(
                   'p-4 rounded-lg mb-4',
                   daemonStatus?.userState === 'running' ? 'bg-green-50' :
@@ -1338,49 +1342,65 @@ export function SetupTab() {
                            daemonStatus?.userState === 'error' ? 'Error' :
                            'Unknown'}
                         </div>
-                        {daemonStatus?.userState === 'running' && daemonStatus.jobsDownloaded > 0 && (
+                        {daemonStatus && daemonStatus.jobsDownloaded > 0 && (
                           <div className="text-xs text-gray-500">
                             {daemonStatus.jobsDownloaded} job{daemonStatus.jobsDownloaded > 1 ? 's' : ''} downloaded
                           </div>
                         )}
+                        {daemonStatus?.pid > 0 && (
+                          <div className="text-xs text-gray-500">PID: {daemonStatus.pid}</div>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {canUserPerformActions() ? (
+                      {!daemonStatus?.ipcConnected ? (
+                        <span className="text-sm text-amber-600">
+                          IPC unavailable - controls disabled
+                        </span>
+                      ) : (
                         <>
-                          {daemonStatus?.userState === 'paused' ? (
-                            <button
-                              onClick={handleResumeDaemon}
-                              disabled={isDaemonLoading}
-                              className="btn-secondary text-sm"
-                            >
-                              {isDaemonLoading ? 'Resuming...' : 'Resume'}
-                            </button>
+                          {canUserPerformActions() ? (
+                            <>
+                              {daemonStatus?.userState === 'paused' ? (
+                                <button
+                                  onClick={handleResumeDaemon}
+                                  disabled={isDaemonLoading}
+                                  className="btn-secondary text-sm"
+                                >
+                                  Resume Auto-Download
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={handlePauseDaemon}
+                                  disabled={isDaemonLoading}
+                                  className="btn-secondary text-sm"
+                                >
+                                  Pause Auto-Download
+                                </button>
+                              )}
+                              <button
+                                onClick={handleTriggerScan}
+                                disabled={isDaemonLoading || daemonStatus?.userState === 'paused'}
+                                className="btn-outline text-sm"
+                              >
+                                Scan Now
+                              </button>
+                            </>
                           ) : (
-                            <button
-                              onClick={handlePauseDaemon}
-                              disabled={isDaemonLoading}
-                              className="btn-secondary text-sm"
-                            >
-                              {isDaemonLoading ? 'Pausing...' : 'Pause'}
-                            </button>
+                            <span className="text-xs text-gray-500">
+                              {getActionDisabledReason()}
+                            </span>
                           )}
                           <button
-                            onClick={handleTriggerScan}
-                            disabled={isDaemonLoading || daemonStatus?.userState === 'paused'}
-                            className="btn-outline text-sm"
+                            onClick={handleStopDaemon}
+                            disabled={isDaemonLoading}
+                            className="btn-secondary text-sm text-red-600 hover:text-red-700"
                           >
-                            Scan Now
+                            Stop Auto-Download
                           </button>
                         </>
-                      ) : (
-                        <span className="text-xs text-gray-500">
-                          {getActionDisabledReason()}
-                        </span>
                       )}
-                      {/* Persistent "Show Logs" affordance (Plan 1 A8) —
-                          always available, not gated on being in an error
-                          state. */}
+                      {/* Always offered, not only in an error state. */}
                       <button
                         onClick={() => { OpenLogsDirectory().catch(() => {}); }}
                         className="btn-outline text-sm"
@@ -1426,14 +1446,7 @@ export function SetupTab() {
                           Open Logs
                         </button>
                         <button
-                          onClick={async () => {
-                            try {
-                              await ReloadDaemonConfig();
-                              setStatusMessage('Retry triggered');
-                            } catch {
-                              try { await TriggerProfileRescan(); } catch { /* silent */ }
-                            }
-                          }}
+                          onClick={handleRetry}
                           className="text-xs text-blue-700 underline hover:text-blue-900"
                         >
                           Retry
@@ -1444,7 +1457,8 @@ export function SetupTab() {
 
                   {/* Error panel: canonical error text from the backend,
                       compared on errorCode (not on substring matches of
-                      wording). */}
+                      wording). userStateDetail already carries the error, so
+                      it is shown here once, with its age. */}
                   {daemonStatus?.userState === 'error' && (
                     <div className="mt-3 p-2 bg-red-100 rounded border border-red-300">
                       <p className="text-sm font-medium text-red-800 flex items-center gap-2">
@@ -1452,14 +1466,15 @@ export function SetupTab() {
                         {daemonStatus?.errorCode === CodeNoAPIKey
                           ? 'Auto-download cannot find your API key'
                           : daemonStatus?.userStateDetail || 'Error'}
+                        {formatErrorAge(daemonStatus?.lastErrorTime) && (
+                          <span className="font-normal text-red-700">({formatErrorAge(daemonStatus?.lastErrorTime)})</span>
+                        )}
                       </p>
-                      <p className="text-xs text-red-700 mt-1">
-                        {daemonStatus?.errorCode === CodeNoAPIKey
-                          ? 'Ensure API Configuration is saved and Test Connection succeeds.'
-                          : daemonStatus?.errorCode === CodeTransientTimeout
-                            ? 'If this persists, click Retry or Open Logs.'
-                            : daemonStatus?.error || ''}
-                      </p>
+                      {daemonStatus?.errorCode === CodeNoAPIKey && (
+                        <p className="text-xs text-red-700 mt-1">
+                          Ensure API Configuration is saved and Test Connection succeeds.
+                        </p>
+                      )}
                       <div className="mt-2 flex items-center gap-2">
                         <button
                           onClick={() => { OpenLogsDirectory().catch(() => {}); }}
@@ -1468,14 +1483,7 @@ export function SetupTab() {
                           Open Logs
                         </button>
                         <button
-                          onClick={async () => {
-                            try {
-                              await ReloadDaemonConfig();
-                              setStatusMessage('Retry triggered');
-                            } catch {
-                              try { await TriggerProfileRescan(); } catch { /* silent */ }
-                            }
-                          }}
+                          onClick={handleRetry}
                           className="text-xs text-red-700 underline hover:text-red-900"
                         >
                           Retry
@@ -1501,198 +1509,52 @@ export function SetupTab() {
                         Downloads Paused
                       </p>
                       <p className="text-xs text-orange-700 mt-1">
-                        Click "Resume" to continue automatic downloads.
+                        Click "Resume Auto-Download" to continue automatic downloads.
                       </p>
                     </div>
                   )}
                 </div>
+              )}
 
-                {/* Service Details - only show when running */}
-                {canUserPerformActions() && (
-                  <div className="grid grid-cols-2 gap-4 text-sm p-3 bg-gray-50 rounded-lg">
-                    <div>
-                      <span className="text-gray-500">Uptime:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus?.uptime || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Version:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus?.version || 'N/A'}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Active Downloads:</span>
-                      <span className="ml-2 text-gray-900">{daemonStatus?.activeDownloads || 0}</span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">Last Scan:</span>
-                      <span className="ml-2 text-gray-900">
-                        {daemonStatus?.lastScan ? new Date(daemonStatus.lastScan).toLocaleTimeString() : 'Never'}
-                      </span>
-                    </div>
-                    {daemonStatus?.downloadFolder && (
-                      <div className="col-span-2">
-                        <span className="text-gray-500">Download Folder:</span>
-                        <span className="ml-2 text-gray-900 break-all">{daemonStatus.downloadFolder}</span>
-                      </div>
-                    )}
+              {daemonStatus?.running && daemonStatus.ipcConnected && (
+                <div className="grid grid-cols-2 gap-4 text-sm p-3 bg-gray-50 rounded-lg">
+                  <div>
+                    <span className="text-gray-500">Uptime:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus?.uptime || 'N/A'}</span>
                   </div>
-                )}
-
-                {/* Error message */}
-                {daemonStatus?.error && (
-                  <div className="mt-3 text-sm text-yellow-700">
-                    <span className="font-medium">Note:</span> {daemonStatus.error}
-                    {formatErrorAge(daemonStatus.lastErrorTime) && (
-                      <span className="text-yellow-600"> ({formatErrorAge(daemonStatus.lastErrorTime)})</span>
-                    )}
+                  <div>
+                    <span className="text-gray-500">Version:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus?.version || 'N/A'}</span>
                   </div>
-                )}
-
-                <p className="mt-2 text-xs text-gray-500">
-                  These controls only affect your downloads.
-                </p>
-              </div>
-            )}
-
-            {/* Auto-download in the user's own session: start it when it is not running */}
-            {!daemonStatus?.running && (
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download Control</h4>
-                <div className="p-4 rounded-lg bg-gray-50">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-3 h-3 rounded-full bg-gray-400" />
-                      <div className="font-medium text-gray-900">Stopped</div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {!daemonConfig?.enabled && (
-                        <div className="text-sm text-amber-600 bg-amber-50 px-3 py-1 rounded-md mr-2">
-                          Enable "Auto-Download" above to start.
-                        </div>
-                      )}
-                      <button
-                        onClick={handleStartDaemon}
-                        disabled={isDaemonLoading || !daemonConfig?.enabled}
-                        className={clsx(
-                          "btn-primary text-sm",
-                          !daemonConfig?.enabled && "opacity-50 cursor-not-allowed"
-                        )}
-                        title={!daemonConfig?.enabled ? 'Enable auto-download settings first' : 'Start auto-download in your session'}
-                      >
-                        {isDaemonLoading ? 'Starting...' : 'Start Auto-Download'}
-                      </button>
-                    </div>
+                  <div>
+                    <span className="text-gray-500">Active Downloads:</span>
+                    <span className="ml-2 text-gray-900">{daemonStatus?.activeDownloads || 0}</span>
                   </div>
-                </div>
-                <p className="mt-2 text-xs text-gray-500">
-                  Auto-download runs in the background in your session and downloads completed jobs.
-                </p>
-              </div>
-            )}
-
-            {/* Auto-download in the user's own session: controls while it runs */}
-            {daemonStatus?.running && (
-              <div className="border-t border-gray-200 pt-4 mt-4">
-                <h4 className="text-sm font-medium text-gray-700 mb-3">Auto-Download Control</h4>
-                <div className={clsx(
-                  'p-4 rounded-lg',
-                  daemonStatus?.ipcConnected ? 'bg-green-50' : 'bg-yellow-50'
-                )}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className={clsx(
-                        'w-3 h-3 rounded-full',
-                        daemonStatus?.state === 'running' ? 'bg-green-500' :
-                        daemonStatus?.state === 'paused' ? 'bg-yellow-500' :
-                        'bg-gray-400'
-                      )} />
-                      <div>
-                        <div className="font-medium text-gray-900">
-                          {daemonStatus?.state === 'running' ? 'Running' :
-                           daemonStatus?.state === 'paused' ? 'Paused' :
-                           daemonStatus?.ipcConnected ? 'Running' : 'Running (IPC unavailable)'}
-                        </div>
-                        {daemonStatus?.pid > 0 && (
-                          <div className="text-xs text-gray-500">PID: {daemonStatus.pid}</div>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {daemonStatus?.ipcConnected ? (
-                        <>
-                          {daemonStatus?.state === 'paused' ? (
-                            <button
-                              onClick={handleResumeDaemon}
-                              disabled={isDaemonLoading}
-                              className="btn-secondary text-sm"
-                            >
-                              Resume
-                            </button>
-                          ) : (
-                            <button
-                              onClick={handlePauseDaemon}
-                              disabled={isDaemonLoading}
-                              className="btn-secondary text-sm"
-                            >
-                              Pause My Downloads
-                            </button>
-                          )}
-                          <button
-                            onClick={handleTriggerScan}
-                            disabled={isDaemonLoading || daemonStatus?.state === 'paused'}
-                            className="btn-outline text-sm"
-                          >
-                            Scan My Downloads
-                          </button>
-                          <button
-                            onClick={handleStopDaemon}
-                            disabled={isDaemonLoading}
-                            className="btn-secondary text-sm text-red-600 hover:text-red-700"
-                          >
-                            {isDaemonLoading ? 'Stopping...' : 'Stop Auto-Download'}
-                          </button>
-                        </>
-                      ) : (
-                        <span className="text-sm text-amber-600">
-                          IPC unavailable - controls disabled
-                        </span>
-                      )}
-                    </div>
+                  <div>
+                    <span className="text-gray-500">Last Scan:</span>
+                    <span className="ml-2 text-gray-900">
+                      {daemonStatus?.lastScan ? new Date(daemonStatus.lastScan).toLocaleTimeString() : 'Never'}
+                    </span>
                   </div>
-
-                  {/* Service Details (when IPC available) */}
-                  {daemonStatus?.ipcConnected && (
-                    <div className="mt-4 pt-4 border-t border-gray-200 grid grid-cols-2 gap-4 text-sm">
-                      <div>
-                        <span className="text-gray-500">Uptime:</span>
-                        <span className="ml-2 text-gray-900">{daemonStatus.uptime || 'N/A'}</span>
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Version:</span>
-                        <span className="ml-2 text-gray-900">{daemonStatus.version || 'N/A'}</span>
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Jobs Downloaded:</span>
-                        <span className="ml-2 text-gray-900">{daemonStatus.jobsDownloaded}</span>
-                      </div>
-                      <div>
-                        <span className="text-gray-500">Active Downloads:</span>
-                        <span className="ml-2 text-gray-900">{daemonStatus.activeDownloads}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Error message */}
-                  {daemonStatus?.error && (
-                    <div className="mt-3 text-sm text-yellow-700">
-                      <span className="font-medium">Note:</span> {daemonStatus.error}
-                      {formatErrorAge(daemonStatus.lastErrorTime) && (
-                        <span className="text-yellow-600"> ({formatErrorAge(daemonStatus.lastErrorTime)})</span>
-                      )}
+                  {daemonStatus?.downloadFolder && (
+                    <div className="col-span-2">
+                      <span className="text-gray-500">Download Folder:</span>
+                      <span className="ml-2 text-gray-900 break-all">{daemonStatus.downloadFolder}</span>
                     </div>
                   )}
                 </div>
-              </div>
-            )}
+              )}
+
+              {/* An error outside the error state, such as a scan that failed while it keeps running */}
+              {daemonStatus?.running && daemonStatus.error && daemonStatus.userState !== 'error' && (
+                <div className="mt-3 text-sm text-yellow-700">
+                  <span className="font-medium">Note:</span> {daemonStatus.error}
+                  {formatErrorAge(daemonStatus.lastErrorTime) && (
+                    <span className="text-yellow-600"> ({formatErrorAge(daemonStatus.lastErrorTime)})</span>
+                  )}
+                </div>
+              )}
+            </div>
 
           </div>
         </div> {/* End unified Auto-Download card */}

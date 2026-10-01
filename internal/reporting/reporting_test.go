@@ -122,6 +122,12 @@ func TestClassifyErrorClass(t *testing.T) {
 		// macOS privacy protection on Documents, Desktop and Downloads.
 		{"open /Users/jd/Documents/Run_503/in.dat: operation not permitted", ClassLocalFS},
 		{"read /Users/jd/sweep/Run_404/in.dat: input/output error", ClassInternal},
+		// The local file system's own words outrank a path's.
+		{"open /Users/jd/sweep/timeout_study/in.dat: permission denied", ClassLocalFS},
+		{"write /Users/jd/sweep/network_model/out.tar: no space left on device", ClassDiskSpace},
+		// An I/O error stays reportable, whatever folder it happened in.
+		{"read /Users/jd/sweep/network_model/in.dat: input/output error", ClassInternal},
+		{`read C:\sweep\timeout_study\in.dat: The request could not be performed because of an I/O device error.`, ClassInternal},
 		{`open C:\sweep\Run_503\in.dat: The system cannot find the file specified.`, ClassLocalFS},
 		{`open C:\sweep\Run_7\in.dat: Access is denied.`, ClassLocalFS},
 		{`write C:\sweep\Run_7\out.tar: There is not enough space on the disk.`, ClassDiskSpace},
@@ -206,6 +212,9 @@ func TestIsReportable(t *testing.T) {
 		{"local fs read-only", errors.New("write /mnt/ro/f.dat: read-only file system"), CategoryTransfer, false},
 		{"fd exhaustion stays reportable", errors.New("open /tmp/f.dat: too many open files"), CategoryTransfer, true},
 		{"local fs name too long", errors.New("open /tmp/x: file name too long"), CategoryTransfer, false},
+		// A refusal of what the user asked for, however it is worded.
+		{"usage error", UsageError(errors.New("No files found in the selected paths")), CategoryJobCreate, false},
+		{"wrapped usage error", fmt.Errorf("start: %w", UsageError(errors.New("some unexpected error"))), CategoryTransfer, false},
 
 		// Reportable: server errors and unclassified internal errors
 		{"server 500", errors.New("API returned 500 internal server error"), CategoryTransfer, true},

@@ -17,7 +17,7 @@ import {
   BeakerIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
-import { useJobStore, useConfigStore, useRunStore, isUnconfirmedRow, isFailedRow, DEFAULT_JOB_TEMPLATE } from '../../stores'
+import { useJobStore, useConfigStore, useRunStore, isUnconfirmedRow, isFailedRow, isCompletedRow, DEFAULT_JOB_TEMPLATE } from '../../stores'
 import type { JobRow, PipelineLogEntry, PipelineStageStats, WorkflowState } from '../../types/jobs'
 import { isTerminalRunState, type RunState } from '../../types/run'
 import { wailsapp } from '../../../wailsjs/go/models'
@@ -241,7 +241,6 @@ export function PURTab() {
     loadMemory,
     loadJobsFromCSV,
     saveJobsToCSV,
-    loadJobFromSGE,
     saveJobToJSON,
     saveJobToSGE,
     purRunOptions,
@@ -380,14 +379,16 @@ export function PURTab() {
     })
   }, [setTemplate])
 
-  const handleLoadTemplateFromCSV = useCallback(async () => {
+  // Loads a job file's first job as the template, whatever its format, and
+  // shows why a file could not be loaded.
+  const loadTemplate = useCallback(async (title: string, load: (path: string) => Promise<wailsapp.JobSpecDTO[]>) => {
     setShowLoadMenu(false)
     try {
-      const path = await App.SelectFile('Select Jobs CSV File')
+      const path = await App.SelectFile(title)
       if (!path) return
       setLoadSaveError(null)
 
-      const jobs = await App.LoadJobsFromCSV(path)
+      const jobs = await load(path)
       if (jobs && jobs.length > 0) {
         mapDTOToTemplate(jobs[0])
       }
@@ -395,38 +396,9 @@ export function PURTab() {
       setLoadSaveError(error instanceof Error ? error.message : String(error))
     }
   }, [mapDTOToTemplate])
-
-  const handleLoadTemplateFromJSON = useCallback(async () => {
-    setShowLoadMenu(false)
-    try {
-      const path = await App.SelectFile('Select Template JSON File')
-      if (!path) return
-      setLoadSaveError(null)
-
-      const jobs = await App.LoadJobsFromJSON(path)
-      if (jobs && jobs.length > 0) {
-        mapDTOToTemplate(jobs[0])
-      }
-    } catch (error) {
-      setLoadSaveError(error instanceof Error ? error.message : String(error))
-    }
-  }, [mapDTOToTemplate])
-
-  const handleLoadTemplateFromSGE = useCallback(async () => {
-    setShowLoadMenu(false)
-    try {
-      const path = await App.SelectFile('Select SGE Script')
-      if (!path) return
-      setLoadSaveError(null)
-
-      const loaded = await loadJobFromSGE(path)
-      if (loaded) {
-        setTemplate(loaded)
-      }
-    } catch (error) {
-      setLoadSaveError(error instanceof Error ? error.message : String(error))
-    }
-  }, [loadJobFromSGE, setTemplate])
+  const handleLoadTemplateFromCSV = () => loadTemplate('Select Jobs CSV File', App.LoadJobsFromCSV)
+  const handleLoadTemplateFromJSON = () => loadTemplate('Select Template JSON File', App.LoadJobsFromJSON)
+  const handleLoadTemplateFromSGE = () => loadTemplate('Select SGE Script', async (path) => [await App.LoadJobFromSGE(path)])
 
   const handleSaveTemplateToCSV = useCallback(async () => {
     setShowSaveMenu(false)
@@ -1589,9 +1561,7 @@ export function PURTab() {
       const runData = activeRun && activeRun.runType === 'pur' ? activeRun : null
       const displayRows = runData ? runData.jobRows : jobRows
       const totalJobs = runData ? runData.totalJobs : (jobRows.length || runStatus.totalJobs || 1)
-      const completedJobs = runData ? runData.completedJobs : displayRows.filter((j) =>
-        j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-      ).length
+      const completedJobs = runData ? runData.completedJobs : displayRows.filter(isCompletedRow).length
       const failedJobs = runData ? runData.failedJobs : displayRows.filter(isFailedRow).length
       // Both action buttons key off the PUR run specifically, so a Single Job run
       // left in runStore offers neither.
@@ -1612,16 +1582,9 @@ export function PURTab() {
     if (workflowState === 'completed') {
       const runData = activeRun && activeRun.runType === 'pur' ? activeRun : null
       const displayRows = runData ? runData.jobRows : jobRows
-      const completedCount = runData ? runData.completedJobs : displayRows.filter((j) =>
-        j.submitStatus === 'completed' || j.submitStatus === 'success' || j.submitStatus === 'skipped'
-      ).length
+      const completedCount = runData ? runData.completedJobs : displayRows.filter(isCompletedRow).length
       const unconfirmedCount = runData ? runData.unconfirmedJobs : displayRows.filter(isUnconfirmedRow).length
-      // An unconfirmed creation carries the platform's ambiguity text in the
-      // row's error, which this tally would otherwise read as a failure.
-      const failedCount = runData ? runData.failedJobs : displayRows.filter((j) =>
-        !isUnconfirmedRow(j) &&
-        (j.submitStatus === 'failed' || j.tarStatus === 'failed' || j.uploadStatus === 'failed' || j.error)
-      ).length
+      const failedCount = runData ? runData.failedJobs : displayRows.filter(isFailedRow).length
       const wasCancelled = runData?.status === 'cancelled' || runStatus.state === 'cancelled'
 
       return renderPipelineResultsView({

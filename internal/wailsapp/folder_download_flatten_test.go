@@ -16,6 +16,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/core"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -82,7 +83,8 @@ func describe(tasks []transfer.TransferTask) string {
 // a top-level file that happens to be named Output, keep their paths. Of two
 // files that flatten to one local file, ignoring case, Output's is downloaded
 // and Input's is a failed row naming it. Refusals still apply at the flattened
-// path: a name the scan refused, and a link where the file would land.
+// path: a name the scan refused, and a link where the file would land. No
+// refusal is offered as an error report.
 func TestFolderDownloadFlattensTheJobSplitOnly(t *testing.T) {
 	folder := func(id, name string) map[string]any { return folderEntry("folder", id, name) }
 	file := func(id, name string) map[string]any { return folderEntry("file", id, name) }
@@ -120,8 +122,9 @@ func TestFolderDownloadFlattensTheJobSplitOnly(t *testing.T) {
 	wantRefused := []string{"bad.", "f1", "f2", "linked.dat"} // by name, or by file ID for Input's clashing files
 	var started, refused []string
 	var duplicate string
+	var refusals []error
 	waitForTasks(eng, func(tasks []transfer.TransferTask) bool {
-		started, refused, duplicate = nil, nil, ""
+		started, refused, duplicate, refusals = nil, nil, "", nil
 		for i := range tasks {
 			task := &tasks[i]
 			switch {
@@ -132,8 +135,10 @@ func TestFolderDownloadFlattensTheJobSplitOnly(t *testing.T) {
 				if task.Source == "f2" {
 					duplicate = task.Error.Error()
 				}
+				refusals = append(refusals, task.Error)
 			case task.State == transfer.TaskFailed:
 				refused = append(refused, task.Name)
+				refusals = append(refusals, task.Error)
 			}
 		}
 		slices.Sort(started)
@@ -150,6 +155,11 @@ func TestFolderDownloadFlattensTheJobSplitOnly(t *testing.T) {
 		if !strings.Contains(duplicate, want) {
 			t.Errorf("Input/shared.dat was refused with %q, want the reason and both remote paths", duplicate)
 			break
+		}
+	}
+	for _, err := range refusals { // the user's to act on, never an error report
+		if reporting.IsReportable(err, reporting.CategoryTransfer) {
+			t.Errorf("the refusal %q is reportable", err)
 		}
 	}
 	for _, split := range []string{in("JOB", "Input"), in("JOB", "Output")} {

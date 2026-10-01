@@ -91,12 +91,11 @@ func TestFailSingleJob_publishesOneCompleteEvent(t *testing.T) {
 		t.Fatal("no CompleteEvent received")
 	}
 
-	// Drain briefly to confirm no second event.
+	// failSingleJob publishes synchronously, so a second event would be queued.
 	select {
 	case evt := <-ch:
 		t.Errorf("unexpected second event: %T", evt)
-	case <-time.After(50 * time.Millisecond):
-		// good
+	default:
 	}
 }
 
@@ -110,10 +109,39 @@ func TestFailSingleJob_lockRefusalIsNotReported(t *testing.T) {
 	refused := fmt.Errorf("S3Storage upload failed: failed to acquire upload lock: %w", state.ErrUploadLocked)
 	a.failSingleJob("job1", fmt.Errorf("Upload failed: %w", refused))
 
-	select {
+	select { // Report publishes synchronously
 	case event := <-ch:
 		t.Fatalf("reported a lock refusal: %s", event.(*events.ReportableErrorEvent).ErrorMessage)
-	case <-time.After(200 * time.Millisecond):
+	default:
+	}
+}
+
+// A single job whose selected folders hold no file fails, and the refusal is
+// the user's to act on, so the GUI offers no error report for it.
+func TestStartSingleJob_anEmptySelectionIsNotReported(t *testing.T) {
+	setIsolatedUserConfigEnv(t)
+	eng, err := core.NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &App{engine: eng, reporter: reporting.NewReporter(eng.Events())}
+	ch := eng.Events().Subscribe(events.EventReportableError)
+
+	if _, err := a.StartSingleJob(SingleJobInputDTO{InputMode: "localFiles", LocalFiles: []string{t.TempDir()}, Job: JobSpecDTO{JobName: "job1"}}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); eng.IsRunActive(); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the run did not end")
+		}
+	}
+	if states := eng.GetState().GetAllStates(); len(states) != 1 || states[0].ErrorMessage != "No files found in the selected paths" {
+		t.Fatalf("states %+v, want the job failed for its empty selection", states)
+	}
+	select {
+	case event := <-ch:
+		t.Errorf("reported the refusal: %s", event.(*events.ReportableErrorEvent).ErrorMessage)
+	default:
 	}
 }
 

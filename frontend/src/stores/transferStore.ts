@@ -88,9 +88,8 @@ export interface TransferStats extends wailsapp.TransferStatsDTO {
   totalActive: number
 }
 
-// Plan 3: daemon transfers are merged into the unified tasks/batches arrays
-// with sourceLabel='Daemon'. No separate daemonBatches array. The legacy
-// DaemonBatchStatus type is intentionally removed.
+// Daemon transfers are merged into the tasks and batches arrays with
+// sourceLabel='Daemon'; there is no separate list of them.
 
 interface TransferStore {
   // State
@@ -325,7 +324,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     }
   },
 
-  // Plan 3: fetch the daemon's snapshot (tasks + batches) and merge into
+  // Fetch the daemon's snapshot (tasks + batches) and merge it into
   // the unified arrays. Daemon-labeled rows render with a Daemon badge in
   // the main Transfers tab; per-row cancel/retry routes to the daemon-side
   // Wails methods (see cancelBatch/cancelTransfer/retryFailedInBatch).
@@ -546,7 +545,7 @@ export const useTransferStore = create<TransferStore>((set, get) => ({
     })
   },
 
-  // Plan 3: per-row actions route to the daemon when sourceLabel === 'Daemon',
+  // Per-row actions route to the daemon when sourceLabel === 'Daemon',
   // otherwise the local engine. Daemon rows talk to the daemon over IPC via
   // CancelDaemon* / RetryFailedInDaemonBatch Wails bindings.
   cancelTransfer: async (taskId: string) => {

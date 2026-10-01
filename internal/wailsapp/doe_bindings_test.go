@@ -208,14 +208,6 @@ func TestGetDOEMethods_DescribesEveryMethod(t *testing.T) {
 	}
 }
 
-func TestDefaultDOEMaxCases(t *testing.T) {
-	app := &App{}
-
-	if got := app.DefaultDOEMaxCases(); got != doe.DefaultMaxCases {
-		t.Errorf("DefaultDOEMaxCases() = %d, want %d", got, doe.DefaultMaxCases)
-	}
-}
-
 // The DTOs cross the Wails boundary as JSON, so an empty case list has to
 // serialize as [] rather than null for the frontend to map over it.
 func TestDOEResultDTO_SerializesEmptyCasesAsArray(t *testing.T) {

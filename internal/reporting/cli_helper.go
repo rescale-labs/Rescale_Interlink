@@ -13,11 +13,14 @@ type usageError struct{ error }
 
 func (e usageError) Unwrap() error { return e.error }
 
-// UsageError marks err as a refusal of the command line (a template, path or
-// other input the command will not take) that its wording alone does not show.
-// HandleCLIError prints it without a report. Mark only the command's own
-// refusals, never a failure it passes on.
+// UsageError marks err as a refusal of what the user asked for (a template,
+// path or other input the command or the GUI will not take) that its wording
+// alone does not show. It is never reported: IsReportable is false for it.
+// Mark only the caller's own refusals, never a failure it passes on.
 func UsageError(err error) error { return usageError{err} }
+
+// IsUsageError reports whether err, or an error it wraps, is marked by UsageError.
+func IsUsageError(err error) bool { return errors.As(err, new(usageError)) }
 
 // isCLIUsageError returns true for Cobra parse errors and local validation
 // errors that represent user mistakes, not system failures.
@@ -137,7 +140,7 @@ func HandleCLIError(err error, mode, operation, backend string) string {
 	}
 
 	// CLI usage errors (typos, wrong flags, bad local paths) are user mistakes
-	if errors.As(err, new(usageError)) || isCLIUsageError(err.Error()) {
+	if isCLIUsageError(err.Error()) {
 		return ""
 	}
 

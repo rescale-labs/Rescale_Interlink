@@ -33,26 +33,31 @@ func translateAPIError(err error) string {
 	}
 
 	errStr := err.Error()
-	errLower := strings.ToLower(errStr)
 	status, _ := reporting.StatusOf(err) // the status err states, not digits in a name or ID
+	// Words decide only where no status is stated: beside one they can be a
+	// folder's name, as in the classifier.
+	words := ""
+	if status == 0 {
+		words = strings.ToLower(errStr)
+	}
 
 	// Common error patterns and their user-friendly messages
 	switch {
-	case strings.Contains(errLower, "duplicate") || strings.Contains(errLower, "already exists"):
+	case strings.Contains(words, "duplicate") || strings.Contains(words, "already exists"):
 		return "Item already exists with that name"
-	case status == 401 || strings.Contains(errLower, "unauthorized"):
+	case status == 401 || strings.Contains(words, "unauthorized"):
 		return "API key is invalid or expired - please update your API key"
-	case status == 403 || strings.Contains(errLower, "forbidden"):
+	case status == 403 || strings.Contains(words, "forbidden"):
 		return "Access denied - you don't have permission for this operation"
-	case status == 404 || strings.Contains(errLower, "not found"):
+	case status == 404 || strings.Contains(words, "not found"):
 		return "Item not found - it may have been deleted or moved"
-	case status == 429 || strings.Contains(errLower, "rate limit"):
+	case status == 429 || strings.Contains(words, "rate limit"):
 		return "Rate limit exceeded - please wait a moment and try again"
-	case status == 500 || strings.Contains(errLower, "internal server"):
+	case status == 500 || strings.Contains(words, "internal server"):
 		return "Server error - please try again later"
-	case strings.Contains(errLower, "timeout") || strings.Contains(errLower, "deadline exceeded"):
+	case strings.Contains(words, "timeout") || strings.Contains(words, "deadline exceeded"):
 		return "Request timed out - check your network connection"
-	case strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "no such host"):
+	case strings.Contains(words, "connection refused") || strings.Contains(words, "no such host"):
 		return "Cannot connect to server - check your network connection"
 	default:
 		// Pass through the original error for uncommon errors
@@ -808,10 +813,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 				localPath, pathErr := resolveSafeDownloadPath(relPath, rootOutputDir)
 				// A name the scan refused, or a link or other non-file where
 				// the file belongs, which the merge skip below would take for
-				// the file: a failed row with the reason, and no transfer.
+				// the file: a failed row with the reason, and no transfer. A
+				// name is the user's to fix on the platform, never a report.
 				refusal := event.File.Err
 				if refusal != nil {
 					localPath, pathErr = rootOutputDir, nil
+					refusal = reporting.UsageError(refusal)
 				} else if pathErr == nil {
 					refusal = validation.ValidateDownloadTarget(localPath)
 				}
@@ -829,8 +836,8 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 					if first, taken := flattened[key]; !taken {
 						flattened[key] = event.File.RelativePath
 					} else if movedFrom != "" {
-						refusal = fmt.Errorf("file %s not downloaded: without the Input/Output split it lands on the same local file as %s",
-							validation.Quote(event.File.RelativePath), validation.Quote(first))
+						refusal = reporting.UsageError(fmt.Errorf("file %s not downloaded: without the Input/Output split it lands on the same local file as %s",
+							validation.Quote(event.File.RelativePath), validation.Quote(first)))
 						localPath, _ = resolveSafeDownloadPath(event.File.RelativePath, rootOutputDir)
 					}
 				}
@@ -841,10 +848,12 @@ func (a *App) StartFolderDownload(folderID string, folderName string, destPath s
 					ts.GetQueue().UpdateBatchDiscovered(enumID, filesQueued, totalBytes)
 					continue
 				}
-				// In merge mode, skip files that already exist locally, unless
-				// shorter than the file is: an interrupted download left them.
+				// In merge mode, skip a file already there when it has the
+				// remote file's size, as the CLI does: a shorter one is what an
+				// interrupted download leaves, and a longer one is another file.
+				// With no size known, being there is all there is to go on.
 				if mergeMode {
-					if info, err := os.Stat(localPath); err == nil && info.Size() >= event.File.Size {
+					if info, err := os.Stat(localPath); err == nil && (event.File.Size <= 0 || info.Size() == event.File.Size) {
 						continue
 					}
 				}

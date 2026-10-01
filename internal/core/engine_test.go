@@ -224,35 +224,6 @@ func TestEngine_Stop(t *testing.T) {
 	}
 }
 
-func TestEngine_SaveConfig(t *testing.T) {
-	cfg, _ := config.LoadConfigCSV("")
-	cfg.TarWorkers = 8
-	cfg.APIBaseURL = "https://platform.rescale.com"
-
-	engine, err := NewEngine(cfg)
-	if err != nil {
-		t.Fatalf("NewEngine failed: %v", err)
-	}
-
-	savePath := filepath.Join(t.TempDir(), "test_config.csv")
-	if err := engine.SaveConfig(savePath); err != nil {
-		t.Fatalf("SaveConfig failed: %v", err)
-	}
-
-	if _, err := os.Stat(savePath); os.IsNotExist(err) {
-		t.Error("Config file was not created")
-	}
-
-	// Load it back and verify
-	loadedCfg, err := config.LoadConfigCSV(savePath)
-	if err != nil {
-		t.Fatalf("Failed to load saved config: %v", err)
-	}
-	if loadedCfg.TarWorkers != 8 {
-		t.Errorf("Expected TarWorkers=8, got %d", loadedCfg.TarWorkers)
-	}
-}
-
 // TestEngine_ScanToSpecs_AbsolutePaths covers the PartDirs scan root; the
 // recursive test below covers the working-directory fallback.
 func TestEngine_ScanToSpecs_AbsolutePaths(t *testing.T) {
@@ -351,18 +322,6 @@ func TestEngine_RecursiveScan_SkipDir(t *testing.T) {
 		}
 	}
 	wantAbsoluteDirs(t, jobs)
-}
-
-func TestEngine_JobMonitoring(t *testing.T) {
-	engine, _ := NewEngine(nil)
-
-	engine.StartJobMonitoring(100 * time.Millisecond)
-
-	// Should be able to start without errors
-	time.Sleep(50 * time.Millisecond)
-
-	// Should be able to stop without errors
-	engine.StopJobMonitoring()
 }
 
 // TestEngine_RunContext walks the run-context state machine. Each row gets a

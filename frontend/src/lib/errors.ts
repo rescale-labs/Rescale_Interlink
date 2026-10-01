@@ -20,18 +20,3 @@ export const CodeWorkspaceFieldWrongType = "workspace_field_wrong_type";
 export const CodeWorkspaceFieldMissingOptions = "workspace_field_missing_options";
 export const CodeNoTokenFile = "no_token_file";
 export const CodeScanFailed = "scan_failed";
-
-export type ErrorCode =
-  | typeof CodeNoAPIKey
-  | typeof CodeDownloadFolderInaccessible
-  | typeof CodeIPCNotResponding
-  | typeof CodeCLINotFound
-  | typeof CodeServiceAlreadyRunning
-  | typeof CodePermissionDenied
-  | typeof CodeTransientTimeout
-  | typeof CodeConfigInvalid
-  | typeof CodeWorkspaceMissingField
-  | typeof CodeWorkspaceFieldWrongType
-  | typeof CodeWorkspaceFieldMissingOptions
-  | typeof CodeNoTokenFile
-  | typeof CodeScanFailed;

@@ -433,8 +433,3 @@ func (cfg *DaemonConfig) GetExcludePatterns() []string {
 	}
 	return result
 }
-
-// SetExcludePatterns sets the exclude patterns from a slice.
-func (cfg *DaemonConfig) SetExcludePatterns(patterns []string) {
-	cfg.Filters.Exclude = strings.Join(patterns, ",")
-}

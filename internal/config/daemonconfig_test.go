@@ -326,19 +326,3 @@ func TestDaemonConfigGetExcludePatterns(t *testing.T) {
 		t.Errorf("Unexpected patterns (should be trimmed): %v", patterns)
 	}
 }
-
-func TestDaemonConfigSetExcludePatterns(t *testing.T) {
-	cfg := NewDaemonConfig()
-
-	// Set patterns
-	cfg.SetExcludePatterns([]string{"foo", "bar", "baz"})
-	if cfg.Filters.Exclude != "foo,bar,baz" {
-		t.Errorf("Expected 'foo,bar,baz', got '%s'", cfg.Filters.Exclude)
-	}
-
-	// Empty patterns
-	cfg.SetExcludePatterns(nil)
-	if cfg.Filters.Exclude != "" {
-		t.Errorf("Expected empty string, got '%s'", cfg.Filters.Exclude)
-	}
-}

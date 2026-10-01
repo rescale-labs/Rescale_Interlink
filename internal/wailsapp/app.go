@@ -192,8 +192,8 @@ func (a *App) logError(stage, message string) {
 	a.log("ERROR", stage, message)
 }
 
-// ClearCatalogCache clears the cached software/hardware catalogs.
-func (a *App) ClearCatalogCache() {
+// clearCatalogCache clears the cached software/hardware catalogs.
+func (a *App) clearCatalogCache() {
 	a.catalogCacheMu.Lock()
 	defer a.catalogCacheMu.Unlock()
 	a.cachedCoreTypes = nil
@@ -245,7 +245,7 @@ func (a *App) startup(ctx context.Context) {
 		cloud.SetDetailedLogging(a.config.DetailedLogging)
 	}
 
-	// Plan 2 path migrations (idempotent; current-user scope in GUI).
+	// Moves files an earlier version kept elsewhere; safe on every start.
 	config.RunStartupMigrations(wailsLogger)
 
 	// Auto-launch tray companion if available (Windows only, no-op on other platforms)

@@ -10,6 +10,8 @@ import { computeStageStats } from '../../utils/stageStats'
 const app = vi.hoisted(() => ({
   SaveFile: vi.fn(),
   SaveJobsToCSV: vi.fn(),
+  SelectFile: vi.fn(),
+  LoadJobFromSGE: vi.fn(),
 }))
 
 vi.mock('../../../wailsjs/go/wailsapp/App', () => app)
@@ -56,6 +58,40 @@ describe('PURTab export to CSV', () => {
 
     await vi.waitFor(() => expect(app.SaveJobsToCSV).toHaveBeenCalled())
     expect(screen.queryByText(/cannot carry/)).toBeNull()
+  })
+})
+
+describe('PURTab loading base job settings', () => {
+  it('says why an SGE script could not be loaded', async () => {
+    app.SelectFile.mockResolvedValue('/fake/job.sh')
+    app.LoadJobFromSGE.mockRejectedValue(new Error('FAKE: not an SGE script'))
+    useJobStore.setState({ workflowState: 'pathChosen', workflowPath: 'createNew' })
+
+    render(<PURTab />)
+    fireEvent.click(screen.getByRole('button', { name: /Load Existing Base Job Settings/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'SGE Script' }))
+
+    expect(await screen.findByText('FAKE: not an SGE script')).toBeInTheDocument()
+  })
+
+  // An SGE script is a template like a CSV or JSON one: what it sets is kept,
+  // and what it leaves empty takes the template's default.
+  it('keeps an SGE script\'s settings and defaults what it leaves empty', async () => {
+    app.SelectFile.mockResolvedValue('/fake/job.sh')
+    app.LoadJobFromSGE.mockResolvedValue({
+      ...DEFAULT_JOB_TEMPLATE, jobName: 'Sim_SGE', coreType: 'FAKE-CORE', coresPerSlot: 8, command: './run.sh', submitMode: '',
+    })
+    useJobStore.setState({ workflowState: 'pathChosen', workflowPath: 'createNew' })
+
+    render(<PURTab />)
+    fireEvent.click(screen.getByRole('button', { name: /Load Existing Base Job Settings/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'SGE Script' }))
+
+    await vi.waitFor(() => expect(useJobStore.getState().template.jobName).toBe('Sim_SGE'))
+    expect(useJobStore.getState().template).toMatchObject({
+      coreType: 'FAKE-CORE', coresPerSlot: 8, command: './run.sh', submitMode: DEFAULT_JOB_TEMPLATE.submitMode,
+    })
+    useJobStore.setState({ template: DEFAULT_JOB_TEMPLATE })
   })
 })
 
@@ -183,5 +219,19 @@ describe('PURTab results for unconfirmed creations', () => {
 
     expect(screen.getByText('Pipeline Complete!')).toBeInTheDocument()
     expect(screen.queryByText(/could not be confirmed as created/)).toBeNull()
+  })
+
+  // A job that failed and then completed keeps its old error in the row: it is
+  // done, not failed, in the tally and the failure panel, as in the run view.
+  it('counts a completed job with an old error as done', () => {
+    useJobStore.setState({
+      workflowState: 'completed',
+      jobRows: [{ ...doneRow('Run_1'), error: 'FAKE earlier upload failure' }],
+    })
+
+    render(<PURTab />)
+
+    expect(screen.getByText('Pipeline Complete!')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /jobs? failed/i })).toBeNull()
   })
 })

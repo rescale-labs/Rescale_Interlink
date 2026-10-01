@@ -37,14 +37,17 @@ func TestMapSortToOrdering(t *testing.T) {
 	}
 }
 
-// The message follows the status an API error states, never digits in a
-// folder's name or ID.
+// The message follows the status an API error states, never digits or words in
+// a folder's name or ID; the words decide only when no status is stated.
 func TestTranslateAPIErrorReadsOnlyStatedStatus(t *testing.T) {
 	for msg, want := range map[string]string{
 		`create folder failed: status 401: {"detail": "Invalid token."}`: "API key is invalid or expired - please update your API key",
-		`list folder XyZ12 failed: status 404: {"detail": "Not found."}`: "Item not found - it may have been deleted or moved",
+		`list folder XyZ12 failed: status 404: {"detail": "Gone."}`:      "Item not found - it may have been deleted or moved",
 		`list folder Ab403 failed: status 500: oops`:                     "Server error - please try again later",
 		`create folder "Run_404" failed: status 400: bad name`:           `create folder "Run_404" failed: status 400: bad name`,
+		`list folder "Not Found Cases" failed: status 500: oops`:         "Server error - please try again later",
+		`create folder "timeout_study" failed: status 400: bad name`:     `create folder "timeout_study" failed: status 400: bad name`,
+		`list folder failed: dial tcp: connection refused`:               "Cannot connect to server - check your network connection",
 		// the rest pass through, less their credentials
 		`create folder failed: status 400: https://a.blob.core.windows.net/c?sv=1&sig=FAKESIG`: `create folder failed: status 400: https://a.blob.core.windows.net/c?sv=REDACTED&sig=REDACTED`,
 	} {
