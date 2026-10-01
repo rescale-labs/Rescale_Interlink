@@ -13,6 +13,9 @@ import (
 // the first and then find it running.
 func TestWritePIDFile_TwoConcurrentStartsClaimOnce(t *testing.T) {
 	isolateHome(t)
+	holds := HoldsClaim
+	HoldsClaim = func(pid int) bool { return pid == os.Getppid() || holds(pid) } // the parent is a daemon
+	t.Cleanup(func() { HoldsClaim = holds })
 	second := stall(t, &pidClaimStep, func() error {
 		// The first claim, written and not yet published, is the parent's.
 		if err := os.WriteFile(PIDFilePath()+".tmp", []byte(strconv.Itoa(os.Getppid())), 0o600); err != nil {
@@ -34,10 +37,13 @@ func TestWritePIDFile_TwoConcurrentStartsClaimOnce(t *testing.T) {
 // A claim takes over a PID file that names no running daemon, or a crash would
 // lock the daemon out for good: a corrupt one, or one naming this very process,
 // which an earlier process with the same PID left, as a restarted container's
-// daemon finds. It also clears the PID file of a version that kept it under
-// %APPDATA% on Windows.
+// daemon finds, though it is a daemon itself. It also clears the PID file of a
+// version that kept it under %APPDATA% on Windows.
 func TestWritePIDFile_TakesOverAFileNamingNoDaemon(t *testing.T) {
 	isolateHome(t)
+	holds := HoldsClaim
+	HoldsClaim = func(pid int) bool { return pid == os.Getpid() || holds(pid) } // this process is a daemon
+	t.Cleanup(func() { HoldsClaim = holds })
 	legacy := oldPIDFilePath()
 	if legacy != "" {
 		writeFile(t, legacy, "1")

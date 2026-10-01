@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -46,7 +47,10 @@ func startHelper(t *testing.T, dir, name, mode string, args ...string) *exec.Cmd
 // this test binary, copied under the CLI's name and run with 'daemon run'. On
 // Unix it asks with SIGTERM and forces SIGKILL only when that is ignored. What
 // a reused PID can name instead is refused and left running: an Interlink
-// command other than 'daemon run', the GUI itself, and any other program.
+// command other than 'daemon run', the GUI itself, and any other program; so
+// is a daemon whose name or arguments it does not know, as a mistake would end
+// another process. A PID file holds for a daemon however it was started, as a
+// mistake would start a second one, and for nothing else.
 func TestKillDaemon_EndsOnlyThisUsersDaemon(t *testing.T) {
 	if mode := os.Getenv("INTERLINK_TEST_KILL_DAEMON"); mode != "" {
 		if mode == "ignore SIGTERM" {
@@ -57,23 +61,37 @@ func TestKillDaemon_EndsOnlyThisUsersDaemon(t *testing.T) {
 		return
 	}
 
+	isolateHome(t)
 	dir := t.TempDir()
 	other := exec.Command("sleep", "60")
-	if runtime.GOOS == "windows" {
-		other = exec.Command("ping", "-n", "60", "127.0.0.1")
+	guiEnded, linkEnded := "terminated", "" // macOS and Linux run the app's daemon from the app
+	switch runtime.GOOS {
+	case "windows":
+		other, guiEnded = exec.Command("ping", "-n", "60", "127.0.0.1"), ""
+	case "linux":
+		linkEnded = "terminated" // Linux names a process for the file a link names, macOS for the link
+	}
+	if runtime.GOOS != "windows" { // where making a link needs a privilege: the helper is a copy of that name
+		if err := os.Symlink(filepath.Join(dir, "rescale-int"), filepath.Join(dir, "interlink")); err != nil {
+			t.Fatal(err)
+		}
 	}
 	const notDaemon = "is not an Interlink daemon, so it was not ended"
 	for _, tc := range []struct {
-		name   string
-		cmd    *exec.Cmd
-		ended  string // the signal that ended it; "" when it must be left running
-		refuse string
+		name  string
+		cmd   *exec.Cmd
+		held  bool   // whether a PID file naming it holds
+		ended string // the signal that ended it; "" when it must be left running
 	}{
-		{"a daemon", startHelper(t, dir, "rescale-int", "run", "daemon", "run", "--ipc"), "terminated", ""},
-		{"a daemon that ignores SIGTERM", startHelper(t, dir, "rescale-int", "ignore SIGTERM", "daemon", "run"), "killed", ""},
-		{"a transfer", startHelper(t, dir, "rescale-int", "run", "upload", "big.dat"), "", notDaemon},
-		{"the GUI", startHelper(t, dir, "rescale-int-gui", "run"), "", notDaemon},
-		{"another program", other, "", notDaemon},
+		{"a daemon", startHelper(t, dir, "rescale-int", "run", "daemon", "run", "--ipc"), true, "terminated"},
+		{"a daemon that ignores SIGTERM", startHelper(t, dir, "rescale-int", "ignore SIGTERM", "daemon", "run"), true, "killed"},
+		{"the GUI's daemon", startHelper(t, dir, "rescale-int-gui", "run", "daemon", "run"), true, guiEnded},
+		{"a renamed daemon", startHelper(t, dir, "rescale-int-4.9.8", "run", "daemon", "run"), true, ""},
+		{"a daemon given a flag before run", startHelper(t, dir, "rescale-int", "run", "daemon", "--debug", "run"), true, ""},
+		{"a daemon started through a link", startHelper(t, dir, "interlink", "run", "daemon", "run"), true, linkEnded},
+		{"a transfer", startHelper(t, dir, "rescale-int", "run", "upload", "big.dat"), false, ""},
+		{"the GUI", startHelper(t, dir, "rescale-int-gui", "run"), false, ""},
+		{"another program", other, false, ""},
 	} {
 		if runtime.GOOS == "windows" && tc.ended == "killed" {
 			continue // Windows has no SIGTERM to ignore
@@ -97,10 +115,23 @@ func TestKillDaemon_EndsOnlyThisUsersDaemon(t *testing.T) {
 				go io.Copy(io.Discard, stdout)
 			}
 
-			err = KillDaemon(tc.cmd.Process.Pid, 2*time.Second)
-			if tc.refuse != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.refuse) {
-					t.Errorf("KillDaemon: %v, want a refusal saying %q", err, tc.refuse)
+			pid := tc.cmd.Process.Pid
+			writeFile(t, PIDFilePath(), strconv.Itoa(pid))
+			if err := CheckPIDFile(); (err != nil) != tc.held {
+				t.Errorf("CheckPIDFile with the PID file naming %s: %v", tc.name, err)
+			}
+			if got := IsDaemonRunning(); (got == pid) != tc.held {
+				t.Errorf("IsDaemonRunning with the PID file naming %s = %d", tc.name, got)
+			}
+			if err := WritePIDFile(); (err != nil) != tc.held {
+				t.Errorf("WritePIDFile over the PID file naming %s: %v", tc.name, err)
+			}
+			RemovePIDFile()
+
+			err = KillDaemon(pid, 2*time.Second)
+			if tc.ended == "" {
+				if err == nil || !strings.Contains(err.Error(), notDaemon) {
+					t.Errorf("KillDaemon: %v, want a refusal saying %q", err, notDaemon)
 				}
 				select {
 				case <-exited:
@@ -112,7 +143,7 @@ func TestKillDaemon_EndsOnlyThisUsersDaemon(t *testing.T) {
 			if err != nil {
 				t.Fatalf("KillDaemon: %v", err)
 			}
-			if gone, err := state.ProcessExited(tc.cmd.Process.Pid); !gone {
+			if gone, err := state.ProcessExited(pid); !gone {
 				t.Fatalf("KillDaemon returned before the process exited (%v)", err)
 			}
 			<-exited

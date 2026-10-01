@@ -344,7 +344,8 @@ func (a *App) TestAutoDownloadConnection(downloadFolder string) {
 }
 
 // ReloadDaemonConfig restarts the running daemon so that it takes the saved
-// configuration, or defers while it downloads.
+// configuration. One that is downloading is left running on its old settings:
+// a deferred reload does not restart it later.
 func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
 	result := ReloadConfigResultDTO{}
 
@@ -529,7 +530,7 @@ type DaemonTransferSnapshotDTO struct {
 }
 
 // daemonReachable reports whether this user's daemon may answer over IPC: its
-// PID file names a live process, or it answers.
+// PID file holds a daemon's claim, or it answers.
 func (a *App) daemonReachable(ctx context.Context, client *ipc.Client) bool {
 	if daemon.IsDaemonRunning() != 0 {
 		return true

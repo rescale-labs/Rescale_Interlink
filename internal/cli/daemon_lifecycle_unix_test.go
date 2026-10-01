@@ -85,6 +85,9 @@ func startStandInDaemon(t *testing.T) <-chan struct{} {
 // interval is invalid, so a run that skips the check fails on it instead.
 func TestDaemonRunRefusesBeforeItChangesAnything(t *testing.T) {
 	running := strconv.Itoa(os.Getppid()) // alive, and not this process
+	holds := daemon.HoldsClaim
+	daemon.HoldsClaim = func(pid int) bool { return pid == os.Getppid() || holds(pid) } // the parent is a daemon
+	t.Cleanup(func() { daemon.HoldsClaim = holds })
 	for _, tc := range []struct {
 		name, folder string // made where a file belongs, so nothing can open it
 		args         []string

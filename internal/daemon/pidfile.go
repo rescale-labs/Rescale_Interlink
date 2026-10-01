@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,8 +36,8 @@ var pidClaimStep = func() {}
 // starting at once must not both do that: each could take the other's file for
 // a stale one, or for none at all while it was still empty. So claims are made
 // one at a time under a lock, a file is replaced only when the process it names
-// has exited, and the new one is written whole and renamed into place, so it is
-// never seen empty.
+// does not hold it (see HoldsClaim), and the new one is written whole and
+// renamed into place, so it is never seen empty.
 func WritePIDFile() error {
 	if oldPath := oldPIDFilePath(); oldPath != "" {
 		os.Remove(oldPath)
@@ -76,14 +77,32 @@ func CheckPIDFile() error {
 	if err != nil {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
-	if exited, _ := state.ProcessExited(pid); !exited && pid != os.Getpid() {
+	if pid != os.Getpid() && HoldsClaim(pid) {
 		return reporting.UsageError(fmt.Errorf("daemon is already running (PID %d)", pid))
 	}
 	return nil
 }
 
+// HoldsClaim reports whether the process with this PID holds the claim of a PID
+// file naming it. How the process was started decides: not liveness, since a
+// forced stop leaves the file behind and its PID soon names another process,
+// which must not keep a daemon from starting; and not the name of its file, as
+// a daemon run from a renamed copy or through a link is one too. The claim
+// holds for this user's process started with 'daemon' and later 'run', and for
+// one whose start cannot be read, as another user's cannot. 'daemon stop
+// --force' also needs the name, since its mistake would end another process. A
+// variable so a test process can stand in for a daemon.
+var HoldsClaim = func(pid int) bool {
+	if exited, _ := state.ProcessExited(pid); exited {
+		return false
+	}
+	_, args, err := processInfo(pid)
+	i := slices.Index(args, "daemon")
+	return err != nil || i >= 0 && slices.Contains(args[i+1:], "run")
+}
+
 // RemovePIDFile removes the PID file if it is still this process's claim. No
-// other process replaces the claim of one that is running.
+// other process replaces the claim of a daemon that is running.
 func RemovePIDFile() {
 	if ReadPIDFile() == os.Getpid() {
 		os.Remove(PIDFilePath())
@@ -113,17 +132,12 @@ func readPIDFile() (int, error) {
 	return pid, nil
 }
 
-// IsDaemonRunning checks if a daemon process is already running.
-// Returns the PID if running, 0 if not. The process counts as running unless
-// the system says it has exited: a probe the system refuses, as it does for
-// another user's process, is not evidence that it is gone. The upload lock
-// judges its owners with the same probe.
+// IsDaemonRunning returns the PID of the daemon the PID file names, or 0 when
+// the file holds no claim: see HoldsClaim. A file naming this process is its
+// own claim.
 func IsDaemonRunning() int {
 	pid := ReadPIDFile()
-	if pid == 0 {
-		return 0
-	}
-	if exited, _ := state.ProcessExited(pid); exited {
+	if pid != os.Getpid() && !HoldsClaim(pid) {
 		return 0
 	}
 	return pid

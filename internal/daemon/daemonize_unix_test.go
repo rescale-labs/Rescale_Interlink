@@ -15,6 +15,9 @@ func TestWritePIDFile_KeepsAClaimItCannotDisprove(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root may signal every process and read every file")
 	}
+	if _, _, err := processInfo(1); err == nil {
+		t.Skip("PID 1 is this user's, as in a container, so a claim can read how it was started")
+	}
 	isolateHome(t)
 	writeFile(t, PIDFilePath(), "1") // init: running, and not ours
 

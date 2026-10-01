@@ -142,7 +142,32 @@ describe('SetupTab auto-download controls', () => {
     await openAdvanced()
 
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('Settings reloaded (will apply when 2 downloads finish)')).toBeInTheDocument()
+    expect(await screen.findByText('Settings reloaded (2 downloads running; restart auto-download to apply)')).toBeInTheDocument()
+  })
+
+  // A daemon reads its settings only as it starts, so turning auto-download off
+  // stops a running one, as Stop Auto-Download does, and says what happened. It
+  // asks whether one runs then, as the panel's last poll can be seconds old,
+  // and stops none when it gets no answer.
+  const status = (running: boolean) => (running ? { running, ipcConnected: true, userState: 'running' } : {})
+  it.each([
+    { name: 'stops one that runs', polled: true, now: true, refusal: '', says: 'Auto-download disabled and stopped' },
+    { name: 'stops one the last poll missed', polled: false, now: true, refusal: '', says: 'Auto-download disabled and stopped' },
+    { name: 'says why one could not be stopped', polled: true, now: true, refusal: 'FAKE no answer', says: 'Auto-download disabled, but it could not be stopped: FAKE no answer' },
+    { name: 'stops none when none runs', polled: false, now: false, refusal: '', says: 'Auto-download disabled' },
+    { name: 'stops none when it cannot tell', polled: true, now: null, refusal: '', says: 'Auto-download disabled; could not check whether it is running' },
+  ])('turning auto-download off $name', async ({ polled, now, refusal, says }) => {
+    app.GetDaemonStatus.mockResolvedValue(status(polled))
+    if (refusal) app.StopDaemon.mockRejectedValueOnce(refusal)
+    await openAdvanced()
+    await screen.findByRole('button', { name: polled ? 'Stop Auto-Download' : 'Start Auto-Download' })
+
+    if (now === null) app.GetDaemonStatus.mockRejectedValueOnce('FAKE no status')
+    else app.GetDaemonStatus.mockResolvedValue(status(now))
+    fireEvent.click(screen.getByLabelText('Enable Auto-Download'))
+    expect(await screen.findByText(says)).toBeInTheDocument()
+    expect(app.StopDaemon).toHaveBeenCalledTimes(now ? 1 : 0)
+    expect(app.SaveDaemonConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }))
   })
 
   // Workspace folders are opt-in, and flattening applies only to them: it is

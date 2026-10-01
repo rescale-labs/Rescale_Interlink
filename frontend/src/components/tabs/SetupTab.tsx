@@ -79,7 +79,7 @@ const PLATFORM_URLS = [
 // which a daemon whose process runs (running) can also give.
 const reloadNote = (result: wailsapp.ReloadConfigResultDTO, enabled: boolean, running: boolean): string => {
   if (result.deferred) {
-    return ` (will apply when ${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} finish)`;
+    return ` (${result.activeDownloads} download${result.activeDownloads > 1 ? 's' : ''} running; restart auto-download to apply)`;
   }
   if (result.applied) return ' and applied';
   if (result.error === 'daemon not running') {
@@ -425,15 +425,17 @@ export function SetupTab() {
     }
   };
 
-  const handleStopDaemon = async () => {
+  // Stop Auto-Download, and turning auto-download off while it runs; done and
+  // failed say how that went.
+  const handleStopDaemon = async (done = 'Daemon stopped', failed = 'Failed to stop daemon') => {
     try {
       setIsDaemonLoading(true);
       setStatusMessage('Stopping daemon...');
       await StopDaemon();
-      setStatusMessage('Daemon stopped');
+      setStatusMessage(done);
       await refreshDaemonStatus();
     } catch (err) {
-      setStatusMessage(`Failed to stop daemon: ${err}`);
+      setStatusMessage(`${failed}: ${err}`);
     } finally {
       setIsDaemonLoading(false);
     }
@@ -551,7 +553,16 @@ export function SetupTab() {
       if (checked) {
         setStatusMessage(`Auto-download enabled${reloadNote(await ReloadDaemonConfig(), true, daemonRunningRef.current)}`);
       } else {
-        setStatusMessage('Auto-download disabled. You will no longer receive automatic job downloads.');
+        // A running daemon read the setting as it started, and keeps
+        // downloading. Ask whether one runs now: the last poll can be old.
+        const status = await GetDaemonStatus().catch(() => null);
+        if (!status) {
+          setStatusMessage('Auto-download disabled; could not check whether it is running');
+        } else if (status.running) {
+          await handleStopDaemon('Auto-download disabled and stopped', 'Auto-download disabled, but it could not be stopped');
+        } else {
+          setStatusMessage('Auto-download disabled');
+        }
       }
 
       // Refresh status to show updated user state
@@ -1392,7 +1403,7 @@ export function SetupTab() {
                             </span>
                           )}
                           <button
-                            onClick={handleStopDaemon}
+                            onClick={() => handleStopDaemon()}
                             disabled={isDaemonLoading}
                             className="btn-secondary text-sm text-red-600 hover:text-red-700"
                           >
