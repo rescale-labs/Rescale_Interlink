@@ -4,7 +4,9 @@ package filescan
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -28,6 +30,7 @@ type ScanOptions struct {
 	RootDir           string             // Base directory to search in
 	PrimaryPattern    string             // Primary file pattern (e.g., "*.inp", "inputs/*.inp", "**/*.inp")
 	SecondaryPatterns []SecondaryPattern // Secondary files to attach to each primary
+	Recursive         bool               // Search subfolders too: a pattern without "**" is matched as "**/<pattern>"
 }
 
 // JobFiles represents files found for a single job.
@@ -64,17 +67,28 @@ func ScanFiles(opts ScanOptions) ScanResult {
 		return ScanResult{Error: fmt.Sprintf("cannot resolve scan root: %v", err)}
 	}
 
-	primaryFiles, err := glob.FilesUnderRoot(root, opts.PrimaryPattern)
+	// Recursive puts "**/" in front, so one walk serves both ways of asking. A
+	// pattern the root cannot hold is left for FilesUnderRoot to refuse: cleaning
+	// "**/../x" would leave "x", a different pattern.
+	pattern := opts.PrimaryPattern
+	if cleaned := path.Clean(filepath.ToSlash(pattern)); opts.Recursive && !strings.Contains(pattern, "**") &&
+		!filepath.IsAbs(pattern) && fs.ValidPath(cleaned) && cleaned != "." {
+		pattern = "**/" + cleaned
+	}
+
+	primaryFiles, err := glob.FilesUnderRoot(root, pattern)
 	if err != nil {
 		return ScanResult{Error: fmt.Sprintf("invalid primary pattern: %v", err)}
 	}
 
 	if len(primaryFiles) == 0 {
-		msg := fmt.Sprintf("no files found matching pattern: %s", opts.PrimaryPattern)
+		msg := fmt.Sprintf("no files found matching pattern: %s", pattern)
 		// A bare "*.xml" reads as "every .xml file", but it searches the root
 		// folder alone.
-		if !strings.Contains(opts.PrimaryPattern, "**") && !strings.Contains(filepath.ToSlash(opts.PrimaryPattern), "/") {
-			msg += "; to search subfolders too, use **/" + opts.PrimaryPattern
+		if !strings.Contains(pattern, "**") && !strings.Contains(filepath.ToSlash(pattern), "/") {
+			msg += "; to search subfolders too, use **/" + pattern
+		} else if opts.Recursive {
+			msg += "; a recursive scan does not go into hidden or linked folders"
 		}
 		return ScanResult{Error: msg}
 	}

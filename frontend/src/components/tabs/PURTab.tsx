@@ -15,13 +15,15 @@ import {
   ChevronDownIcon,
   EyeIcon,
   BeakerIcon,
+  PlusIcon,
+  CloudIcon,
 } from '@heroicons/react/24/outline'
 import clsx from 'clsx'
 import { useJobStore, useConfigStore, useRunStore, isUnconfirmedRow, isFailedRow, isCompletedRow, DEFAULT_JOB_TEMPLATE } from '../../stores'
 import type { JobRow, PipelineLogEntry, PipelineStageStats, WorkflowState } from '../../types/jobs'
 import { isTerminalRunState, type RunState } from '../../types/run'
 import { wailsapp } from '../../../wailsjs/go/models'
-import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary } from '../widgets'
+import { TemplateBuilder, DOEBuilder, JobsTable, StatsBar, PipelineStageSummary, PipelineLogPanel, ErrorSummary, RemoteFilePicker, SelectedFilesList } from '../widgets'
 import { formatDuration } from '../../utils/formatDuration'
 import { normalizeJobSpec } from '../../utils/jobs'
 import * as App from '../../../wailsjs/go/wailsapp/App'
@@ -459,6 +461,57 @@ export function PURTab() {
       console.error('Failed to select directory:', error)
     }
   }, [setScanOptions])
+
+  // Common Input Files: the list and its buttons edit the comma-separated value
+  // the run takes, split here as the Go side splits it.
+  const commonEntries = useMemo(
+    () => purRunOptions.commonInputFiles.split(',').map((entry) => entry.trim()).filter(Boolean),
+    [purRunOptions.commonInputFiles],
+  )
+  const [commonInfo, setCommonInfo] = useState<Record<string, wailsapp.LocalFileInfoDTO>>({})
+  const [showCommonPicker, setShowCommonPicker] = useState(false)
+
+  // Sizes for the list, fetched once per entry unless the lookup failed; an id:
+  // entry has none.
+  const fetchCommonInfo = useCallback(async (entries: string[]) => {
+    const local = entries.filter((entry) => !entry.startsWith('id:') && (!commonInfo[entry] || commonInfo[entry].error))
+    if (local.length === 0) return
+    try {
+      const infos = await App.GetLocalFilesInfo(local)
+      setCommonInfo((prev) => ({ ...prev, ...Object.fromEntries(infos.map((info) => [info.path, info])) }))
+    } catch (error) {
+      console.error('Failed to fetch file info:', error)
+    }
+  }, [commonInfo])
+
+  // An entry removed is looked up afresh if it is added again.
+  const setCommonEntries = useCallback((entries: string[]) => {
+    setPURRunOptions({ commonInputFiles: entries.join(',') })
+    setCommonInfo((prev) => Object.fromEntries(Object.entries(prev).filter(([path]) => entries.includes(path))))
+  }, [setPURRunOptions])
+
+  const addCommonEntries = useCallback((added: string[]) => {
+    const fresh = added.filter((entry) => !commonEntries.includes(entry))
+    setCommonEntries([...commonEntries, ...fresh])
+    fetchCommonInfo(fresh)
+  }, [commonEntries, setCommonEntries, fetchCommonInfo])
+
+  const handleAddCommonFiles = useCallback(async () => {
+    try {
+      addCommonEntries((await App.SelectMultipleFiles('Select Common Input Files')) || [])
+    } catch (error) {
+      console.error('Failed to select files:', error)
+    }
+  }, [addCommonEntries])
+
+  const handleAddCommonFolder = useCallback(async () => {
+    try {
+      const dir = await App.SelectDirectory('Select Common Input Folder')
+      if (dir) addCommonEntries([dir])
+    } catch (error) {
+      console.error('Failed to select folder:', error)
+    }
+  }, [addCommonEntries])
 
   // Handle scan
   const handleScan = useCallback(async () => {
@@ -1007,7 +1060,7 @@ export function PURTab() {
                   className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
                 <p className="mt-1 text-xs text-gray-500">
-                  Use <code>**/</code> to search subfolders, e.g. <code>**/vasprun.xml</code>
+                  To search subfolders, tick Recursive scan, or use <code>**/</code> in the pattern, e.g. <code>**/vasprun.xml</code>
                 </p>
                 <p className="mt-1 text-xs text-gray-500">
                   Each matching file creates one job, whose upload holds only that
@@ -1158,8 +1211,8 @@ export function PURTab() {
             </div>
           )}
 
-          {/* A file scan's pattern sets how deep it looks ("**" reaches subfolders), so neither option applies there. */}
-          {scanOptions.scanMode === 'folders' && (
+          {/* A file scan's Recursive searches subfolders as "**" does, and "**" never enters a hidden folder. */}
+          {scanOptions.scanMode !== 'doe' && (
           <div className="flex items-center gap-4 mb-6">
             <label className="flex items-center gap-2 cursor-pointer">
               <input
@@ -1170,15 +1223,17 @@ export function PURTab() {
               />
               <span className="text-sm">Recursive scan</span>
             </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={scanOptions.includeHidden}
-                onChange={(e) => setScanOptions({ includeHidden: e.target.checked })}
-                className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
-              />
-              <span className="text-sm">Include hidden directories</span>
-            </label>
+            {scanOptions.scanMode === 'folders' && (
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={scanOptions.includeHidden}
+                  onChange={(e) => setScanOptions({ includeHidden: e.target.checked })}
+                  className="w-4 h-4 text-blue-500 border-gray-300 rounded focus:ring-blue-500"
+                />
+                <span className="text-sm">Include hidden directories</span>
+              </label>
+            )}
           </div>
           )}
 
@@ -1239,34 +1294,37 @@ export function PURTab() {
               Common Input Files (shared across all jobs)
             </h4>
             <div className="space-y-2">
+              <input
+                type="text"
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Comma-separated local files, folders or id:fileId references"
+                value={purRunOptions.commonInputFiles}
+                onChange={(e) => setPURRunOptions({ commonInputFiles: e.target.value })}
+                onBlur={() => fetchCommonInfo(commonEntries)}
+              />
               <div className="flex gap-2">
-                <input
-                  type="text"
-                  className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Comma-separated local paths or id:fileId references"
-                  value={purRunOptions.commonInputFiles}
-                  onChange={(e) => setPURRunOptions({ commonInputFiles: e.target.value })}
-                />
-                <button
-                  type="button"
-                  className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm hover:bg-gray-50 dark:hover:bg-gray-700"
-                  onClick={async () => {
-                    try {
-                      const path = await App.SelectFile('Select common input file')
-                      if (path) {
-                        const current = purRunOptions.commonInputFiles
-                        setPURRunOptions({
-                          commonInputFiles: current ? `${current},${path}` : path,
-                        })
-                      }
-                    } catch {
-                      // User cancelled
-                    }
-                  }}
-                >
-                  Browse...
-                </button>
+                {[
+                  { label: 'Add Files', Icon: PlusIcon, onClick: handleAddCommonFiles },
+                  { label: 'Add Folder', Icon: FolderPlusIcon, onClick: handleAddCommonFolder },
+                  { label: 'Browse Rescale Library', Icon: CloudIcon, onClick: () => setShowCommonPicker(true) },
+                ].map(({ label, Icon, onClick }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={onClick}
+                    className="flex items-center gap-2 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm hover:bg-gray-50 dark:hover:bg-gray-700"
+                  >
+                    <Icon className="w-4 h-4" />
+                    {label}
+                  </button>
+                ))}
               </div>
+              <SelectedFilesList
+                paths={commonEntries}
+                fileInfo={commonInfo}
+                onRemove={(index) => setCommonEntries(commonEntries.filter((_, i) => i !== index))}
+                onClear={() => setCommonEntries([])}
+              />
               <label className="flex items-center gap-2 text-sm text-gray-600">
                 <input
                   type="checkbox"
@@ -1277,8 +1335,9 @@ export function PURTab() {
                 Decompress common files on cluster
               </label>
               <p className="text-xs text-gray-400">
-                These files are uploaded once and attached to every job in the batch.
-                Use &quot;id:fileId&quot; for already-uploaded files.
+                These files are uploaded once and attached to every job in the batch; a folder adds
+                every file under it, leaving out hidden files and folders. Use &quot;id:fileId&quot; for
+                already-uploaded files.
               </p>
             </div>
             <div className="mt-3">
@@ -1787,6 +1846,13 @@ export function PURTab() {
         initialTemplate={template}
         onClose={() => setShowTemplateBuilder(false)}
         onSave={handleTemplateSave}
+      />
+
+      <RemoteFilePicker
+        isOpen={showCommonPicker}
+        onClose={() => setShowCommonPicker(false)}
+        onSelect={(ids) => addCommonEntries(ids.map((id) => `id:${id}`))}
+        title="Select Common Input Files"
       />
     </div>
   )

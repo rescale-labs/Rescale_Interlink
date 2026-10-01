@@ -248,7 +248,7 @@ func TestStagingStaysWithTheArchivedInputs(t *testing.T) {
 	}
 
 	p = newBatch(t, apart, filepath.Join(root, "early.csv"))
-	p.commonInputFilesRaw = filepath.Join(root, "missing")
+	p.commonInputFiles = []string{filepath.Join(root, "missing")}
 	if err := p.Run(context.Background()); err == nil {
 		t.Fatal("a run with a missing shared file succeeded")
 	}

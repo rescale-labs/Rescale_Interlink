@@ -4,6 +4,7 @@ export type { SortField, SortDirection } from './FileList'
 export { LocalBrowser } from './LocalBrowser'
 export { RemoteBrowser } from './RemoteBrowser'
 export { RemoteFilePicker } from './RemoteFilePicker'
+export { SelectedFilesList } from './SelectedFilesList'
 export { TemplateBuilder } from './TemplateBuilder'
 export { DOEBuilder } from './DOEBuilder'
 

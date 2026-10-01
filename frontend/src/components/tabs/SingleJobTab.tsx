@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   FolderIcon,
   DocumentIcon,
@@ -13,7 +13,6 @@ import {
   DocumentArrowDownIcon,
   DocumentArrowUpIcon,
   ChevronDownIcon,
-  XMarkIcon,
   PlusIcon,
   FolderPlusIcon,
 } from '@heroicons/react/24/outline'
@@ -23,16 +22,10 @@ import type { JobSpec } from '../../stores'
 import { useSingleJobStore } from '../../stores/singleJobStore'
 import { useRunStore } from '../../stores/runStore'
 import { isTerminalRunState } from '../../types/run'
-import { TemplateBuilder, RemoteFilePicker, JobsTable } from '../widgets'
-import { formatSize } from '../../utils/formatSize'
+import { TemplateBuilder, RemoteFilePicker, JobsTable, SelectedFilesList } from '../widgets'
 import { normalizeJobSpec } from '../../utils/jobs'
 import * as App from '../../../wailsjs/go/wailsapp/App'
 import type { wailsapp } from '../../../wailsjs/go/models'
-
-// Selected inputs always have a byte count, so nothing to show reads as empty.
-function formatFileSize(bytes: number): string {
-  return formatSize(bytes, { zero: '0 B', invalid: '0 B', trimTrailingZero: true })
-}
 
 // Progress steps
 const STEPS = [
@@ -290,38 +283,10 @@ export function SingleJobTab() {
     }
   }, [addLocalFiles, localFiles, fetchFileInfo, dialogInFlight])
 
-  // Remove a single file from the list
-  const handleRemoveFile = useCallback((index: number) => {
-    removeLocalFile(index)
-  }, [removeLocalFile])
-
   // Handle input mode change
   const handleInputModeChange = useCallback((mode: 'directory' | 'localFiles' | 'remoteFiles') => {
     setInputMode(mode)
   }, [setInputMode])
-
-  // Calculate total size from file info
-  const totalSize = useMemo(() => {
-    return localFiles.reduce((sum, path) => {
-      const info = fileInfoMap[path]
-      return sum + (info?.size || 0)
-    }, 0)
-  }, [localFiles, fileInfoMap])
-
-  // Count files and folders separately
-  const { fileCount, folderCount } = useMemo(() => {
-    let files = 0
-    let folders = 0
-    for (const path of localFiles) {
-      const info = fileInfoMap[path]
-      if (info?.isDir) {
-        folders++
-      } else {
-        files++
-      }
-    }
-    return { fileCount: files, folderCount: folders }
-  }, [localFiles, fileInfoMap])
 
   // Handle remote file selection from picker
   const handleRemoteFilesSelected = useCallback((fileIds: string[]) => {
@@ -705,75 +670,7 @@ export function SingleJobTab() {
                     Add Folder
                   </button>
                 </div>
-                {localFiles.length > 0 && (
-                  <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded border border-gray-200 dark:border-gray-700">
-                    {/* Header with counts */}
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                        {fileCount > 0 && `${fileCount} file${fileCount !== 1 ? 's' : ''}`}
-                        {fileCount > 0 && folderCount > 0 && ', '}
-                        {folderCount > 0 && `${folderCount} folder${folderCount !== 1 ? 's' : ''}`}
-                      </span>
-                      <button
-                        onClick={() => clearLocalFiles()}
-                        className="text-xs text-red-500 hover:text-red-600"
-                      >
-                        Clear All
-                      </button>
-                    </div>
-                    {/* File/folder list with sizes */}
-                    <div className="space-y-1 max-h-48 overflow-y-auto">
-                      {localFiles.map((filePath, i) => {
-                        const info = fileInfoMap[filePath]
-                        const isDir = info?.isDir || false
-                        const name = info?.name || filePath.split('/').pop() || filePath
-                        return (
-                          <div
-                            key={i}
-                            className="flex items-center justify-between group text-sm bg-white dark:bg-gray-700 px-2 py-1.5 rounded"
-                          >
-                            <div className="flex items-center gap-2 flex-1 min-w-0">
-                              {isDir ? (
-                                <FolderIcon className="w-4 h-4 text-amber-500 flex-shrink-0" />
-                              ) : (
-                                <DocumentIcon className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                              )}
-                              <span className="truncate text-gray-600 dark:text-gray-300" title={filePath}>
-                                {name}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-2 flex-shrink-0">
-                              <span className="text-xs text-gray-400">
-                                {info ? (
-                                  isDir
-                                    ? `${info.fileCount} file${info.fileCount !== 1 ? 's' : ''}`
-                                    : formatFileSize(info.size)
-                                ) : (
-                                  '...'
-                                )}
-                              </span>
-                              <button
-                                onClick={() => handleRemoveFile(i)}
-                                className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity"
-                                title="Remove"
-                              >
-                                <XMarkIcon className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                    {/* Total size footer */}
-                    {totalSize > 0 && (
-                      <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-600 text-right">
-                        <span className="text-xs text-gray-500">
-                          Total: <span className="font-medium">{formatFileSize(totalSize)}</span>
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                )}
+                <SelectedFilesList paths={localFiles} fileInfo={fileInfoMap} onRemove={removeLocalFile} onClear={clearLocalFiles} />
                 <p className="mt-2 text-xs text-gray-500">
                   Files and folder contents are uploaded individually as job inputs (no archiving).
                 </p>

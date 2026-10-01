@@ -31,8 +31,8 @@ func TestScanDirectoryNoEngine(t *testing.T) {
 	}
 }
 
-// filesScanOpts describes a file-mode scan of dir. The pattern is a plain glob
-// relative to RootDir, so a subdirectory has to be spelled out.
+// filesScanOpts describes a file-mode scan of dir for pattern, which is matched
+// under RootDir.
 func filesScanOpts(dir, pattern string) ScanOptionsDTO {
 	return ScanOptionsDTO{RootDir: dir, ScanMode: "files", PrimaryPattern: pattern}
 }
@@ -87,6 +87,41 @@ func TestScanFilesMode_SurfacesBuildJobsResults(t *testing.T) {
 		if len(job.LocalInputFiles) != 1 {
 			t.Errorf("job %s carries %v, want just its own primary file",
 				job.JobName, job.LocalInputFiles)
+		}
+	}
+}
+
+// Recursive scan, ticked in Files mode, runs a pattern without "**" as
+// "**/<pattern>", so "*.xml" finds what "**/*.xml" finds. A pattern that holds
+// "**" already, or that the scan root cannot hold, is left as typed.
+func TestScanFilesMode_RecursiveSearchesSubfolders(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []string{"top.xml", "caseA/run1/vasprun.xml", "caseB/run1/vasprun.xml", "a/x.dat", "b/a/x.dat"} {
+		writeScanFile(t, root, filepath.FromSlash(f))
+	}
+
+	for _, tc := range []struct {
+		pattern   string
+		recursive bool
+		want      int    // jobs built
+		wantErr   string // what the refusal says, when there is one
+	}{
+		{"*.xml", true, 3, ""},
+		{"vasprun.xml", true, 2, ""},
+		{"run1/*.xml", true, 2, ""},
+		{"*.xml", false, 1, ""},
+		{"vasprun.xml", false, 0, "no files found matching pattern: vasprun.xml; to search subfolders too, use **/vasprun.xml"},
+		// "**/a/**/x.dat" would find b/a/x.dat as well.
+		{"a/**/x.dat", true, 1, ""},
+		{filepath.Join("..", "*.xml"), true, 0, "outside the scan root"},
+		{filepath.Join(root, "*.xml"), true, 0, "absolute path"},
+	} {
+		opts := filesScanOpts(root, tc.pattern)
+		opts.Recursive = tc.recursive
+		result := (&App{}).scanFilesMode(opts, JobSpecDTO{Command: "solve {{file}}", JobName: "job-{{index}}"})
+		if len(result.Jobs) != tc.want || !strings.Contains(result.Error, tc.wantErr) || (tc.wantErr == "") != (result.Error == "") {
+			t.Errorf("%q, recursive %v: %d jobs, error %q; want %d jobs and an error saying %q",
+				tc.pattern, tc.recursive, len(result.Jobs), result.Error, tc.want, tc.wantErr)
 		}
 	}
 }
@@ -447,6 +482,33 @@ func TestJobSpecDTO_CarriesSSHFields(t *testing.T) {
 	spec := dtoToJobSpec(dto)
 	if spec.CIDRRule != "10.0.0.0/8" || spec.PublicKey != "ssh-ed25519 AAAAC3Nz" || spec.SSHPort != 2222 {
 		t.Errorf("dtoToJobSpec dropped the SSH fields: %+v", spec)
+	}
+}
+
+// Common Input Files are checked, and a folder in them expanded, before a PUR
+// run starts: an entry that cannot be uploaded refuses the run, naming it, where
+// it used to fail the run after it had begun. What CommonFiles refuses is
+// covered in its own package; this pins where the GUI asks.
+func TestStartBulkRun_RefusesCommonFilesItCannotUpload(t *testing.T) {
+	setIsolatedUserConfigEnv(t)
+	root := t.TempDir()
+	caseA, caseB := filepath.Join(root, "caseA"), filepath.Join(root, "caseB")
+	writeScanFile(t, caseA, "model.inp")
+	writeScanFile(t, caseB, filepath.Join("mesh", "model.inp"))
+
+	cfg, err := config.LoadConfigCSV("") // defaults, no API key: nothing can reach a server
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := core.NewEngine(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := (&App{engine: eng}).StartBulkRunWithOptions([]JobSpecDTO{{JobName: "job1"}},
+		PURRunOptionsDTO{CommonInputFiles: caseA + "," + caseB})
+	if err == nil || eng.IsRunActive() || !strings.Contains(err.Error(), filepath.Join(caseA, "model.inp")) ||
+		!strings.Contains(err.Error(), filepath.Join(caseB, "mesh", "model.inp")) {
+		t.Errorf("started run %q (error %v), want it refused before it starts, naming both files", runID, err)
 	}
 }
 

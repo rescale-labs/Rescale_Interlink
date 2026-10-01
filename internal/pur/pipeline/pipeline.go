@@ -80,9 +80,9 @@ type Pipeline struct {
 	skipTarUpload    bool // true for submit-existing: skip tar/upload, go directly to job creation
 
 	// Shared files attached to all jobs (from --common-input-files)
-	commonInputFilesRaw string   // Raw comma-separated flag value; resolved in ResolveSharedFiles
-	sharedFileIDs       []string // Resolved file IDs (after upload of local paths)
-	decompressCommon    bool     // Whether to decompress shared files on cluster
+	commonInputFiles []string // PipelineOptions.CommonInputFiles; resolved in ResolveSharedFiles
+	sharedFileIDs    []string // Resolved file IDs (after upload of local paths)
+	decompressCommon bool     // Whether to decompress shared files on cluster
 
 	// Upload destination and tagging (applies to tars and common input files)
 	uploadFolderID string   // Target folder for uploads ("" = My Library)
@@ -316,10 +316,11 @@ type PipelineOptions struct {
 	// (submit-existing); no tar is built and nothing is uploaded.
 	SkipTarUpload bool
 
-	// CommonInputFiles are shared by every job in the batch: comma-separated
-	// local paths and/or id:<fileId> refs. Local paths need a ctx, so they are
-	// resolved in ResolveSharedFiles during Run rather than here.
-	CommonInputFiles string
+	// CommonInputFiles are shared by every job in the batch, as
+	// filescan.CommonFiles returns them: id:<fileId> refs and the absolute paths
+	// of local files. Local files need a ctx, so they are uploaded in
+	// ResolveSharedFiles during Run rather than here.
+	CommonInputFiles []string
 
 	// DecompressCommon decompresses the shared files on the cluster.
 	DecompressCommon bool
@@ -412,26 +413,26 @@ func NewPipeline(cfg *config.Config, apiClient *api.Client, jobs []models.JobSpe
 	transferMgr := transfer.NewManager(resourceMgr)
 
 	return &Pipeline{
-		cfg:                 cfg,
-		apiClient:           apiClient,
-		analysisResolver:    apiClient, // Default: real API client satisfies AnalysisResolver
-		stateMgr:            stateMgr,
-		jobs:                jobs,
-		tempDir:             tempDir,
-		multiPartMode:       opts.MultiPartMode,
-		skipTarUpload:       opts.SkipTarUpload,
-		commonInputFilesRaw: opts.CommonInputFiles,
-		decompressCommon:    opts.DecompressCommon,
-		uploadFolderID:      opts.UploadFolderID,
-		fileTags:            tags.NormalizeTags(opts.FileTags),
-		rmTarOnSuccess:      opts.RmTarOnSuccess,
-		resourceMgr:         resourceMgr,
-		transferMgr:         transferMgr,
-		feederDone:          make(chan struct{}),
-		versionsResolved:    make(chan struct{}),
-		tarWorkers:          cfg.TarWorkers,
-		uploadWorkers:       cfg.UploadWorkers,
-		jobWorkers:          cfg.JobWorkers,
+		cfg:              cfg,
+		apiClient:        apiClient,
+		analysisResolver: apiClient, // Default: real API client satisfies AnalysisResolver
+		stateMgr:         stateMgr,
+		jobs:             jobs,
+		tempDir:          tempDir,
+		multiPartMode:    opts.MultiPartMode,
+		skipTarUpload:    opts.SkipTarUpload,
+		commonInputFiles: opts.CommonInputFiles,
+		decompressCommon: opts.DecompressCommon,
+		uploadFolderID:   opts.UploadFolderID,
+		fileTags:         tags.NormalizeTags(opts.FileTags),
+		rmTarOnSuccess:   opts.RmTarOnSuccess,
+		resourceMgr:      resourceMgr,
+		transferMgr:      transferMgr,
+		feederDone:       make(chan struct{}),
+		versionsResolved: make(chan struct{}),
+		tarWorkers:       cfg.TarWorkers,
+		uploadWorkers:    cfg.UploadWorkers,
+		jobWorkers:       cfg.JobWorkers,
 		// Dynamic queue sizes based on worker count for better throughput
 		tarQueue:              make(chan *workItem, cfg.TarWorkers*constants.DefaultQueueMultiplier),
 		uploadQueue:           make(chan *workItem, cfg.UploadWorkers*constants.DefaultQueueMultiplier),
@@ -570,47 +571,24 @@ func (p *Pipeline) resolveAnalysisVersions(ctx context.Context) {
 	}
 }
 
-// ResolveSharedFiles uploads local paths and collects file IDs from the
-// --common-input-files flag. Called once at the start of Run() so the
-// resolved IDs are available for every job.
+// ResolveSharedFiles uploads the local common input files and collects every
+// file ID. Called once at the start of Run() so the IDs are available for
+// every job.
 func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
-	if p.commonInputFilesRaw == "" {
-		return nil
-	}
-	items := strings.Split(p.commonInputFilesRaw, ",")
-	seen := make(map[string]bool) // dedupe
-
-	for _, item := range items {
-		item = strings.TrimSpace(item)
-		if item == "" {
-			continue
-		}
-
-		if strings.HasPrefix(item, "id:") {
-			// Pre-uploaded file ID
-			fileID := strings.TrimPrefix(item, "id:")
-			if !seen[fileID] {
-				p.sharedFileIDs = append(p.sharedFileIDs, fileID)
-				seen[fileID] = true
-			}
+	for _, item := range p.commonInputFiles {
+		if fileID, ok := strings.CutPrefix(item, "id:"); ok {
+			p.sharedFileIDs = append(p.sharedFileIDs, fileID)
 		} else {
-			// Local path — upload it
-			absPath, err := filepath.Abs(item)
-			if err != nil {
-				return fmt.Errorf("invalid path %s: %w", item, err)
-			}
-			if seen[absPath] {
-				continue // Already uploaded
-			}
-
-			p.logf("INFO", "pipeline", "", "Uploading shared file: %s", absPath)
+			// Local file — upload it
+			p.logf("INFO", "pipeline", "", "Uploading shared file: %s", item)
 
 			var cloudFile *models.CloudFile
+			var err error
 			if p.syncUploader != nil {
 				cloudFile, err = p.syncUploader.UploadFileSync(ctx, SyncUploadParams{
-					LocalPath:   absPath,
+					LocalPath:   item,
 					FolderID:    p.uploadFolderID,
-					Name:        filepath.Base(absPath),
+					Name:        filepath.Base(item),
 					SourceLabel: "PUR",
 					BatchID:     p.batchID,
 					BatchLabel:  p.batchLabel,
@@ -619,14 +597,14 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 			} else {
 				// CLI fallback: direct upload.
 				// Signal active transfer since CLI fallback bypasses RunBatch.
-				fileInfo, statErr := os.Stat(absPath)
+				fileInfo, statErr := os.Stat(item)
 				if statErr != nil {
 					return fmt.Errorf("failed to stat shared file %s: %w", item, statErr)
 				}
 				transferHandle := p.transferMgr.AllocateTransfer(fileInfo.Size(), 1)
 				ratelimit.GlobalStore().BeginTransferActivity()
 				cloudFile, err = upload.UploadFile(ctx, upload.UploadParams{
-					LocalPath:      absPath,
+					LocalPath:      item,
 					FolderID:       p.uploadFolderID,
 					APIClient:      p.apiClient,
 					TransferHandle: transferHandle,
@@ -643,8 +621,7 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 				return fmt.Errorf("failed to upload shared file %s: %w", item, err)
 			}
 			p.sharedFileIDs = append(p.sharedFileIDs, cloudFile.ID)
-			seen[absPath] = true
-			p.logf("INFO", "pipeline", "", "Shared file uploaded: %s -> %s", absPath, cloudFile.ID)
+			p.logf("INFO", "pipeline", "", "Shared file uploaded: %s -> %s", item, cloudFile.ID)
 		}
 	}
 	return nil
@@ -668,7 +645,7 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// exactly the archives a run without --rm-tar-on-success is meant to keep.
 	defer os.Remove(p.tempDir)
 
-	// Resolve shared files synchronously (fast: parses IDs or uploads 1-2 files)
+	// Resolve shared files synchronously: every job's request carries their IDs
 	sharedStart := time.Now()
 	if err := p.ResolveSharedFiles(ctx); err != nil {
 		return fmt.Errorf("failed to resolve shared files: %w", err)

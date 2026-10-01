@@ -12,15 +12,119 @@ const app = vi.hoisted(() => ({
   SaveJobsToCSV: vi.fn(),
   SelectFile: vi.fn(),
   LoadJobFromSGE: vi.fn(),
+  ScanDirectory: vi.fn(),
+  SelectMultipleFiles: vi.fn(),
+  SelectDirectory: vi.fn(),
+  GetLocalFilesInfo: vi.fn(),
 }))
 
 vi.mock('../../../wailsjs/go/wailsapp/App', () => app)
 
+// The real picker's rows never render in jsdom (FileList virtualizes them), so
+// a stand-in answers with two library files.
+vi.mock('../widgets/RemoteFilePicker', async () => {
+  const { createElement } = await import('react')
+  return {
+    RemoteFilePicker: ({ isOpen, onSelect }: { isOpen: boolean; onSelect: (ids: string[]) => void }) =>
+      isOpen ? createElement('button', { onClick: () => onSelect(['FAKE-1', 'FAKE-2']) }, 'Pick library files') : null,
+  }
+})
+
+const { scanOptions: initialScanOptions, purRunOptions: initialPURRunOptions } = useJobStore.getState()
+
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
-  useJobStore.setState({ workflowState: 'initial', scannedJobs: [], jobRows: [] })
+  useJobStore.setState({
+    workflowState: 'initial', scannedJobs: [], jobRows: [],
+    scanOptions: initialScanOptions, purRunOptions: initialPURRunOptions,
+  })
   useRunStore.setState({ activeRun: null, purViewMode: 'auto' })
+})
+
+// The scan step of a new batch, scanning for files under a chosen root.
+const filesScanStep = () => {
+  useJobStore.setState({
+    workflowState: 'templateReady',
+    workflowPath: 'createNew',
+    scanOptions: { ...initialScanOptions, scanMode: 'files', rootDir: '/scratch/cases' },
+  })
+}
+
+describe('PURTab file scan', () => {
+  it('offers Recursive scan in Files mode and sends it with the scan', async () => {
+    app.ScanDirectory.mockResolvedValue({ jobs: [], totalCount: 0, matchCount: 0 })
+    filesScanStep()
+
+    render(<PURTab />)
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Recursive scan' }))
+    fireEvent.click(screen.getByRole('button', { name: /Scan to Create Jobs/ }))
+
+    await vi.waitFor(() => expect(app.ScanDirectory).toHaveBeenCalledWith(
+      expect.objectContaining({ scanMode: 'files', recursive: true }), expect.anything()))
+    // "**" never enters a hidden folder, so that option stays with Folders mode.
+    expect(screen.queryByRole('checkbox', { name: 'Include hidden directories' })).toBeNull()
+  })
+})
+
+// Common Input Files offer what Single Job's inputs do: Add Files, Add Folder,
+// the Rescale Library and the list, all editing the one comma-separated value
+// the run takes.
+describe('PURTab common input files', () => {
+  it('adds files, a folder and library files to the value, and lists them', async () => {
+    app.SelectMultipleFiles.mockResolvedValue(['/scratch/deck.inp', '/scratch/mats.dat'])
+    app.SelectDirectory.mockResolvedValue('/scratch/lib')
+    app.GetLocalFilesInfo.mockImplementation(async (paths: string[]) => paths.map((path) => ({
+      path, name: path.split('/').pop(), isDir: path === '/scratch/lib', size: 1024, fileCount: 2, modTime: '',
+    })))
+    filesScanStep()
+
+    render(<PURTab />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add Files' }))
+    await screen.findByTitle('/scratch/mats.dat')
+    fireEvent.click(screen.getByRole('button', { name: 'Add Folder' }))
+    await screen.findByText('2 files') // the folder's own count
+    fireEvent.click(screen.getByRole('button', { name: 'Browse Rescale Library' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pick library files' }))
+
+    expect(useJobStore.getState().purRunOptions.commonInputFiles)
+      .toBe('/scratch/deck.inp,/scratch/mats.dat,/scratch/lib,id:FAKE-1,id:FAKE-2')
+    expect(screen.getByText('4 files, 1 folder')).toBeInTheDocument()
+    expect(screen.getAllByText('on Rescale')).toHaveLength(2)
+    expect(app.GetLocalFilesInfo).not.toHaveBeenCalledWith(expect.arrayContaining(['id:FAKE-1']))
+  })
+
+  // The list's sizes are fetched once per entry, so a failed lookup has to be
+  // tried again, and a removed entry looked up afresh when it comes back.
+  it('retries a failed lookup and looks a re-added entry up again', async () => {
+    const info = (size: number, error?: string) =>
+      [{ path: '/scratch/deck.inp', name: 'deck.inp', isDir: false, size, fileCount: 0, modTime: '', error }]
+    app.SelectMultipleFiles.mockResolvedValue(['/scratch/deck.inp'])
+    app.GetLocalFilesInfo.mockResolvedValueOnce(info(0, 'FAKE: no such file'))
+      .mockResolvedValueOnce(info(1024)).mockResolvedValueOnce(info(2048))
+    filesScanStep()
+
+    render(<PURTab />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add Files' }))
+    await screen.findByText('cannot be read')
+    fireEvent.blur(screen.getByPlaceholderText(/Comma-separated local files/))
+    expect(await screen.findAllByText('1 KB')).toHaveLength(2) // the row and the total
+    fireEvent.click(screen.getByTitle('Remove'))
+    fireEvent.click(screen.getByRole('button', { name: 'Add Files' }))
+    expect(await screen.findAllByText('2 KB')).toHaveLength(2)
+    expect(app.GetLocalFilesInfo).toHaveBeenCalledTimes(3)
+  })
+
+  it('removes an entry and clears the list', () => {
+    filesScanStep()
+    useJobStore.setState({ purRunOptions: { ...initialPURRunOptions, commonInputFiles: '/scratch/a.dat, id:FAKE-1,/scratch/b.dat' } })
+
+    render(<PURTab />)
+    fireEvent.click(screen.getAllByTitle('Remove')[1])
+    expect(useJobStore.getState().purRunOptions.commonInputFiles).toBe('/scratch/a.dat,/scratch/b.dat')
+    fireEvent.click(screen.getByRole('button', { name: 'Clear All' }))
+    expect(useJobStore.getState().purRunOptions.commonInputFiles).toBe('')
+  })
 })
 
 // The state the Export CSV button lives in: one validated job, ready to run.

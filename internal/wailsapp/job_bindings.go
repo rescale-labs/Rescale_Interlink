@@ -104,7 +104,7 @@ type ScanOptionsDTO struct {
 	IncludeHidden     bool   `json:"includeHidden"`
 
 	ScanMode          string                `json:"scanMode"`          // "folders" (default) or "files"
-	PrimaryPattern    string                `json:"primaryPattern"`    // For file mode: e.g., "*.inp", "inputs/*.inp"
+	PrimaryPattern    string                `json:"primaryPattern"`    // For file mode: e.g., "*.inp", "inputs/*.inp", "**/*.inp"
 	SecondaryPatterns []SecondaryPatternDTO `json:"secondaryPatterns"` // For file mode: secondary files to attach
 
 	TarSubpath string `json:"tarSubpath,omitempty"`
@@ -305,6 +305,7 @@ func (a *App) scanFilesMode(opts ScanOptionsDTO, template JobSpecDTO) ScanResult
 		RootDir:           opts.RootDir,
 		PrimaryPattern:    opts.PrimaryPattern,
 		SecondaryPatterns: patterns,
+		Recursive:         opts.Recursive,
 	})
 
 	if result.Error != "" {
@@ -531,7 +532,7 @@ func (a *App) GetProjects() ProjectsResultDTO {
 
 // PURRunOptionsDTO contains PUR-specific run configuration beyond the job list.
 type PURRunOptionsDTO struct {
-	CommonInputFiles string `json:"commonInputFiles"` // Comma-separated paths and/or id:<fileId>, shared by all jobs
+	CommonInputFiles string `json:"commonInputFiles"` // Comma-separated files, folders and/or id:<fileId>, shared by all jobs
 	DecompressCommon bool   `json:"decompressCommon"` // Whether to decompress common files on cluster
 	RmTarOnSuccess   bool   `json:"rmTarOnSuccess"`
 
@@ -560,6 +561,11 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	if err != nil {
 		return "", err
 	}
+	// Before the run starts, like the checks above; the run uploads this list.
+	commonFiles, err := filescan.CommonFiles(opts.CommonInputFiles)
+	if err != nil {
+		return "", err
+	}
 
 	runID := fmt.Sprintf("run_%d", time.Now().UnixNano())
 	stateFile := generateStateFilePath(runID)
@@ -584,7 +590,7 @@ func (a *App) StartBulkRunWithOptions(jobs []JobSpecDTO, opts PURRunOptionsDTO) 
 	go func() {
 		defer a.engine.EndRun()
 		err := a.engine.RunFromSpecsWithOptions(ctx, jobSpecs, stateFile, core.RunOptions{
-			CommonInputFiles:   opts.CommonInputFiles,
+			CommonInputFiles:   commonFiles,
 			DecompressCommon:   opts.DecompressCommon,
 			RmTarOnSuccess:     opts.RmTarOnSuccess,
 			UploadFolder:       opts.UploadFolder,
@@ -702,15 +708,7 @@ func (a *App) StartSingleJob(input SingleJobInputDTO) (string, error) {
 					return
 				}
 				if info.IsDir() {
-					filepath.WalkDir(localPath, func(path string, d os.DirEntry, walkErr error) error {
-						if walkErr != nil {
-							return nil // skip errors
-						}
-						if !d.IsDir() {
-							expandedPaths = append(expandedPaths, path)
-						}
-						return nil
-					})
+					expandedPaths = append(expandedPaths, filescan.FilesInFolder(localPath)...)
 				} else {
 					expandedPaths = append(expandedPaths, localPath)
 				}

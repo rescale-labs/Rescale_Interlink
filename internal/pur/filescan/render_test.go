@@ -463,6 +463,17 @@ func TestBuildJobs(t *testing.T) {
 	}
 }
 
+// With {{dir}} already in the name, the files that collide sit in folders of
+// one name at different places, which {{dir}} cannot tell apart, so only
+// {{index}} is offered.
+func TestBuildJobs_CollisionUnderDirOffersIndexOnly(t *testing.T) {
+	found := []JobFiles{jobFilesFor("caseA/run1/vasprun.xml"), jobFilesFor("caseB/run1/vasprun.xml")}
+	_, _, _, err := BuildJobs(models.JobSpec{Command: "vasp {{file}}", JobName: "vasp-{{dir}}"}, found)
+	if err == nil || !strings.Contains(err.Error(), "; add {{index}} to the job name template") {
+		t.Errorf("error %v, want it to offer {{index}} alone", err)
+	}
+}
+
 // The assembled job: the template's own fields carry over untouched, and the
 // ones the scan owns are taken from the file set.
 func TestBuildJobs_AssemblesFromTheTemplate(t *testing.T) {

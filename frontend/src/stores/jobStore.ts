@@ -178,7 +178,7 @@ export interface ScanOptions {
   includeHidden: boolean
 
   scanMode: 'folders' | 'files' | 'doe'
-  primaryPattern: string           // For file mode: e.g., "*.inp", "inputs/*.inp"
+  primaryPattern: string           // For file mode: e.g., "*.inp", "inputs/*.inp", "**/*.inp"
   secondaryPatterns: SecondaryPattern[]
 
   // Subdirectory within each Run_* to tar

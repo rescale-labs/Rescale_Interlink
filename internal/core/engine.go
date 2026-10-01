@@ -33,9 +33,10 @@ import (
 
 // RunOptions groups PUR-specific pipeline options to avoid parameter creep.
 type RunOptions struct {
-	// CommonInputFiles are shared across every job in the batch: comma-separated
-	// local paths and/or id:<fileId> references, uploaded once at pipeline start.
-	CommonInputFiles string
+	// CommonInputFiles are shared across every job in the batch, as
+	// filescan.CommonFiles checked them; local files are uploaded once at
+	// pipeline start.
+	CommonInputFiles []string
 	DecompressCommon bool
 	RmTarOnSuccess   bool
 

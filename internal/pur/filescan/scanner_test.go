@@ -52,6 +52,13 @@ func TestScanFiles_NoFilesFound(t *testing.T) {
 			t.Errorf("error %q, want %q", result.Error, want)
 		}
 	}
+
+	// Recursive has searched the subfolders already, so the hint is what that
+	// search passed over.
+	if result := ScanFiles(ScanOptions{RootDir: root, PrimaryPattern: "*.inp", Recursive: true}); result.Error !=
+		"no files found matching pattern: **/*.inp; a recursive scan does not go into hidden or linked folders" {
+		t.Errorf("recursive: error %q, want it to name the pattern searched and what it passed over", result.Error)
+	}
 }
 
 func TestScanFiles_BasicScan(t *testing.T) {

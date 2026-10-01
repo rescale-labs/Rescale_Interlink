@@ -259,6 +259,7 @@ func newScanFilesCmd() *cobra.Command {
 	var outputPath string
 	var outputJSON bool
 	var overwrite bool
+	var recursive bool
 
 	cmd := &cobra.Command{
 		Use:   "scan-files",
@@ -328,6 +329,7 @@ Examples:
 				RootDir:           rootDir,
 				PrimaryPattern:    primaryPattern,
 				SecondaryPatterns: patterns,
+				Recursive:         recursive,
 			})
 
 			if result.Error != "" {
@@ -430,6 +432,7 @@ Examples:
 
 	cmd.Flags().StringVarP(&rootDir, "root", "r", "", "Root directory to scan (default: current dir)")
 	cmd.Flags().StringVar(&primaryPattern, "primary", "", "Primary file pattern, e.g., '*.inp', or '**/*.inp' to search subfolders too (required)")
+	cmd.Flags().BoolVar(&recursive, "recursive", false, "Search subfolders too, as '**/' in front of --primary does; a pattern holding ** is unchanged")
 	cmd.Flags().StringArrayVar(&secondaryPatterns, "secondary", nil, "Secondary file patterns (can repeat), e.g., '*.mesh:required'")
 	cmd.Flags().StringVarP(&templatePath, "template", "t", "", "Template CSV file for generating jobs")
 	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output jobs CSV file")
@@ -551,6 +554,8 @@ type commonInputFileFlags struct {
 	commonInputFiles string
 	decompressCommon bool
 
+	files []string // what resolve checked, which the run uploads
+
 	// Deprecated aliases, retained for backwards compatibility.
 	legacyInputFiles string
 	legacyDecompress bool
@@ -559,7 +564,7 @@ type commonInputFileFlags struct {
 // register adds --common-input-files/--decompress-common plus the hidden
 // deprecated --extra-input-files/--decompress-extras aliases.
 func (f *commonInputFileFlags) register(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.commonInputFiles, "common-input-files", "", "Comma-separated local paths and/or id:<fileId> references to share across all jobs")
+	cmd.Flags().StringVar(&f.commonInputFiles, "common-input-files", "", "Comma-separated local files, folders (each adds every file under it, leaving out hidden files and folders) and/or id:<fileId> references to share across all jobs")
 	cmd.Flags().BoolVar(&f.decompressCommon, "decompress-common", false, "Decompress common input files on cluster")
 
 	cmd.Flags().StringVar(&f.legacyInputFiles, "extra-input-files", "", "DEPRECATED: Use --common-input-files instead")
@@ -568,8 +573,10 @@ func (f *commonInputFileFlags) register(cmd *cobra.Command) {
 	cmd.Flags().MarkHidden("decompress-extras")
 }
 
-// resolve folds any deprecated alias values into the canonical fields.
-// Returns an error when a flag and its deprecated alias are both set.
+// resolve folds any deprecated alias values into the canonical fields, refusing
+// a flag set together with its alias. It then checks the common input files,
+// expanding any folder among them, before the command reads anything else or
+// reaches the platform.
 func (f *commonInputFileFlags) resolve(cmd *cobra.Command) error {
 	logger := GetLogger()
 
@@ -589,6 +596,11 @@ func (f *commonInputFileFlags) resolve(cmd *cobra.Command) error {
 		f.decompressCommon = f.legacyDecompress
 	}
 
+	files, err := filescan.CommonFiles(f.commonInputFiles)
+	if err != nil {
+		return reporting.UsageError(err)
+	}
+	f.files = files
 	return nil
 }
 
@@ -812,7 +824,7 @@ func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec
 	pipe, err := pipeline.NewPipeline(cfg, apiClient, jobs, pipeline.PipelineOptions{
 		StateFile:             f.stateFile,
 		MultiPartMode:         f.multiPart,
-		CommonInputFiles:      f.sharedFiles.commonInputFiles,
+		CommonInputFiles:      f.sharedFiles.files,
 		DecompressCommon:      f.sharedFiles.decompressCommon,
 		UploadFolderID:        folderID,
 		FileTags:              fileTags,

@@ -2,8 +2,10 @@ package filescan
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pur/pattern"
 )
 
 // BuildJobs turns one template and a scan's file sets into the jobs to submit.
@@ -39,9 +41,14 @@ func BuildJobs(template models.JobSpec, found []JobFiles) (jobs []models.JobSpec
 			continue
 		}
 		if first, dup := seenNames[jobName]; dup {
+			// {{dir}} is the containing folder alone, which nested layouts repeat.
+			remedy := "{{index}} or {{dir}}"
+			if slices.Contains(pattern.ExtractTokens(template.JobName), TokenDir) {
+				remedy = "{{index}}"
+			}
 			return nil, nil, nil, fmt.Errorf("%s and %s both render to job name %q; "+
-				"add {{index}} or {{dir}} to the job name template to keep names unique",
-				first, jf.PrimaryRel, jobName)
+				"add %s to the job name template to keep names unique",
+				first, jf.PrimaryRel, jobName, remedy)
 		}
 		seenNames[jobName] = jf.PrimaryRel
 
