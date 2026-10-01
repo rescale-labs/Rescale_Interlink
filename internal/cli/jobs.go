@@ -437,7 +437,7 @@ Examples:
 			}
 
 			// Get API client
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -475,7 +475,9 @@ Examples:
 				fmt.Println(strings.Repeat("-", 60))
 
 				// Convert to job request
-				jobReq = metadata.ToJobRequest()
+				if jobReq, err = metadata.ToJobRequest(); err != nil {
+					return fmt.Errorf("failed to parse SGE script: %w", err)
+				}
 			} else {
 				req, ignored, err := decodeJobFile(jobFile)
 				if err != nil {

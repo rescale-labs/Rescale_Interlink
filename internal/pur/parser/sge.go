@@ -2,13 +2,18 @@ package parser
 
 import (
 	"bufio"
+	"cmp"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/pur/validation"
 )
 
 // SGEMetadata represents parsed metadata from an SGE script
@@ -34,7 +39,11 @@ type SGEMetadata struct {
 	PublicKey                  string
 	UseLicense                 bool
 	EnvVariables               map[string]string
-	UserDefinedLicenseSettings string
+	UserDefinedLicenseSettings *models.UserDefinedLicense
+
+	// licenseSettingsLine is the script line UserDefinedLicenseSettings came
+	// from, for SGEMetadataToJobSpec to name.
+	licenseSettingsLine int
 
 	// Input files referenced in script
 	InputFiles []string
@@ -68,7 +77,7 @@ func NewSGEParser() *SGEParser {
 			"public_key":            regexp.MustCompile(`^#RESCALE_PUBLIC_KEY\s+(.+)`),
 			"license":               regexp.MustCompile(`^#USE_RESCALE_LICENSE\s+(true|false)`),
 			"env":                   regexp.MustCompile(`^#RESCALE_ENV_(\w+)\s+(.+)`),
-			"user_license_settings": regexp.MustCompile(`^#RESCALE_USER_DEFINED_LICENSE_SETTINGS\s+(.+)`),
+			"user_license_settings": regexp.MustCompile(`^#RESCALE_USER_DEFINED_LICENSE_SETTINGS(?:=|\s+|$)(.*)`),
 			"automation":            regexp.MustCompile(`^#RESCALE_AUTOMATION\s+(\S+)`),
 		},
 	}
@@ -182,7 +191,16 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 			envValue := strings.TrimSpace(matches[2])
 			metadata.EnvVariables[envName] = envValue
 		} else if matches := p.patterns["user_license_settings"].FindStringSubmatch(line); matches != nil {
-			metadata.UserDefinedLicenseSettings = strings.TrimSpace(matches[1])
+			// The API's userDefinedLicenseSettings object as JSON, after "="
+			// (rescale-cli's spelling), a space, or nothing at all. Refused unless
+			// it decodes into feature sets: sent on as text, or dropped, it would
+			// leave the job without the license queuing the script asks for.
+			settings, err := decodeLicenseSettings(strings.TrimSpace(matches[1]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w; write it as %s",
+					lineNum, err, licenseSettingsExample)
+			}
+			metadata.UserDefinedLicenseSettings, metadata.licenseSettingsLine = settings, lineNum
 		} else if matches := p.patterns["automation"].FindStringSubmatch(line); matches != nil {
 			automationID := strings.TrimSpace(matches[1])
 			if automationID != "" {
@@ -227,6 +245,40 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 	}
 
 	return metadata, nil
+}
+
+// licenseSettingsExample is the shape #RESCALE_USER_DEFINED_LICENSE_SETTINGS
+// takes, shown when another is refused.
+const licenseSettingsExample = `{"featureSets":[{"name":"USER_SPECIFIED_0",` +
+	`"features":[{"name":"<feature>","count":<seats>}]}]}`
+
+// decodeLicenseSettings reads the directive's value strictly: a key the API's
+// object does not have is refused, where a misspelt "count" would otherwise go
+// out as zero seats. Its errors say what is wrong without the decoder's Go
+// type names.
+func decodeLicenseSettings(value string) (*models.UserDefinedLicense, error) {
+	dec := json.NewDecoder(strings.NewReader(value))
+	dec.DisallowUnknownFields()
+	settings := &models.UserDefinedLicense{}
+	var typeErr *json.UnmarshalTypeError
+	switch err := dec.Decode(settings); {
+	case err == io.EOF:
+		return nil, errors.New("it has no value")
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return nil, errors.New("the JSON ends early")
+	case errors.As(err, &typeErr):
+		return nil, fmt.Errorf("%s cannot be a JSON %s", cmp.Or(typeErr.Field, "the value"), typeErr.Value)
+	case err != nil:
+		return nil, errors.New(strings.TrimPrefix(err.Error(), "json: "))
+	}
+	// Decode stops after one value, so text after it would go unread.
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("there is more after the JSON object")
+	}
+	if len(settings.FeatureSets) == 0 {
+		return nil, errors.New("it has no feature sets")
+	}
+	return settings, nil
 }
 
 // parseQsubDirective parses a #$ -l directive value like "rescale_code=openfoam,rescale_cores=4".
@@ -306,8 +358,15 @@ func (p *SGEParser) validate(m *SGEMetadata) error {
 // seconds-based input (3600, 7200, 86400, ...).
 const maxWalltimeHours = 336
 
-// ToJobRequest converts SGE metadata to a Rescale API JobRequest
-func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
+// ToJobRequest converts SGE metadata to a Rescale API JobRequest. It refuses a
+// license feature the platform would take but no job can use, naming its line;
+// loading the script into the job template keeps such a feature, for the
+// template's validation to report.
+func (m *SGEMetadata) ToJobRequest() (*models.JobRequest, error) {
+	if err := m.checkLicenseFeatures(); err != nil {
+		return nil, fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w", m.licenseSettingsLine, err)
+	}
+
 	// Set default slots if not specified
 	slots := m.Slots
 	if slots == 0 {
@@ -344,9 +403,7 @@ func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
 		PublicKey: m.PublicKey,
 	}
 
-	// The script's opaque string, not a feature set; see the field on
-	// models.JobAnalysisRequest.
-	if m.UserDefinedLicenseSettings != "" {
+	if m.UserDefinedLicenseSettings != nil {
 		jobReq.JobAnalyses[0].UserDefinedLicenseSettings = m.UserDefinedLicenseSettings
 	}
 
@@ -361,7 +418,29 @@ func (m *SGEMetadata) ToJobRequest() *models.JobRequest {
 		}
 	}
 
-	return jobReq
+	return jobReq, nil
+}
+
+// checkLicenseFeatures holds every feature to the job template's rule, a name
+// and a count above zero, and every set to having a feature.
+func (m *SGEMetadata) checkLicenseFeatures() error {
+	if m.UserDefinedLicenseSettings == nil {
+		return nil
+	}
+	for _, set := range m.UserDefinedLicenseSettings.FeatureSets {
+		if len(set.Features) == 0 {
+			return fmt.Errorf("feature set %q has no features", set.Name)
+		}
+		for _, feature := range set.Features {
+			if feature.Name == "" && feature.Count == 0 {
+				return fmt.Errorf("feature set %q has a feature with no name and no count", set.Name)
+			}
+			if err := validation.ValidateLicensePair(feature.Name, feature.Count); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // String returns a human-readable representation of the metadata
@@ -436,8 +515,9 @@ func (m *SGEMetadata) ToSGEScript() string {
 	if m.UseLicense {
 		sb.WriteString("#USE_RESCALE_LICENSE true\n")
 	}
-	if m.UserDefinedLicenseSettings != "" {
-		sb.WriteString(fmt.Sprintf("#RESCALE_USER_DEFINED_LICENSE_SETTINGS %s\n", m.UserDefinedLicenseSettings))
+	if m.UserDefinedLicenseSettings != nil {
+		settings, _ := json.Marshal(m.UserDefinedLicenseSettings) // strings and ints: cannot fail
+		sb.WriteString(fmt.Sprintf("#RESCALE_USER_DEFINED_LICENSE_SETTINGS %s\n", settings))
 	}
 
 	for _, autoID := range m.Automations {
@@ -479,7 +559,7 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		slots = 1
 	}
 
-	return &SGEMetadata{
+	m := &SGEMetadata{
 		Name:            job.JobName,
 		Command:         job.Command,
 		Analysis:        job.AnalysisCode,
@@ -497,11 +577,17 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		// UseLicense could be derived from LicenseSettings if needed
 		EnvVariables: make(map[string]string),
 	}
+	// Written when either half is set, as the CSV and JSON saves do, so half a
+	// pair loaded from a jobs file loads back as it was, for validation to report.
+	if job.LicenseFeatureName != "" || job.LicensesPerJob != 0 {
+		m.UserDefinedLicenseSettings = models.NewUserDefinedLicense(job.LicenseFeatureName, job.LicensesPerJob)
+	}
+	return m
 }
 
 // SGEMetadataToJobSpec converts SGEMetadata to JobSpec for GUI use.
 // This enables loading SGE scripts into the job configuration UI.
-func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
+func SGEMetadataToJobSpec(m *SGEMetadata) (models.JobSpec, error) {
 	// Walltime is already in hours (the Rescale API unit).
 	walltimeHours := float64(m.Walltime)
 	if walltimeHours <= 0 {
@@ -514,7 +600,7 @@ func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
 		slots = 1
 	}
 
-	return models.JobSpec{
+	spec := models.JobSpec{
 		JobName:         m.Name,
 		Command:         m.Command,
 		AnalysisCode:    m.Analysis,
@@ -531,4 +617,16 @@ func SGEMetadataToJobSpec(m *SGEMetadata) models.JobSpec {
 		// Note: InputFiles from script are stored in SGEMetadata.InputFiles
 		// and should be handled separately by the caller
 	}
+	// The template holds one license feature. Any other shape would load with
+	// part of it dropped, so it is refused instead.
+	if ls := m.UserDefinedLicenseSettings; ls != nil {
+		if len(ls.FeatureSets) != 1 || len(ls.FeatureSets[0].Features) != 1 {
+			return models.JobSpec{}, fmt.Errorf("RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d does not fit the job "+
+				"template: the template holds one license feature, and this is not one feature set with one feature",
+				m.licenseSettingsLine)
+		}
+		feature := ls.FeatureSets[0].Features[0]
+		spec.LicenseFeatureName, spec.LicensesPerJob = feature.Name, feature.Count
+	}
+	return spec, nil
 }

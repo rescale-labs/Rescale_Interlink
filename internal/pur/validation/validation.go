@@ -50,21 +50,8 @@ func ValidateJobSpec(job models.JobSpec) []string {
 		errors = append(errors, "Walltime must be positive")
 	}
 
-	// A user-defined license needs both halves, the same pair BuildJobRequest
-	// refuses. Repeated here rather than deferred to it because that check runs
-	// per job after the archive has been built and uploaded, so a CSV that
-	// validates cleanly would otherwise fail every job at the last step.
-	switch {
-	case job.LicenseFeatureName != "" && job.LicensesPerJob > 0:
-		// A complete pair.
-	case job.LicenseFeatureName != "":
-		errors = append(errors, fmt.Sprintf("license feature %q needs a licenses-per-job count greater than zero",
-			job.LicenseFeatureName))
-	case job.LicensesPerJob != 0:
-		// Not "> 0": CSV parsing accepts a negative integer, and treating that as
-		// "unset" would drop the half-pair silently instead of reporting it.
-		errors = append(errors, fmt.Sprintf("licenses per job is set to %d but no license feature name was given",
-			job.LicensesPerJob))
+	if err := ValidateLicensePair(job.LicenseFeatureName, job.LicensesPerJob); err != nil {
+		errors = append(errors, err.Error())
 	}
 
 	// Validate submitMode using the same logic as pipeline.NormalizeSubmitMode.
@@ -80,6 +67,25 @@ func ValidateJobSpec(job models.JobSpec) []string {
 	}
 
 	return errors
+}
+
+// ValidateLicensePair reports a user-defined license feature given by halves: a
+// name without a count above zero, or a count without a name. It is the same
+// pair BuildJobRequest refuses, checked again ahead of it because that check
+// runs per job after the archive has been built and uploaded, so a CSV that
+// passed would otherwise fail every job at the last step.
+func ValidateLicensePair(name string, count int) error {
+	switch {
+	case name != "" && count > 0:
+		// A complete pair.
+	case name != "":
+		return fmt.Errorf("license feature %q needs a licenses-per-job count greater than zero", name)
+	case count != 0:
+		// Not "> 0": CSV parsing accepts a negative integer, and treating that as
+		// "unset" would drop the half-pair silently instead of reporting it.
+		return fmt.Errorf("licenses per job is set to %d but no license feature name was given", count)
+	}
+	return nil
 }
 
 // CoreTypeValidator validates core types against available options

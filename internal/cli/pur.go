@@ -775,6 +775,11 @@ func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []mod
 	if err := ValidateSubmitModes(jobs); err != nil {
 		return nil, nil, err
 	}
+	for i, job := range jobs {
+		if err := validation.ValidateLicensePair(job.LicenseFeatureName, job.LicensesPerJob); err != nil {
+			return nil, nil, fmt.Errorf("job %d (%s): %w", i+1, job.JobName, err)
+		}
+	}
 
 	GetLogger().Info().Int("count", len(jobs)).Msg("Loaded jobs")
 	return cfg, jobs, nil

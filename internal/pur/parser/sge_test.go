@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,6 +26,16 @@ func checkFields(t *testing.T, checks []fieldCheck) {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
 	}
+}
+
+// asJSON is v as a request carries it on the wire.
+func asJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // requiredDirectives are the six fields validate() insists on.
@@ -84,7 +95,7 @@ func TestSGEParser_Parse(t *testing.T) {
 #RESCALE_INBOUND_SSH_CIDR 0.0.0.0/0
 #RESCALE_PUBLIC_KEY ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample
 #USE_RESCALE_LICENSE true
-#RESCALE_USER_DEFINED_LICENSE_SETTINGS port=1234@server.example.com
+#RESCALE_USER_DEFINED_LICENSE_SETTINGS {"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}
 #RESCALE_ENV_OMP_NUM_THREADS 8
 #RESCALE_ENV_LD_LIBRARY_PATH /opt/lib
 #RESCALE_ENV_CUSTOM_VAR myvalue
@@ -106,7 +117,8 @@ echo "Running simulation"
 					{"InboundSSHCIDR", m.InboundSSHCIDR, "0.0.0.0/0"},
 					{"PublicKey", m.PublicKey, "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDexample"},
 					{"UseLicense", m.UseLicense, true},
-					{"UserDefinedLicenseSettings", m.UserDefinedLicenseSettings, "port=1234@server.example.com"},
+					{"UserDefinedLicenseSettings", asJSON(t, m.UserDefinedLicenseSettings),
+						`{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`},
 					{"len(EnvVariables)", len(m.EnvVariables), 3},
 					{"EnvVariables[OMP_NUM_THREADS]", m.EnvVariables["OMP_NUM_THREADS"], "8"},
 					{"EnvVariables[LD_LIBRARY_PATH]", m.EnvVariables["LD_LIBRARY_PATH"], "/opt/lib"},
@@ -390,6 +402,98 @@ echo "hello world"
 	}
 }
 
+// TestSGEParser_UserDefinedLicenseSettings covers both spellings of the
+// directive, Interlink's and rescale-cli's ("="). Its value is the API's
+// userDefinedLicenseSettings object written as JSON, and it has to reach the
+// create request as that object: a string, or nothing, is a job that runs
+// without the license queuing the script asked for.
+func TestSGEParser_UserDefinedLicenseSettings(t *testing.T) {
+	const d = "#RESCALE_USER_DEFINED_LICENSE_SETTINGS"
+	const oneFeature = `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`
+	const twoSets = `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8},` +
+		`{"name":"ansys_solver","count":1}]},{"name":"USER_SPECIFIED_1","features":[{"name":"abaqus","count":5}]}]}`
+	// The directive follows the shebang and the six required lines: line 8.
+	parse := func(t *testing.T, directive, eol string) (*SGEMetadata, error) {
+		t.Helper()
+		lines := append(append([]string{"#!/bin/bash"}, requiredDirectives...), directive)
+		path := filepath.Join(t.TempDir(), "job.sh")
+		if err := os.WriteFile(path, []byte(strings.Join(lines, eol)+eol), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return NewSGEParser().Parse(path)
+	}
+
+	for _, tt := range []struct{ name, directive, want string }{
+		{"whitespace form", "#RESCALE_USER_DEFINED_LICENSE_SETTINGS " + oneFeature, oneFeature},
+		{"rescale-cli's = form", "#RESCALE_USER_DEFINED_LICENSE_SETTINGS=" + oneFeature, oneFeature},
+		{"several sets and features", "#RESCALE_USER_DEFINED_LICENSE_SETTINGS " + twoSets, twoSets},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, err := parse(t, tt.directive, "\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := m.ToJobRequest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := asJSON(t, req.JobAnalyses[0].UserDefinedLicenseSettings); got != tt.want {
+				t.Errorf("userDefinedLicenseSettings = %s\nwant %s", got, tt.want)
+			}
+		})
+	}
+
+	for _, tt := range []struct{ name, value string }{
+		{"not JSON", "port=1234@license.example.com"},
+		{"cut short", oneFeature[:30]},
+		{"a JSON string", fmt.Sprintf("%q", oneFeature)},
+		{"a JSON array", "[" + oneFeature + "]"},
+		{"no feature sets", "{}"},
+		{"a misspelt key", strings.Replace(oneFeature, `"count"`, `"cout"`, 1)},
+		{"text after the object", oneFeature + "}"},
+	} {
+		t.Run("refused: "+tt.name, func(t *testing.T) {
+			for _, sep := range []string{" ", "="} {
+				_, err := parse(t, "#RESCALE_USER_DEFINED_LICENSE_SETTINGS"+sep+tt.value, "\n")
+				if err == nil || !strings.Contains(err.Error(), "RESCALE_USER_DEFINED_LICENSE_SETTINGS at line 8") {
+					t.Errorf("separator %q: error %v, want a refusal naming line 8", sep, err)
+				}
+			}
+		})
+	}
+
+	// With no value at all, after either separator or none, and with either
+	// line ending.
+	for _, directive := range []string{d + "=", d + " ", d + "\t", d} {
+		for _, eol := range []string{"\n", "\r\n"} {
+			if _, err := parse(t, directive, eol); err == nil || !strings.Contains(err.Error(), d[1:]+" at line 8") {
+				t.Errorf("%q with line ending %q: error %v, want a refusal naming line 8", directive, eol, err)
+			}
+		}
+	}
+
+	// A feature the platform would take but no job can use is refused on the
+	// way to a create request, naming the line. It still parses, so the job
+	// template can load half a pair for its validation to report.
+	for _, tt := range []struct{ name, features string }{
+		{"no count", `[{"name":"ansys_hpc"}]`},
+		{"a zero count", `[{"name":"ansys_hpc","count":0}]`},
+		{"no name", `[{"count":8}]`},
+		{"neither", `[{}]`},
+		{"no features", `[]`},
+	} {
+		t.Run("not sent: "+tt.name, func(t *testing.T) {
+			m, err := parse(t, d+` {"featureSets":[{"name":"USER_SPECIFIED_0","features":`+tt.features+`}]}`, "\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.ToJobRequest(); err == nil || !strings.Contains(err.Error(), d[1:]+" at line 8") {
+				t.Errorf("error %v, want a refusal naming line 8", err)
+			}
+		})
+	}
+}
+
 // TestSGEMetadata_ToJobRequest pins the metadata -> JobRequest mapping. The two
 // SSH directives are included because the parser understood them long before
 // ToJobRequest carried them, so a script asking for SSH access got a job with
@@ -410,7 +514,10 @@ func TestSGEMetadata_ToJobRequest(t *testing.T) {
 		PublicKey:       "ssh-rsa AAAAB3NzaC1yc2E",
 	}
 
-	jobReq := metadata.ToJobRequest()
+	jobReq, err := metadata.ToJobRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if len(jobReq.JobAnalyses) != 1 {
 		t.Fatalf("JobRequest.JobAnalyses length = %d, want 1", len(jobReq.JobAnalyses))
@@ -444,7 +551,10 @@ func TestSGEMetadata_ToJobRequest_DefaultSlots(t *testing.T) {
 		Walltime:     3,
 	}
 
-	jobReq := metadata.ToJobRequest()
+	jobReq, err := metadata.ToJobRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if jobReq.JobAnalyses[0].Hardware.Slots != 1 {
 		t.Errorf("Default Slots = %d, want %d", jobReq.JobAnalyses[0].Hardware.Slots, 1)
@@ -578,7 +688,7 @@ func TestSGEMetadata_ToSGEScript_MinimalFields(t *testing.T) {
 }
 
 // TestJobSpecToSGEMetadata pins the GUI -> script direction, including the SSH
-// settings the GUI can carry.
+// settings and the license feature the GUI can carry.
 func TestJobSpecToSGEMetadata(t *testing.T) {
 	job := models.JobSpec{
 		JobName:         "test_job",
@@ -593,9 +703,15 @@ func TestJobSpecToSGEMetadata(t *testing.T) {
 		ProjectID:       "proj_xyz",
 		CIDRRule:        "0.0.0.0/0",
 		PublicKey:       "ssh-ed25519 AAAAC3Nza",
+
+		LicenseFeatureName: "ansys_hpc",
+		LicensesPerJob:     8,
 	}
 
 	metadata := JobSpecToSGEMetadata(job)
+	// Half a pair is still written, so it loads back for validation to report
+	// instead of vanishing.
+	halfPair := JobSpecToSGEMetadata(models.JobSpec{LicenseFeatureName: "ansys_hpc"})
 
 	checkFields(t, []fieldCheck{
 		{"Name", metadata.Name, job.JobName},
@@ -611,12 +727,17 @@ func TestJobSpecToSGEMetadata(t *testing.T) {
 		{"ProjectID", metadata.ProjectID, job.ProjectID},
 		{"InboundSSHCIDR", metadata.InboundSSHCIDR, job.CIDRRule},
 		{"PublicKey", metadata.PublicKey, job.PublicKey},
+		{"UserDefinedLicenseSettings", asJSON(t, metadata.UserDefinedLicenseSettings),
+			asJSON(t, models.NewUserDefinedLicense("ansys_hpc", 8))},
+		{"half a pair", asJSON(t, halfPair.UserDefinedLicenseSettings),
+			asJSON(t, models.NewUserDefinedLicense("ansys_hpc", 0))},
+		{"no pair", JobSpecToSGEMetadata(models.JobSpec{}).UserDefinedLicenseSettings == nil, true},
 	})
 }
 
 // TestSGEMetadataToJobSpec pins the script -> GUI direction, including the SSH
-// settings, which must survive a load-then-save round trip through the job
-// config.
+// settings and the license feature, which must survive a load-then-save round
+// trip through the job config.
 func TestSGEMetadataToJobSpec(t *testing.T) {
 	metadata := &SGEMetadata{
 		Name:            "test_job",
@@ -631,9 +752,14 @@ func TestSGEMetadataToJobSpec(t *testing.T) {
 		ProjectID:       "proj_xyz",
 		InboundSSHCIDR:  "0.0.0.0/0",
 		PublicKey:       "ssh-ed25519 AAAAC3Nza",
+
+		UserDefinedLicenseSettings: models.NewUserDefinedLicense("ansys_hpc", 8),
 	}
 
-	job := SGEMetadataToJobSpec(metadata)
+	job, err := SGEMetadataToJobSpec(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	checkFields(t, []fieldCheck{
 		{"JobName", job.JobName, metadata.Name},
@@ -649,15 +775,37 @@ func TestSGEMetadataToJobSpec(t *testing.T) {
 		{"ProjectID", job.ProjectID, metadata.ProjectID},
 		{"CIDRRule", job.CIDRRule, metadata.InboundSSHCIDR},
 		{"PublicKey", job.PublicKey, metadata.PublicKey},
+		{"LicenseFeatureName", job.LicenseFeatureName, "ansys_hpc"},
+		{"LicensesPerJob", job.LicensesPerJob, 8},
 	})
 
 	// Slots and walltime are both defaulted rather than passed through as zero,
 	// which would make the spec unsubmittable.
-	bare := SGEMetadataToJobSpec(&SGEMetadata{})
+	bare, err := SGEMetadataToJobSpec(&SGEMetadata{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	checkFields(t, []fieldCheck{
 		{"default Slots", bare.Slots, 1},
 		{"default WalltimeHours", bare.WalltimeHours, 1.0},
 	})
+}
+
+// The job template holds one license feature, so a script with any other shape
+// is refused naming its line rather than loaded with part of it dropped.
+func TestSGEMetadataToJobSpec_RefusesWhatTheTemplateCannotHold(t *testing.T) {
+	feature := models.LicenseFeature{Name: "ansys_hpc", Count: 8}
+	for name, sets := range map[string][]models.LicenseFeatureSet{
+		"two features in one set": {{Name: "USER_SPECIFIED_0", Features: []models.LicenseFeature{feature, feature}}},
+		"two sets": {{Name: "USER_SPECIFIED_0", Features: []models.LicenseFeature{feature}},
+			{Name: "USER_SPECIFIED_1", Features: []models.LicenseFeature{feature}}},
+		"a set with no features": {{Name: "USER_SPECIFIED_0"}},
+	} {
+		m := &SGEMetadata{UserDefinedLicenseSettings: &models.UserDefinedLicense{FeatureSets: sets}, licenseSettingsLine: 12}
+		if _, err := SGEMetadataToJobSpec(m); err == nil || !strings.Contains(err.Error(), "at line 12") {
+			t.Errorf("%s: error %v, want a refusal naming line 12", name, err)
+		}
+	}
 }
 
 func TestSGEScriptParseRoundTrip(t *testing.T) {

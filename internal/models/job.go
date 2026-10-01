@@ -157,10 +157,10 @@ type JobAnalysisRequest struct {
 	EnvVars               map[string]string  `json:"envVars,omitempty"`
 	UseRescaleLicense     bool               `json:"useRescaleLicense"`
 	OnDemandLicenseSeller *string            `json:"onDemandLicenseSeller"`
-	// UserDefinedLicenseSettings is untyped because two shapes reach the wire: the
-	// legacy SGE path forwards the opaque string it parsed out of a submit script,
-	// while feature sets marshal as the *UserDefinedLicense object below. nil sends
-	// null, which is what the API expects when the job brings no license of its own.
+	// UserDefinedLicenseSettings is untyped so that whatever a --job-file holds
+	// here is passed through for the platform to judge; the requests Interlink
+	// builds itself carry the *UserDefinedLicense below. nil sends null, which is
+	// what the API expects when the job brings no license of its own.
 	UserDefinedLicenseSettings any `json:"userDefinedLicenseSettings"`
 }
 

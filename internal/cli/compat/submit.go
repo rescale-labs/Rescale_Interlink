@@ -70,7 +70,10 @@ func newSubmitCmd() *cobra.Command {
 				return fmt.Errorf("failed to parse script: %w", err)
 			}
 
-			jobReq := metadata.ToJobRequest()
+			jobReq, err := metadata.ToJobRequest()
+			if err != nil {
+				return fmt.Errorf("failed to parse script: %w", err)
+			}
 
 			// Apply compat flags
 			jobReq.IsLowPriority = waiveSLA
@@ -125,7 +128,7 @@ func newSubmitCmd() *cobra.Command {
 				filepath.Join(tmpDir, "run.sh"),
 				filepath.Join(tmpDir, "input.zip"),
 			}
-			fileIDs, err := compatUploadFilesReturnIDs(ctx, uploadPaths, "", client, cc)
+			fileIDs, err := compatSubmitUploadFn(ctx, uploadPaths, "", client, cc)
 			if err != nil {
 				return fmt.Errorf("failed to upload files: %w", err)
 			}
@@ -346,6 +349,11 @@ func containsInsensitive(s, substr string) bool {
 
 // compatNow is a function variable for testability.
 var compatNow = func() time.Time { return time.Now() }
+
+// compatSubmitUploadFn uploads submit's staged run.sh and input.zip. A test
+// seam: they go to the storage the platform names, which a test cannot stand
+// in for, so a test of what submit sends the API replaces the upload.
+var compatSubmitUploadFn = compatUploadFilesReturnIDs
 
 // v3-only top-level keys that CLI does not include
 var submitV3OnlyTopKeys = []string{

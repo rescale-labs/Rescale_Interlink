@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/rescale/rescale-int/internal/api"
@@ -380,5 +383,86 @@ func TestCompatE2EDownload_AppliesFilters(t *testing.T) {
 				t.Errorf("submit -E %s: %v, want debug.log filtered out", tc.flag, err)
 			}
 		})
+	}
+}
+
+// TestCompatSubmitLicenseDirective runs submit against a fake API, with the
+// upload of its two staged files stood in for and counted. rescale-cli writes
+// the license directive with "=" and Interlink with a space; either way the
+// create request carries the userDefinedLicenseSettings object, or null when
+// there is none. One that cannot be sent as written is refused, naming its
+// line, before anything is uploaded or created.
+func TestCompatSubmitLicenseDirective(t *testing.T) {
+	const settings = `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`
+	var mu sync.Mutex
+	var creates [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /api/v3/jobs/":
+			mu.Lock()
+			creates = append(creates, body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"id":"JOB1"}`)
+		case "POST /api/v2/jobs/JOB1/submit/":
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+
+	uploads := 0
+	orig := compatSubmitUploadFn
+	t.Cleanup(func() { compatSubmitUploadFn = orig })
+	compatSubmitUploadFn = func(context.Context, []string, string, *api.Client, *CompatContext) ([]string, error) {
+		uploads++
+		return []string{"RUNSH", "INPUTZIP"}, nil
+	}
+
+	for _, tt := range []struct{ directive, want string }{
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=" + settings, settings},
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS " + settings, settings},
+		{"", "null"},
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=", ""},
+		{`#RESCALE_USER_DEFINED_LICENSE_SETTINGS={"featureSets":[{"name":"USER_SPECIFIED_0",` +
+			`"features":[{"name":"ansys_hpc"}]}]}`, ""},
+	} {
+		mu.Lock()
+		creates = nil
+		mu.Unlock()
+		uploads = 0
+		script := filepath.Join(t.TempDir(), "job.sge")
+		if err := os.WriteFile(script, []byte("#!/bin/bash\n"+tt.directive+"\n./solve.sh\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := newSubmitCmd()
+		cmd.SetContext(context.Background())
+		SetCompatContext(cmd, &CompatContext{Quiet: true, apiClient: client})
+		err := cmd.RunE(cmd, []string{script})
+
+		mu.Lock()
+		sent := append([][]byte(nil), creates...)
+		mu.Unlock()
+		if tt.want == "" {
+			if err == nil || !strings.Contains(err.Error(), "at line 2") || uploads != 0 || len(sent) != 0 {
+				t.Errorf("%q: error %v after %d upload(s) and %d create(s), want a refusal naming line 2 before either",
+					tt.directive, err, uploads, len(sent))
+			}
+			continue
+		}
+		if err != nil || len(sent) != 1 {
+			t.Fatalf("%q: submit: %v, %d create(s)", tt.directive, err, len(sent))
+		}
+		var req struct {
+			JobAnalyses []map[string]json.RawMessage `json:"jobanalyses"`
+		}
+		if err := json.Unmarshal(sent[0], &req); err != nil || len(req.JobAnalyses) != 1 {
+			t.Fatalf("%q: create body: %v", tt.directive, err)
+		}
+		if got := string(req.JobAnalyses[0]["userDefinedLicenseSettings"]); got != tt.want {
+			t.Errorf("%q: userDefinedLicenseSettings = %s\nwant %s", tt.directive, got, tt.want)
+		}
 	}
 }

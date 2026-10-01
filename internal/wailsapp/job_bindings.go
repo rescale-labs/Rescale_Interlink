@@ -1307,7 +1307,10 @@ func (a *App) LoadJobFromSGE(path string) (JobSpecDTO, error) {
 		return JobSpecDTO{}, fmt.Errorf("failed to parse SGE script: %w", err)
 	}
 
-	spec := parser.SGEMetadataToJobSpec(metadata)
+	spec, err := parser.SGEMetadataToJobSpec(metadata)
+	if err != nil {
+		return JobSpecDTO{}, err
+	}
 	return jobSpecToDTO(spec), nil
 }
 
