@@ -52,11 +52,8 @@ type Config struct {
 	// MaxConcurrent is the maximum number of concurrent file downloads per job
 	MaxConcurrent int
 
-	// LogFile is the path to write daemon logs (empty = stdout)
-	LogFile string
-
-	// When set, jobs must pass eligibility checks to be downloaded
-	Eligibility *EligibilityConfig
+	// Eligibility is how a completed job is checked before it is downloaded.
+	Eligibility EligibilityConfig
 
 	// FlattenFolderStructure, when true, downloads workspace-folder jobs
 	// directly into DownloadDir instead of mirroring the folder tree. Only
@@ -69,6 +66,12 @@ type Config struct {
 // still be retried. Downloads are not covered by it — see poll(). A variable
 // so a test can shorten it.
 var scanBudget = 10 * time.Minute
+
+// scanContext returns the context that bounds one poll's scan: scanBudget from
+// now. A variable so a test can end a scan where it chooses.
+var scanContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, scanBudget)
+}
 
 // claimLease is how long a started tag holds a job. Past it any client may
 // take the job over, so a client that crashed or was removed holds none for
@@ -170,7 +173,7 @@ type Daemon struct {
 	batchHistMu sync.Mutex
 	batchHist   []string
 
-	// Shared transfer infrastructure (Plan 3).
+	// Shared transfer infrastructure.
 	// The daemon is a consumer of TransferService, not a parallel
 	// implementation. Per-daemon instance; no cross-process sharing.
 	ts     *services.TransferService
@@ -312,30 +315,29 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 	// creation-date pre-filter, so pruning is anchored to when the daemon
 	// downloaded a job and selection to the platform's own creation and
 	// completion timestamps for it.
-	if daemonCfg.Eligibility != nil && daemonCfg.Eligibility.LookbackDays > 0 {
-		retentionDays := daemonCfg.Eligibility.LookbackDays + stateRetentionBufferDays
-		state.SetRetention(time.Duration(retentionDays) * 24 * time.Hour)
+	if lookback := daemonCfg.Eligibility.LookbackDays; lookback > 0 {
+		state.SetRetention(time.Duration(lookback+stateRetentionBufferDays) * 24 * time.Hour)
 	}
 
-	// Create monitor with eligibility checking if configured
-	var monitor *Monitor
-	if daemonCfg.Eligibility != nil {
-		monitor = NewMonitorWithEligibility(apiClient, state, daemonCfg.Filter, daemonCfg.Eligibility, logger)
-	} else {
-		monitor = NewMonitor(apiClient, state, daemonCfg.Filter, logger)
-	}
-	monitor.flatten = daemonCfg.FlattenFolderStructure
+	return newDaemon(appCfg, daemonCfg, apiClient, state, logger), nil
+}
+
+// newDaemon assembles a daemon around its API client and its state, as New
+// does, and as the tests do around a client of their own.
+func newDaemon(appCfg *config.Config, cfg *Config, apiClient *api.Client, state *State, logger *logging.Logger) *Daemon {
+	monitor := NewMonitor(apiClient, state, cfg.Filter, cfg.Eligibility, logger)
+	monitor.flatten = cfg.FlattenFolderStructure
 
 	// Daemon-scoped EventBus + TransferService. EventBus drives the shared
 	// transfer.Queue; IPC serializes from that queue on demand. No external
 	// subscribers — the bus exists so the shared transfer path works.
 	eventBus := events.NewEventBus(0) // default buffer
 	ts := services.NewTransferService(apiClient, eventBus, services.TransferServiceConfig{
-		MaxConcurrent: daemonCfg.MaxConcurrent,
+		MaxConcurrent: cfg.MaxConcurrent,
 	})
 
 	return &Daemon{
-		cfg:       daemonCfg,
+		cfg:       cfg,
 		appCfg:    appCfg,
 		apiClient: apiClient,
 		state:     state,
@@ -344,22 +346,13 @@ func New(appCfg *config.Config, daemonCfg *Config, logger *logging.Logger) (*Dae
 		stopChan:  make(chan struct{}),
 		ts:        ts,
 		events:    eventBus,
-	}, nil
+	}
 }
 
 // TransferService returns the daemon-scoped TransferService. Used by IPC
 // handlers to serialize queue state and route cancel/retry actions.
 func (d *Daemon) TransferService() *services.TransferService {
 	return d.ts
-}
-
-// Queue returns the daemon's transfer queue. Convenience accessor for IPC
-// handlers that want BatchStats snapshots.
-func (d *Daemon) Queue() *transfer.Queue {
-	if d.ts == nil {
-		return nil
-	}
-	return d.ts.GetQueue()
 }
 
 // DaemonTransferSnapshot projects the daemon's transfer queue state into
@@ -541,7 +534,7 @@ func (d *Daemon) poll(ctx context.Context) {
 	// It deliberately does not reach the downloads themselves: a single large
 	// file can legitimately take longer than any scan budget, and killing it
 	// mid-transfer restarts it from zero on the next poll, forever.
-	scanCtx, cancel := context.WithTimeout(ctx, scanBudget)
+	scanCtx, cancel := scanContext(ctx)
 	defer cancel()
 
 	scanStart := time.Now()
@@ -550,32 +543,30 @@ func (d *Daemon) poll(ctx context.Context) {
 	inthttp.WarmupProxyIfNeeded(scanCtx, d.appCfg)
 	credentials.GetManager(d.apiClient).WarmAll(scanCtx)
 
-	// Plan 3: tag-retry pass before scan. Jobs downloaded successfully but
+	// Tag-retry pass before scan. Jobs downloaded successfully but
 	// whose AddJobTag call failed get one tag-retry attempt per poll. On
 	// success the pending flag is cleared; on failure it stays and the job
 	// is suppressed pre-eligibility (below) so we do not re-download files
 	// that are already on disk solely because the tag hasn't been applied.
-	if d.cfg.Eligibility != nil {
-		for _, jobID := range d.state.PendingTagApplyJobs() {
-			if err := d.apiClient.AddJobTag(scanCtx, jobID, config.DownloadedTag); err != nil {
-				d.logger.Debug().
-					Str("job_id", jobID).
-					Err(err).
-					Msg("Tag retry failed; will try next poll")
-				continue
-			}
-			d.state.ClearPendingTagApply(jobID)
-			d.releaseStarted(jobID)
-			d.logger.Info().
+	for _, jobID := range d.state.PendingTagApplyJobs() {
+		if err := d.apiClient.AddJobTag(scanCtx, jobID, config.DownloadedTag); err != nil {
+			d.logger.Debug().
 				Str("job_id", jobID).
-				Str("tag", config.DownloadedTag).
-				Msg("Applied downloaded tag on retry")
+				Err(err).
+				Msg("Tag retry failed; will try next poll")
+			continue
 		}
-		// A started tag an ended attempt left on, by crashing or failing to
-		// take it off, comes off now: no job downloads between polls.
-		for _, jobID := range d.state.StartedToRemove() {
-			d.releaseStarted(jobID)
-		}
+		d.state.ClearPendingTagApply(jobID)
+		d.releaseStarted(jobID)
+		d.logger.Info().
+			Str("job_id", jobID).
+			Str("tag", config.DownloadedTag).
+			Msg("Applied downloaded tag on retry")
+	}
+	// A started tag an ended attempt left on, by crashing or failing to
+	// take it off, comes off now: no job downloads between polls.
+	for _, jobID := range d.state.StartedToRemove() {
+		d.releaseStarted(jobID)
 	}
 
 	// Build the still-pending set AFTER the retry pass. Jobs in this set
@@ -613,21 +604,12 @@ func (d *Daemon) poll(ctx context.Context) {
 		// scripts grep one format, not two.
 		d.emitScanSummary(&ScanSummary{
 			SkipBuckets:      make(map[SkipReasonCode]int),
-			DownloadOutcomes: make(map[string]int),
+			DownloadOutcomes: make(map[DownloadOutcome]int),
 		}, time.Since(scanStart), false, err)
 		return
 	}
 
 	summary := result.Summary
-	if summary == nil {
-		// Defensive: FindCompletedJobs should always return a summary.
-		summary = &ScanSummary{
-			TotalScanned:     result.TotalScanned,
-			SkipBuckets:      make(map[SkipReasonCode]int),
-			DownloadOutcomes: make(map[string]int),
-		}
-	}
-
 	completed := result.Candidates
 
 	// New jobs first, then those checked longest ago: a poll that runs out
@@ -685,50 +667,44 @@ func (d *Daemon) poll(ctx context.Context) {
 		}
 		checked[job.ID] = time.Now()
 
-		if d.cfg.Eligibility != nil {
-			// Per-call timeout prevents a single slow eligibility check from
-			// blocking the scan. Parented on the lifecycle context, not scanCtx:
-			// a legitimately long download can push the poll past the scan
-			// deadline, and an eligibility check must not inherit a context that
-			// is already dead and fail every job after it.
-			eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
-			eligResult := d.monitor.CheckEligibility(eligCtx, job)
-			eligCancel()
+		// Per-call timeout prevents a single slow eligibility check from
+		// blocking the scan. Parented on the lifecycle context, not scanCtx:
+		// a legitimately long download can push the poll past the scan
+		// deadline, and an eligibility check must not inherit a context that
+		// is already dead and fail every job after it.
+		eligCtx, eligCancel := context.WithTimeout(ctx, 2*time.Minute)
+		eligResult := d.monitor.CheckEligibility(eligCtx, job)
+		eligCancel()
 
-			summary.EligibilityChecked++
+		summary.EligibilityChecked++
 
-			// An eligible job is claimed from other clients before anything
-			// is written for it.
-			reason, eligible := eligResult.Reason, eligResult.EligibleForDownload
-			if eligible {
-				// Where the job lands is settled before it is claimed, so one
-				// that cannot land anywhere is refused with no tag put on it.
-				if _, err := d.jobBaseDir(ctx, job); err != nil {
-					d.countOutcome(summary, job, d.refuse(ctx, job, err))
-					continue
-				}
-				claimStart := time.Now()
-				reason, eligible = d.claim(ctx, job)
-				totalDownloadTime += time.Since(claimStart)
-			}
-			if !eligible {
-				if reason.Code != ReasonNone {
-					summary.AddSkip(reason.Code)
-				}
-				if !reason.Code.IsSilent() {
-					d.logger.Info().Msgf("SKIP: %s [%s] - %s", job.Name, job.ID, reason.Detail)
-				}
+		// An eligible job is claimed from other clients before anything
+		// is written for it.
+		reason, eligible := eligResult.Reason, eligResult.EligibleForDownload
+		var baseDir string
+		if eligible {
+			// Where the job lands is settled before it is claimed, so one
+			// that cannot land anywhere is refused with no tag put on it.
+			if baseDir, err = d.jobBaseDir(job, eligResult.DownloadPath); err != nil {
+				d.countOutcome(summary, job, d.refuse(ctx, job, err))
 				continue
 			}
-
-			// Job is eligible - will download
-			d.logger.Info().Msgf("DOWNLOAD: %s [%s] - %s", job.Name, job.ID, eligResult.Detail)
-		} else {
-			// No eligibility config — every candidate is dispatched straight
-			// to download. Count it as "checked" for parity with the configured
-			// path.
-			summary.EligibilityChecked++
+			claimStart := time.Now()
+			reason, eligible = d.claim(ctx, job)
+			totalDownloadTime += time.Since(claimStart)
 		}
+		if !eligible {
+			if reason.Code != ReasonNone {
+				summary.AddSkip(reason.Code)
+			}
+			if !reason.Code.IsSilent() {
+				d.logger.Info().Msgf("SKIP: %s [%s] - %s", job.Name, job.ID, reason.Detail)
+			}
+			continue
+		}
+
+		// Job is eligible - will download
+		d.logger.Info().Msgf("DOWNLOAD: %s [%s] - %s", job.Name, job.ID, eligResult.Detail)
 
 		// ctx, not scanCtx: the download gets the daemon's lifecycle context, so
 		// it ends when the daemon stops or the batch is cancelled — never
@@ -736,7 +712,7 @@ func (d *Daemon) poll(ctx context.Context) {
 		// hour, and a partial file never matches the expected size, so a
 		// budget-killed download restarts from zero on every poll.
 		downloadStart := time.Now()
-		outcome := d.downloadJob(ctx, job)
+		outcome := d.downloadJob(ctx, job, baseDir)
 		totalDownloadTime += time.Since(downloadStart)
 		d.countOutcome(summary, job, outcome)
 	}
@@ -779,7 +755,7 @@ func scanBudgetExceeded(elapsed, downloadTime, budget time.Duration) bool {
 // countOutcome counts a download attempt's outcome, and says so when the job
 // has used up its attempts.
 func (d *Daemon) countOutcome(s *ScanSummary, job *CompletedJob, outcome DownloadOutcome) {
-	s.AddOutcome(string(outcome))
+	s.AddOutcome(outcome)
 	if d.state.AttemptCount(job.ID) >= MaxDownloadAttempts {
 		d.logger.Warn().Msgf("GAVE UP: %s [%s] - %d download attempts failed; run 'rescale-int daemon retry --job-id %s' to try again",
 			job.Name, job.ID, MaxDownloadAttempts, job.ID)
@@ -809,12 +785,12 @@ func (d *Daemon) emitScanSummary(s *ScanSummary, duration time.Duration, interru
 	// Classify download outcomes. no_files is reported separately from
 	// downloaded: a completed job with an empty output set is not a download,
 	// and folding it in made the downloaded count unfalsifiable.
-	downloaded := s.DownloadOutcomes[string(OutcomeDownloaded)]
-	noFiles := s.DownloadOutcomes[string(OutcomeNoFiles)]
-	partial := s.DownloadOutcomes[string(OutcomePartialFailure)]
-	interruptedJobs := s.DownloadOutcomes[string(OutcomeInterrupted)]
-	listFailed := s.DownloadOutcomes[string(OutcomeListFilesFailed)]
-	dirFailed := s.DownloadOutcomes[string(OutcomeOutputDirCreateFailed)]
+	downloaded := s.DownloadOutcomes[OutcomeDownloaded]
+	noFiles := s.DownloadOutcomes[OutcomeNoFiles]
+	partial := s.DownloadOutcomes[OutcomePartialFailure]
+	interruptedJobs := s.DownloadOutcomes[OutcomeInterrupted]
+	listFailed := s.DownloadOutcomes[OutcomeListFilesFailed]
+	dirFailed := s.DownloadOutcomes[OutcomeOutputDirCreateFailed]
 	failed := partial + listFailed + dirFailed
 
 	// Classify skip buckets as silent vs. logged.
@@ -930,12 +906,13 @@ var scanSummaryReasonOrder = []SkipReasonCode{
 	ReasonDownloadedTagCheckAPIError,
 	ReasonOutsideLookbackWindow,
 	ReasonCompletionTimeAPIError,
+	ReasonCompletionTimeDeferred,
 }
 
 // checkAllUnsetWarning emits a WARN when every job that actually reached
-// CheckEligibility had the "Auto Download" field unset. This is the D2
-// signal: it almost always means the workspace is missing the custom field,
-// and the user cannot figure that out from the per-poll noise alone.
+// CheckEligibility had the "Auto Download" field unset, which almost always
+// means the workspace is missing the custom field: the user cannot figure that
+// out from the per-poll noise alone.
 func (d *Daemon) checkAllUnsetWarning(s *ScanSummary) {
 	if s.EligibilityChecked == 0 {
 		return
@@ -985,24 +962,23 @@ const (
 // TransferService, the same infrastructure the GUI File Browser uses.
 // Returns a DownloadOutcome so the per-poll summary can distinguish
 // succeeded / no-files / failed / interrupted / partial outcomes without
-// re-reading state or logs.
+// re-reading state or logs. baseDir is the folder the job's own folder goes
+// in, which poll settled with jobBaseDir before claiming the job.
 //
-// Plan 3: the daemon is a consumer of TransferService, not a parallel
+// The daemon is a consumer of TransferService, not a parallel
 // implementation. Worker pools, resource management, progress tracking,
 // and cancellation all live in the shared queue.
-func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOutcome {
+func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob, baseDir string) DownloadOutcome {
 	d.logger.Info().
 		Str("job_id", job.ID).
 		Str("job_name", job.Name).
 		Msg("Downloading job")
 
-	// Settled again here, just before anything is written: poll settled it
-	// before claiming the job, and other callers do not.
-	baseDir, err := d.jobBaseDir(ctx, job)
-	if err != nil {
+	// The claim before this took seconds, in which a folder on the way to
+	// baseDir can have become a link out of DownloadDir.
+	if _, err := resolveWithin(baseDir, d.cfg.DownloadDir); err != nil {
 		return d.refuse(ctx, job, err)
 	}
-
 	outputDir := ComputeOutputDir(baseDir, job.ID, job.Name, d.cfg.UseJobNameDir)
 
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -1085,9 +1061,8 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 	// Dispatch files onto the queue. This goroutine closes reqCh when done,
 	// which flips TotalKnown=true so WaitForBatch knows registration is
 	// complete. Files already present on disk with correct size are counted
-	// toward downloadedCount/totalSize but not pushed to the queue (shared
-	// download path does not short-circuit correct-size local files).
-	var totalSize int64
+	// but not pushed to the queue (shared download path does not short-circuit
+	// correct-size local files).
 	var alreadyPresent int
 	var dispatched int
 	var skipped int    // files the dispatch left out: a refused name or a folder not made
@@ -1128,7 +1103,6 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 
 			if d.alreadyDownloaded(localPath, f) {
 				alreadyPresent++
-				totalSize += f.DecryptedSize
 				continue
 			}
 
@@ -1239,17 +1213,7 @@ func (d *Daemon) downloadJob(ctx context.Context, job *CompletedJob) DownloadOut
 		fail(batchID, failErr)
 		outcome = OutcomePartialFailure
 	} else {
-		// Add queue-completed bytes to totalSize (already-present files were
-		// added above as we skipped dispatch).
-		for _, f := range files {
-			if info, statErr := os.Stat(filepath.Join(outputDir, f.Name)); statErr == nil && info.Size() == f.DecryptedSize {
-				// Already counted if dispatched path matched; avoid double-count
-				// by using a clean recompute below.
-				_ = info
-			}
-		}
-		// Recompute totalSize from source-of-truth file list (all files succeeded).
-		totalSize = 0
+		var totalSize int64
 		for _, f := range files {
 			totalSize += f.DecryptedSize
 		}
@@ -1342,12 +1306,8 @@ func (d *Daemon) retireOldBatches(batchID string) {
 
 // applyDownloadedTag tags a finished job so the tag-first eligibility check
 // stops re-selecting it. On failure the job is flagged PendingTagApply and the
-// poll loop retries just the tag call, without re-downloading files. No-op when
-// eligibility checking is disabled (no tags are consulted in that mode).
+// poll loop retries just the tag call, without re-downloading files.
 func (d *Daemon) applyDownloadedTag(ctx context.Context, job *CompletedJob) {
-	if d.cfg.Eligibility == nil {
-		return
-	}
 	if err := d.apiClient.AddJobTag(ctx, job.ID, config.DownloadedTag); err != nil {
 		d.logger.Warn().
 			Err(err).
@@ -1458,11 +1418,11 @@ func (d *Daemon) removeStale(ctx context.Context, jobID string, stale []startedC
 // saving that at once, and reports whether the job is left without one. A
 // removal that fails keeps the tag this client's, and the next poll tries
 // again, until the tag's lease is over: it holds nothing then, and a removal
-// that still fails, as every one does once the job is deleted, would be tried
-// for weeks. The call gets a context of its own, so the tag comes off even
-// while the daemon stops, and 4 s, inside the 5 s 'daemon run' gives a
-// stopping daemon, so a stop does not cut it off between the removal and the
-// save.
+// that still fails, as one does once this client may no longer change the
+// job's tags, would be tried for weeks. The call gets a context of its own, so
+// the tag comes off even while the daemon stops, and 4 s, inside the 5 s
+// 'daemon run' gives a stopping daemon, so a stop does not cut it off between
+// the removal and the save.
 func (d *Daemon) releaseStarted(jobID string) bool {
 	tag, ok := d.state.StartedTag(jobID)
 	if !ok {
@@ -1484,15 +1444,16 @@ func (d *Daemon) releaseStarted(jobID string) bool {
 	return true
 }
 
-// jobBaseDir returns the folder a job's own folder goes in. That is the job's
-// own "Auto Download Path" when that lies within DownloadDir; otherwise, for a
-// job in a workspace folder, the mirror of that folder under DownloadDir,
-// unless flattening is enabled; otherwise DownloadDir. The folder names come
-// from the server, so each is held to the rules for every other server name,
-// and the path must stay within DownloadDir: a path that cannot be mirrored is
-// an error, unless the job's own download path applies. So is a job ID that is
-// not one, as the job's folder is named after it.
-func (d *Daemon) jobBaseDir(ctx context.Context, job *CompletedJob) (string, error) {
+// jobBaseDir returns the folder a job's own folder goes in. That is
+// customPath, the job's own "Auto Download Path", when that lies within
+// DownloadDir; otherwise, for a job in a workspace folder, the mirror of that
+// folder under DownloadDir, unless flattening is enabled; otherwise
+// DownloadDir. The folder names come from the server, so each is held to the
+// rules for every other server name, and the path must stay within
+// DownloadDir: a path that cannot be mirrored is an error, unless the job's
+// own download path applies. So is a job ID that is not one, as the job's
+// folder is named after it.
+func (d *Daemon) jobBaseDir(job *CompletedJob, customPath string) (string, error) {
 	if err := validation.ValidateID(job.ID); err != nil {
 		return "", fmt.Errorf("invalid job ID: %w", err)
 	}
@@ -1505,41 +1466,28 @@ func (d *Daemon) jobBaseDir(ctx context.Context, job *CompletedJob) (string, err
 		}
 	}
 
-	// Check for custom download path from eligibility config. A per-job
-	// "Auto Download Path" override takes precedence over folder mirroring and
-	// must resolve to within DownloadDir.
-	if d.cfg.Eligibility != nil {
-		if customPath := d.monitor.GetJobDownloadPath(ctx, job.ID); customPath != "" {
-			// Custom path must resolve to within DownloadDir to prevent
-			// arbitrary filesystem writes even when daemon runs as SYSTEM.
-			candidate := customPath
-			if !filepath.IsAbs(candidate) {
-				candidate = filepath.Join(d.cfg.DownloadDir, candidate)
-			}
-			candidate = filepath.Clean(candidate)
-
-			// Resolve symlinks on both paths to prevent symlink-based escapes.
-			realDownloadDir, err := filepath.EvalSymlinks(d.cfg.DownloadDir)
-			if err != nil {
-				realDownloadDir = filepath.Clean(d.cfg.DownloadDir)
-			}
-			realCandidate := resolvePathWithSymlinks(candidate)
-
-			if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
-				d.logger.Warn().
-					Str("job_id", job.ID).
-					Str("custom_path", customPath).
-					Str("download_dir", d.cfg.DownloadDir).
-					Err(err).
-					Msg("Rejecting custom download path: escapes download directory")
-			} else {
-				d.logger.Debug().
-					Str("job_id", job.ID).
-					Str("custom_path", customPath).
-					Str("resolved", realCandidate).
-					Msg("Using custom download path (validated under download directory)")
-				baseDir, mirrorErr = realCandidate, nil
-			}
+	// A per-job "Auto Download Path" override takes precedence over folder
+	// mirroring, and must resolve to within DownloadDir, so that it cannot
+	// write anywhere else on the file system.
+	if customPath != "" {
+		candidate := customPath
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(d.cfg.DownloadDir, candidate)
+		}
+		if realCandidate, err := resolveWithin(filepath.Clean(candidate), d.cfg.DownloadDir); err != nil {
+			d.logger.Warn().
+				Str("job_id", job.ID).
+				Str("custom_path", customPath).
+				Str("download_dir", d.cfg.DownloadDir).
+				Err(err).
+				Msg("Rejecting custom download path: escapes download directory")
+		} else {
+			d.logger.Debug().
+				Str("job_id", job.ID).
+				Str("custom_path", customPath).
+				Str("resolved", realCandidate).
+				Msg("Using custom download path (validated under download directory)")
+			baseDir, mirrorErr = realCandidate, nil
 		}
 	}
 	if mirrorErr != nil {
@@ -1566,15 +1514,22 @@ func mirrorDir(downloadDir string, folderPath []string) (string, error) {
 			return refuse(err)
 		}
 	}
-	realDownloadDir, err := filepath.EvalSymlinks(downloadDir)
+	realCandidate, err := resolveWithin(filepath.Join(append([]string{downloadDir}, folderPath...)...), downloadDir)
 	if err != nil {
-		realDownloadDir = filepath.Clean(downloadDir)
-	}
-	realCandidate := resolvePathWithSymlinks(filepath.Join(append([]string{downloadDir}, folderPath...)...))
-	if err := validation.ValidatePathInDirectory(realCandidate, realDownloadDir); err != nil {
 		return refuse(err)
 	}
 	return realCandidate, nil
+}
+
+// resolveWithin returns path with its links resolved, and an error unless that
+// lies within dir, its links resolved too.
+func resolveWithin(path, dir string) (string, error) {
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		realDir = filepath.Clean(dir)
+	}
+	resolved := resolvePathWithSymlinks(path)
+	return resolved, validation.ValidatePathInDirectory(resolved, realDir)
 }
 
 // resolvePathWithSymlinks resolves symlinks for a path that may not fully exist.
@@ -1635,7 +1590,7 @@ func (d *Daemon) GetDownloadedCount() int {
 }
 
 // GetActiveDownloads returns the number of downloads currently in progress,
-// derived from the shared transfer queue (Plan 3: no daemon-local counter).
+// derived from the shared transfer queue; the daemon keeps no count of its own.
 func (d *Daemon) GetActiveDownloads() int {
 	if d.ts == nil {
 		return 0

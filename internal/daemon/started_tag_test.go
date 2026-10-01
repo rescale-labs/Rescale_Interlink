@@ -2,21 +2,13 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
-	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 )
 
@@ -42,33 +34,12 @@ func TestCheckEligibility_ReadsTheJobsTagsOnce(t *testing.T) {
 			if tc.ours {
 				names = append(names, state.MarkStarted("j1", time.Now().Add(-time.Hour)))
 			}
-			var tagReads atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var body any
-				switch r.URL.Path {
-				case "/api/v3/jobs/j1/tags/":
-					tagReads.Add(1)
-					tags := []api.JobTag{}
-					for _, name := range names {
-						tags = append(tags, api.JobTag{Name: name})
-					}
-					body = tags
-				case "/api/v3/jobs/j1/custom-fields/":
-					body = map[string]any{config.AutoDownloadFieldName: map[string]any{"value": "Conditional"}}
-				default:
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(body)
-			}))
-			t.Cleanup(srv.Close)
-			client := api.NewClientForTest(&config.Config{APIKey: "test-key", APIBaseURL: srv.URL, ProxyMode: "no-proxy"})
-			m := NewMonitorWithEligibility(client, state, nil, &EligibilityConfig{AutoDownloadTag: "wanted", LookbackDays: 7}, logging.NewLoggerWithWriter(io.Discard))
+			p := newPlatform(t, &fakeJob{id: "j1", fields: map[string]string{config.AutoDownloadFieldName: "Conditional"}, tags: names})
+			m := p.monitor(state, EligibilityConfig{AutoDownloadTag: "wanted", LookbackDays: 7})
 
 			got := m.CheckEligibility(context.Background(), &CompletedJob{ID: "j1"})
-			if got.Reason.Code != tc.want || got.EligibleForDownload != (tc.want == ReasonNone) || tagReads.Load() != 1 {
-				t.Errorf("reason %q (eligible %v) after %d reads of the tags; want %q after one", got.Reason.Code, got.EligibleForDownload, tagReads.Load(), tc.want)
+			if _, reads := p.read(); got.Reason.Code != tc.want || got.EligibleForDownload != (tc.want == ReasonNone) || len(reads) != 1 {
+				t.Errorf("reason %q (eligible %v) after %d reads of the tags; want %q after one", got.Reason.Code, got.EligibleForDownload, len(reads), tc.want)
 			}
 		})
 	}
@@ -106,55 +77,25 @@ func TestDownloadJob_ReleasesTheStartedTag(t *testing.T) {
 			const jobID = "tagged1"
 			ctx, stopDaemon := context.WithCancel(context.Background())
 			defer stopDaemon()
-			var own string // this client's started tag
 			var mu sync.Mutex
-			var changes []string
 			var stoppedAt time.Time
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.URL.Path == fmt.Sprintf("/api/v2/jobs/%s/files/", jobID) && tc.files != nil:
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(map[string]any{"results": tc.files})
-				case r.URL.Path == fmt.Sprintf("/api/v3/jobs/%s/tags/", jobID) && r.Method != http.MethodGet:
-					var tag api.JobTag
-					_ = json.NewDecoder(r.Body).Decode(&tag)
-					mu.Lock()
-					change := "+" + tag.Name
-					if r.Method == http.MethodDelete {
-						change = "-" + tag.Name
-						if tag.Name == own {
-							change = removed
-						}
-					}
-					changes = append(changes, change)
-					mu.Unlock()
-					switch {
-					case r.Method == http.MethodPost:
-						w.WriteHeader(http.StatusCreated)
-					case tc.remove == "fails":
-						w.WriteHeader(http.StatusInternalServerError)
-					case tc.remove == "hangs":
-						<-r.Context().Done()
-					default:
-						w.WriteHeader(http.StatusNoContent)
-					}
-				case r.URL.Path == "/api/v3/files/f1/":
-					mu.Lock()
-					stoppedAt = time.Now()
-					mu.Unlock()
-					stopDaemon() // the file is downloading when the daemon is told to stop
-					<-r.Context().Done()
-				default:
-					w.WriteHeader(http.StatusNotFound)
-				}
-			}))
-			t.Cleanup(srv.Close)
-			dir := t.TempDir()
-			d := newDownloadTestDaemon(t, srv.URL, dir, &EligibilityConfig{LookbackDays: 7})
-			if tc.want != nil { // claimed, as claim saves it
+			p := newPlatform(t, &fakeJob{id: jobID, files: tc.files})
+			p.failListings = tc.files == nil
+			p.hangDeletes = tc.remove == "hangs"
+			if tc.remove == "fails" {
+				p.failDeletes = 1
+			}
+			p.onFetch = func() {
 				mu.Lock()
-				own = d.state.MarkStarted(jobID, time.Now())
+				stoppedAt = time.Now()
 				mu.Unlock()
+				stopDaemon() // the file is downloading when the daemon is told to stop
+			}
+			dir := t.TempDir()
+			d := p.daemon(dir, EligibilityConfig{LookbackDays: 7})
+			var own string      // this client's started tag
+			if tc.want != nil { // claimed, as claim saves it
+				own = d.state.MarkStarted(jobID, time.Now())
 				if err := d.state.Save(); err != nil {
 					t.Fatal(err)
 				}
@@ -162,7 +103,7 @@ func TestDownloadJob_ReleasesTheStartedTag(t *testing.T) {
 			writeFile(t, filepath.Join(ComputeOutputDir(dir, jobID, "job", false), present.Name), string(payload))
 
 			outcome := make(chan DownloadOutcome, 1)
-			go func() { outcome <- d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"}) }()
+			go func() { outcome <- d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"}, d.cfg.DownloadDir) }()
 			select {
 			case got := <-outcome:
 				if (got == OutcomeDownloaded) != (tc.name == "downloaded") {
@@ -171,11 +112,18 @@ func TestDownloadJob_ReleasesTheStartedTag(t *testing.T) {
 			case <-time.After(30 * time.Second):
 				t.Fatal("downloadJob did not return")
 			}
-			mu.Lock()
-			defer mu.Unlock()
+			var changes []string
+			for _, change := range p.writes() {
+				if change == "-"+own {
+					change = removed
+				}
+				changes = append(changes, change)
+			}
 			if !slices.Equal(changes, tc.want) {
 				t.Errorf("tag changes %v, want %v", changes, tc.want)
 			}
+			mu.Lock()
+			defer mu.Unlock()
 			if tc.remove == "hangs" && time.Since(stoppedAt) >= 5*time.Second {
 				t.Errorf("the stopping daemon spent %s releasing the tag, beyond its 5 s", time.Since(stoppedAt))
 			}
@@ -202,34 +150,14 @@ func TestDownloadJob_ReleasesTheStartedTag(t *testing.T) {
 // started tag off, and the state file forgets it.
 func TestPoll_TagRetryReleasesTheStartedTag(t *testing.T) {
 	const jobID = "pending1"
-	var mu sync.Mutex
-	var changes []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/api/v3/jobs/":
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"results": []models.JobResponse{}})
-		case r.URL.Path == fmt.Sprintf("/api/v3/jobs/%s/tags/", jobID) && r.Method != http.MethodGet:
-			var tag api.JobTag
-			_ = json.NewDecoder(r.Body).Decode(&tag)
-			mu.Lock()
-			changes = append(changes, r.Method+" "+tag.Name)
-			mu.Unlock()
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	d := newDownloadTestDaemon(t, srv.URL, t.TempDir(), &EligibilityConfig{LookbackDays: 7})
+	p := newPlatform(t)
+	d := p.daemon(t.TempDir(), EligibilityConfig{LookbackDays: 7})
 	d.state.MarkDownloaded(jobID, "job", "", 1, 1)
 	d.state.MarkPendingTagApply(jobID)
 	own := d.state.MarkStarted(jobID, time.Now())
 
 	d.poll(context.Background())
-	mu.Lock()
-	defer mu.Unlock()
-	if want := []string{"POST " + config.DownloadedTag, "DELETE " + own}; !slices.Equal(changes, want) {
+	if changes, want := p.writes(), []string{"+" + config.DownloadedTag, "-" + own}; !slices.Equal(changes, want) {
 		t.Errorf("tag changes %v, want %v", changes, want)
 	}
 	saved := NewState(d.cfg.StateFile)

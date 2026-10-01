@@ -5,11 +5,8 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,81 +24,32 @@ import (
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
-// fakeJobFilesServer serves just enough of the Rescale API for downloadJob:
-// the job file listing, plus a permissive handler for everything else so
-// tag/custom-field calls do not hang. tagCalls counts AddJobTag requests for
-// the downloaded tag.
-func fakeJobFilesServer(t *testing.T, jobID string, files []models.JobFile, tagCalls *int) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, fmt.Sprintf("/jobs/%s/files/", jobID)):
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"count":   len(files),
-				"next":    nil,
-				"results": files,
-			})
-		case strings.HasSuffix(r.URL.Path, fmt.Sprintf("/jobs/%s/tags/", jobID)) && r.Method == http.MethodPost:
-			var tag api.JobTag
-			if json.NewDecoder(r.Body).Decode(&tag) == nil && tag.Name == config.DownloadedTag && tagCalls != nil {
-				*tagCalls++
-			}
-			w.WriteHeader(http.StatusCreated)
-		default:
-			// Anything else (custom fields, file info for a failing download)
-			// is a miss. The daemon must treat it as such, not stall.
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-// newDownloadTestDaemon assembles a Daemon around a test API client pointed at
-// a local httptest server. New() cannot be used here: it builds a real API
-// client, which rejects non-HTTPS base URLs.
-func newDownloadTestDaemon(t *testing.T, baseURL, downloadDir string, elig *EligibilityConfig) *Daemon {
+// newDownloadTestDaemon assembles a Daemon, as New does, around a test API
+// client pointed at a local httptest server. New() cannot be used here: it
+// builds a real API client, which rejects non-HTTPS base URLs.
+func newDownloadTestDaemon(t *testing.T, baseURL, downloadDir string, elig EligibilityConfig) *Daemon {
 	t.Helper()
 	isolateHome(t)
 	appCfg := &config.Config{APIKey: "test-key", APIBaseURL: baseURL, ProxyMode: "no-proxy"}
-	apiClient := api.NewClientForTest(appCfg)
-
-	daemonCfg := DefaultConfig()
-	daemonCfg.StateFile = filepath.Join(t.TempDir(), "state.json")
-	daemonCfg.DownloadDir = downloadDir
-	daemonCfg.UseJobNameDir = false
-	daemonCfg.Eligibility = elig
-
-	logger := logging.NewLogger("daemon-test", nil)
-	state := NewState(daemonCfg.StateFile)
-	eventBus := events.NewEventBus(0)
-
-	return &Daemon{
-		cfg:       daemonCfg,
-		appCfg:    appCfg,
-		apiClient: apiClient,
-		state:     state,
-		monitor:   NewMonitor(apiClient, state, nil, logger),
-		logger:    logger,
-		stopChan:  make(chan struct{}),
-		events:    eventBus,
-		ts: services.NewTransferService(apiClient, eventBus, services.TransferServiceConfig{
-			MaxConcurrent: daemonCfg.MaxConcurrent,
-		}),
-	}
+	cfg := DefaultConfig()
+	cfg.StateFile = filepath.Join(t.TempDir(), "state.json")
+	cfg.DownloadDir = downloadDir
+	cfg.UseJobNameDir = false
+	cfg.Eligibility = elig
+	return newDaemon(appCfg, cfg, api.NewClientForTest(appCfg), NewState(cfg.StateFile), logging.NewLogger("daemon-test", nil))
 }
 
-// runDownloadJob calls downloadJob with a hard deadline. A wedged downloadJob
-// (the zero-task WaitForBatch spin) leaks a goroutine rather than blocking the
-// test run, and reports as a failure instead of a 10-minute hang.
+// runDownloadJob calls downloadJob with a hard deadline, for a job whose folder
+// goes straight in the download folder. A wedged downloadJob (the zero-task
+// WaitForBatch spin) leaks a goroutine rather than blocking the test run, and
+// reports as a failure instead of a 10-minute hang.
 func runDownloadJob(t *testing.T, d *Daemon, job *CompletedJob, budget time.Duration) DownloadOutcome {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	done := make(chan DownloadOutcome, 1)
-	go func() { done <- d.downloadJob(ctx, job) }()
+	go func() { done <- d.downloadJob(ctx, job, d.cfg.DownloadDir) }()
 
 	select {
 	case outcome := <-done:
@@ -124,8 +72,7 @@ func TestDownloadJob_AllFilesPresentDoesNotHang(t *testing.T) {
 		{ID: "f1", Name: "out1.txt", DecryptedSize: 5},
 		{ID: "f2", Name: "out2.txt", DecryptedSize: 3},
 	}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 
 	outDir := ComputeOutputDir(dir, jobID, "job", false)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -157,85 +104,24 @@ func TestDownloadJob_AllFilesPresentDoesNotHang(t *testing.T) {
 	}
 }
 
-// A job whose only files are unusable must be recorded as failed, not
-// silently reported as a successful download.
-func TestDownloadJob_AllFilesSkippedIsFailure(t *testing.T) {
-	const jobID = "ghijkl"
-	dir := t.TempDir()
-
-	// Absolute path in Name is rejected by validation.ValidateFilename.
-	files := []models.JobFile{{ID: "f1", Name: "../escape.txt", DecryptedSize: 4}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
-
-	outcome := runDownloadJob(t, d, &CompletedJob{ID: jobID, Name: "job"}, 20*time.Second)
-	if outcome != OutcomePartialFailure {
-		t.Fatalf("outcome = %q, want %q", outcome, OutcomePartialFailure)
-	}
-	if entry := d.state.Downloaded[jobID]; entry == nil || entry.Error == "" {
-		t.Fatalf("expected a recorded failure, got %+v", entry)
-	}
-}
-
 // A completed job with an empty output set must be tagged. Without the tag it
 // passes the tag-first eligibility check on every subsequent poll forever.
 func TestDownloadJob_NoFilesAppliesDownloadedTag(t *testing.T) {
 	const jobID = "mnopqr"
 	dir := t.TempDir()
 
-	tagCalls := 0
-	srv := fakeJobFilesServer(t, jobID, nil, &tagCalls)
-	d := newDownloadTestDaemon(t, srv.URL, dir, &EligibilityConfig{LookbackDays: 7})
+	p := newPlatform(t, &fakeJob{id: jobID})
+	d := p.daemon(dir, EligibilityConfig{LookbackDays: 7})
 
 	outcome := runDownloadJob(t, d, &CompletedJob{ID: jobID, Name: "job"}, 20*time.Second)
 	if outcome != OutcomeNoFiles {
 		t.Fatalf("outcome = %q, want %q", outcome, OutcomeNoFiles)
 	}
-	if tagCalls != 1 {
-		t.Errorf("AddJobTag calls = %d, want 1", tagCalls)
+	if n := p.puts(config.DownloadedTag); n != 1 {
+		t.Errorf("the done tag was put on %d times, want 1", n)
 	}
 	if entry := d.state.Downloaded[jobID]; entry == nil || entry.PendingTagApply {
 		t.Errorf("expected a tagged state entry, got %+v", entry)
-	}
-}
-
-// A download must not inherit the scan's deadline. A large file legitimately
-// takes longer than any scan budget, and a download killed part-way leaves a
-// partial file that never matches the expected size, so the next poll restarts
-// it from zero — forever. The download's context lineage therefore has to come
-// from the daemon lifecycle, not from the poll's scan context.
-func TestDownloadJob_IgnoresAnExpiredScanBudget(t *testing.T) {
-	const jobID = "yzabcd"
-	dir := t.TempDir()
-
-	files := []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 5}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
-
-	outDir := ComputeOutputDir(dir, jobID, "job", false)
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(outDir, "out1.txt"), []byte("hello"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	// Stand in for a scan whose budget has already elapsed. downloadJob must
-	// never be handed this context; if it is, the job cannot succeed.
-	expired, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
-	defer cancel()
-	<-expired.Done()
-
-	// The lifecycle context is healthy, which is what poll() now passes down.
-	outcome := runDownloadJob(t, d, &CompletedJob{ID: jobID, Name: "job"}, 20*time.Second)
-	if outcome != OutcomeDownloaded {
-		t.Fatalf("outcome = %q, want %q", outcome, OutcomeDownloaded)
-	}
-
-	// And prove the failure mode is real: the same job under the expired
-	// context must not succeed, which is why poll() must not pass scanCtx.
-	if got := d.downloadJob(expired, &CompletedJob{ID: jobID, Name: "job"}); got == OutcomeDownloaded {
-		t.Error("an expired context produced a successful download; the test no longer proves anything")
 	}
 }
 
@@ -275,8 +161,7 @@ func TestDownloadJob_LabelsRepeatAttempts(t *testing.T) {
 	dir := t.TempDir()
 
 	files := []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 9}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 	job := &CompletedJob{ID: jobID, Name: "job"}
 
 	for i := 0; i < 2; i++ {
@@ -286,7 +171,7 @@ func TestDownloadJob_LabelsRepeatAttempts(t *testing.T) {
 	}
 
 	labels := make(map[string]struct{})
-	tasks := d.Queue().GetTasks()
+	tasks := d.ts.GetQueue().GetTasks()
 	for i := range tasks {
 		labels[tasks[i].BatchLabel] = struct{}{}
 	}
@@ -303,8 +188,8 @@ func TestDownloadJob_LabelsRepeatAttempts(t *testing.T) {
 // most recent daemonBatchHistoryLimit are retired; the recent ones stay so the
 // Transfers tab still shows them.
 func TestRetireOldBatchesBoundsTheQueue(t *testing.T) {
-	d := newDownloadTestDaemon(t, "http://127.0.0.1:0", t.TempDir(), nil)
-	queue := d.Queue()
+	d := newDownloadTestDaemon(t, "http://127.0.0.1:0", t.TempDir(), EligibilityConfig{})
+	queue := d.ts.GetQueue()
 
 	total := daemonBatchHistoryLimit + 5
 	ids := make([]string, 0, total)
@@ -347,8 +232,7 @@ func TestDownloadJob_RetryDoesNotInheritEarlierFailures(t *testing.T) {
 
 	// Not on disk, and file info 404s, so the dispatched download fails fast.
 	files := []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 9}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 
 	job := &CompletedJob{ID: jobID, Name: "job"}
 
@@ -370,7 +254,7 @@ func TestDownloadJob_RetryDoesNotInheritEarlierFailures(t *testing.T) {
 
 	// Two distinct daemon batches, one per attempt.
 	seen := make(map[string]struct{})
-	tasks := d.Queue().GetTasks()
+	tasks := d.ts.GetQueue().GetTasks()
 	for i := range tasks {
 		if tasks[i].BatchID != "" {
 			seen[tasks[i].BatchID] = struct{}{}
@@ -388,11 +272,10 @@ func sha512Of(t *testing.T, data []byte) []models.FileChecksum {
 	return []models.FileChecksum{{HashFunction: "sha512", FileHash: hex.EncodeToString(sum[:])}}
 }
 
-// alreadyDownloaded adopts a same-size file only when a SHA-512, however it is
-// spelled, matches it; it once matched three exact spellings and adopted the
-// rest by length. With nothing to check against it adopts by length, and warns
-// when the file carried some other checksum, as downloads do; a file with no
-// checksum at all stays quiet.
+// alreadyDownloaded adopts a same-size file only when its SHA-512 matches it.
+// With nothing to check against it adopts by length, and warns when the file
+// carried some other checksum, as downloads do; a file with no checksum at all
+// stays quiet.
 func TestAlreadyDownloadedChecksums(t *testing.T) {
 	localPath := filepath.Join(t.TempDir(), "out1.txt")
 	writeFile(t, localPath, "world") // what an interrupted download of "hello" leaves
@@ -405,9 +288,6 @@ func TestAlreadyDownloadedChecksums(t *testing.T) {
 		{nil, true, false},
 		{[]models.FileChecksum{{HashFunction: "sha512"}}, true, false}, // no hash: no checksum
 		{[]models.FileChecksum{{HashFunction: "sha512", FileHash: remote}}, false, true},
-		{[]models.FileChecksum{{HashFunction: "SHA-512", FileHash: remote}}, false, true},
-		{[]models.FileChecksum{{HashFunction: "sha-512", FileHash: remote}}, false, true},
-		{[]models.FileChecksum{{HashFunction: "Sha512", FileHash: remote}}, false, true},
 	} {
 		var logs bytes.Buffer
 		d := &Daemon{logger: logging.NewLoggerWithWriter(&logs)}
@@ -437,8 +317,7 @@ func TestDownloadJob_ReDownloadsAnExistingFileThatFailsItsChecksum(t *testing.T)
 		DecryptedSize: 5,
 		FileChecksums: sha512Of(t, []byte("hello")),
 	}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 
 	outDir := ComputeOutputDir(dir, jobID, "job", false)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -472,8 +351,7 @@ func TestDownloadJob_DoesNotRehashAVerifiedFile(t *testing.T) {
 		DecryptedSize: int64(len(payload)),
 		FileChecksums: sha512Of(t, payload),
 	}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 
 	outDir := ComputeOutputDir(dir, jobID, "job", false)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -514,8 +392,7 @@ func TestDownloadJob_RehashesAFileThatChangedAfterVerification(t *testing.T) {
 		DecryptedSize: int64(len(payload)),
 		FileChecksums: sha512Of(t, payload),
 	}}
-	srv := fakeJobFilesServer(t, jobID, files, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 
 	outDir := ComputeOutputDir(dir, jobID, "job", false)
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -571,22 +448,12 @@ func TestDownloadJob_CutShortDispatchIsNotADownload(t *testing.T) {
 		{"after the only file was handed over", []models.JobFile{missing}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tagCalls := 0
-			fake := fakeJobFilesServer(t, jobID, tc.files, &tagCalls)
+			p := newPlatform(t, &fakeJob{id: jobID, files: tc.files})
 			inFlight := make(chan struct{})
 			var once sync.Once
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if strings.HasPrefix(r.URL.Path, "/api/v3/files/") {
-					once.Do(func() { close(inFlight) }) // a.txt's download, running until the cancel
-					<-r.Context().Done()
-					return
-				}
-				fake.Config.Handler.ServeHTTP(w, r)
-			}))
-			t.Cleanup(srv.Close)
-
+			p.onFetch = func() { once.Do(func() { close(inFlight) }) } // a.txt's download, running until the cancel
 			dir := t.TempDir()
-			d := newDownloadTestDaemon(t, srv.URL, dir, &EligibilityConfig{LookbackDays: 7})
+			d := p.daemon(dir, EligibilityConfig{LookbackDays: 7})
 			outDir := ComputeOutputDir(dir, jobID, "job", false)
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				t.Fatalf("mkdir: %v", err)
@@ -600,16 +467,16 @@ func TestDownloadJob_CutShortDispatchIsNotADownload(t *testing.T) {
 			cancel := func() {
 				if tc.files[0].ID == queued.ID {
 					<-inFlight
-					d.Queue().Complete(d.Queue().GetTasks()[0].ID) // stands in for a.txt finishing
+					d.ts.GetQueue().Complete(d.ts.GetQueue().GetTasks()[0].ID) // stands in for a.txt finishing
 				}
-				id := d.Queue().GetAllBatchStats()[0].BatchID
+				id := d.ts.GetQueue().GetAllBatchStats()[0].BatchID
 				switch {
 				case tc.stop:
 					stopDaemon()
 				case tc.files[0].ID == missing.ID:
 					// No task registers. The queue's cancel alone is the moment a wait
 					// finds the batch gone, before CancelBatch adds its row for it.
-					_ = d.Queue().CancelBatch(id)
+					_ = d.ts.GetQueue().CancelBatch(id)
 				default:
 					_ = d.ts.CancelBatch(id)
 				}
@@ -634,11 +501,11 @@ func TestDownloadJob_CutShortDispatchIsNotADownload(t *testing.T) {
 				return start(ts, ctx, read, batchID, label, source, cancelFn)
 			}
 
-			outcome := d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"})
+			outcome := d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"}, d.cfg.DownloadDir)
 			entry := d.state.Downloaded[jobID]
-			if outcome == OutcomeDownloaded || tagCalls != 0 || entry != nil && (entry.Error == "" || entry.PendingTagApply) {
-				t.Fatalf("a cut-short dispatch was taken for a download: outcome %s, state %+v, tag calls %d",
-					outcome, entry, tagCalls)
+			if tagged := p.puts(config.DownloadedTag); outcome == OutcomeDownloaded || tagged != 0 || entry != nil && (entry.Error == "" || entry.PendingTagApply) {
+				t.Fatalf("a cut-short dispatch was taken for a download: outcome %s, state %+v, done tag put on %d times",
+					outcome, entry, tagged)
 			}
 			if tc.stop && entry != nil {
 				t.Errorf("a stop that cut the dispatch short was counted as a failed attempt: %+v", entry)
@@ -673,10 +540,9 @@ func TestDownloadJob_AFileItCannotPlaceIsNotADownload(t *testing.T) {
 			"1 of 2 files could not be downloaded: invalid path from API for file y: in \"run:1/y.txt\": filename cannot contain ':': \"run:1\""},
 		{"link", []models.JobFile{present, {ID: "l", Name: "linked.txt", DecryptedSize: 3}}, "1 of 2 files could not be downloaded: refusing to download to "},
 	} {
-		tagCalls := 0
-		srv := fakeJobFilesServer(t, tc.jobID, tc.files, &tagCalls)
+		p := newPlatform(t, &fakeJob{id: tc.jobID, files: tc.files})
 		dir := t.TempDir()
-		d := newDownloadTestDaemon(t, srv.URL, dir, &EligibilityConfig{LookbackDays: 7})
+		d := p.daemon(dir, EligibilityConfig{LookbackDays: 7})
 		outDir := ComputeOutputDir(dir, tc.jobID, "job", false)
 		writeFile(t, filepath.Join(outDir, "present.txt"), string(payload))
 		writeFile(t, filepath.Join(outDir, "sub"), "") // a file where y.txt's folder belongs
@@ -685,9 +551,9 @@ func TestDownloadJob_AFileItCannotPlaceIsNotADownload(t *testing.T) {
 		}
 
 		outcome := runDownloadJob(t, d, &CompletedJob{ID: tc.jobID, Name: "job"}, 20*time.Second)
-		if entry := d.state.Downloaded[tc.jobID]; outcome == OutcomeDownloaded || tagCalls != 0 || d.state.AttemptCount(tc.jobID) != 1 ||
+		if entry, tagged := d.state.Downloaded[tc.jobID], p.puts(config.DownloadedTag); outcome != OutcomePartialFailure || tagged != 0 || d.state.AttemptCount(tc.jobID) != 1 ||
 			entry.PendingTagApply || !strings.HasPrefix(entry.Error, tc.want) || strings.Contains(entry.Error, ";") {
-			t.Errorf("%s: outcome %s, state %+v, tag calls %d: want one failed attempt recorded as %q", tc.jobID, outcome, entry, tagCalls, tc.want)
+			t.Errorf("%s: outcome %s, state %+v, done tag put on %d times: want one failed attempt recorded as %q", tc.jobID, outcome, entry, tagged, tc.want)
 		}
 		if info, err := os.Lstat(filepath.Join(outDir, "linked.txt")); err != nil || info.Mode()&os.ModeSymlink == 0 {
 			t.Errorf("%s: the link was not left in place: %v", tc.jobID, err)

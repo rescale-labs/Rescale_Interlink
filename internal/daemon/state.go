@@ -113,11 +113,9 @@ func (s *State) Load() error {
 	return s.load(false)
 }
 
-// open is Load for the daemon, which rewrites the file. Under the file's lock,
-// having made its folder, it also runs the one-time migration from the legacy
-// Unix-style path on any OS (Windows was already doing this; Plan 2 also
-// consolidates Unix/macOS from ~/.config/rescale-int/ to ~/.config/rescale/),
-// and sets a corrupt file aside.
+// open is Load for the daemon, which rewrites the file: under the file's lock,
+// having made its folder, it also moves a legacy state file in and sets a
+// corrupt one aside.
 func (s *State) open() error {
 	unlock, err := s.lock()
 	if err != nil {
@@ -699,14 +697,7 @@ func (s *State) GetRecentDownloads(limit int) []*DownloadedJob {
 		}
 	}
 
-	// Sort by download time (most recent first)
-	for i := 0; i < len(downloads)-1; i++ {
-		for j := i + 1; j < len(downloads); j++ {
-			if downloads[j].DownloadedAt.After(downloads[i].DownloadedAt) {
-				downloads[i], downloads[j] = downloads[j], downloads[i]
-			}
-		}
-	}
+	slices.SortFunc(downloads, func(a, b *DownloadedJob) int { return b.DownloadedAt.Compare(a.DownloadedAt) }) // most recent first
 
 	if limit > 0 && len(downloads) > limit {
 		return downloads[:limit]
@@ -730,8 +721,8 @@ func (s *State) GetFailedJobs() []*DownloadedJob {
 
 // DefaultStateFilePath returns the default path for the daemon state file.
 // On Windows, uses %LOCALAPPDATA%\Rescale\Interlink\state\ (consistent with
-// install/logs paths). On Unix, uses ~/.config/rescale/ (was rescale-int/
-// pre-Plan-2; migrated by Load()).
+// install/logs paths). On Unix, uses ~/.config/rescale/. A state file where
+// earlier versions kept it, under ~/.config/rescale-int/, is moved in by open.
 func DefaultStateFilePath() string {
 	if runtime.GOOS == "windows" {
 		localAppData := os.Getenv("LOCALAPPDATA")
@@ -746,9 +737,8 @@ func DefaultStateFilePath() string {
 	return filepath.Join(homeDir, ".config", "rescale", "daemon-state.json")
 }
 
-// oldStateFilePath returns the legacy state file path used prior to Plan 2
-// (Unix-style under ~/.config/rescale-int/). Returns empty when it is
-// identical to DefaultStateFilePath (meaning no migration is applicable).
+// oldStateFilePath returns where earlier versions kept the state file on every
+// system, under ~/.config/rescale-int/, or "" when the home folder is unknown.
 func oldStateFilePath() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -757,8 +747,8 @@ func oldStateFilePath() string {
 	return filepath.Join(homeDir, ".config", "rescale-int", "daemon-state.json")
 }
 
-// migrateStateFile moves state file from old path to new path if needed.
-// One-time migration from Unix-style path to Windows-native path.
+// migrateStateFile moves the state file from oldPath, where earlier versions
+// kept it, to newPath, unless newPath already holds one.
 func migrateStateFile(oldPath, newPath string) {
 	if oldPath == "" || newPath == "" || oldPath == newPath {
 		return

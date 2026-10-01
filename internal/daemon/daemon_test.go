@@ -37,7 +37,4 @@ func TestDaemonConstruction(t *testing.T) {
 	if d.TransferService() != d.ts {
 		t.Error("TransferService() does not return the stored instance")
 	}
-	if d.Queue() == nil {
-		t.Error("Queue() returned nil; expected shared transfer.Queue")
-	}
 }

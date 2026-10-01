@@ -4,7 +4,11 @@ package daemon
 import (
 	"encoding/json"
 	"io"
+	"maps"
 	"os"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -70,34 +74,20 @@ func (w *DaemonLogWriter) Write(p []byte) (n int, err error) {
 	n = len(p)
 	p = []byte(reporting.RedactSecrets(string(p)))
 
-	// Parse the JSON log entry
-	var entry struct {
-		Level   string                 `json:"level"`
-		Time    string                 `json:"time"`
-		Message string                 `json:"message"`
-		Stage   string                 `json:"stage"`
-		Extra   map[string]interface{} `json:"-"`
+	// One parse serves the IPC buffer and the file. The fields left once level,
+	// time, message and stage are taken out are the entry's own: the error,
+	// the job, the path.
+	var fields map[string]any
+	parsed := json.Unmarshal(p, &fields) == nil
+	take := func(key string) string {
+		s, _ := fields[key].(string)
+		delete(fields, key)
+		return s
 	}
-
-	// Unmarshal to get basic fields
-	if err := json.Unmarshal(p, &entry); err == nil {
-		// Get all fields for extras
-		var allFields map[string]interface{}
-		json.Unmarshal(p, &allFields)
-
-		// Remove known fields to get extras
-		delete(allFields, "level")
-		delete(allFields, "time")
-		delete(allFields, "message")
-		delete(allFields, "stage")
-
-		// Add to buffer for IPC streaming
-		w.buffer.Add(
-			entry.Level,
-			entry.Stage,
-			entry.Message,
-			allFields,
-		)
+	level, stage, msg := take("level"), take("stage"), take("message")
+	delete(fields, "time")
+	if parsed {
+		w.buffer.Add(level, stage, msg, fields)
 	}
 
 	// Write to console
@@ -106,29 +96,41 @@ func (w *DaemonLogWriter) Write(p []byte) (n int, err error) {
 		w.console.Write(p)
 	}
 
-	// Write to file
+	// Write to file: timestamp [level] stage: message, then the fields, sorted.
 	if w.fileEnabled && w.file != nil {
-		// Format for file: timestamp [LEVEL] stage: message
-		timestamp := time.Now().Format("2006-01-02 15:04:05.000")
-		level := entry.Level
 		if level == "" {
 			level = "INFO"
 		}
-		stage := entry.Stage
 		if stage == "" {
 			stage = "daemon"
 		}
-		msg := entry.Message
-		if msg == "" {
+		if !parsed {
 			msg = string(p)
 		}
-
-		fileEntry := timestamp + " [" + level + "] " + stage + ": " + msg + "\n"
-		w.file.Write([]byte(fileEntry))
+		line := time.Now().Format("2006-01-02 15:04:05.000") + " [" + level + "] " + stage + ": " + msg
+		for _, key := range slices.Sorted(maps.Keys(fields)) {
+			line += " " + key + "=" + fieldText(fields[key])
+		}
+		w.file.Write([]byte(line + "\n"))
 	}
 	w.mu.RUnlock()
 
 	return n, nil
+}
+
+// fieldText is a field's value as the log file shows it, and as zerolog's
+// console writer does: a string bare unless it needs quoting, anything else
+// as JSON.
+func fieldText(v any) string {
+	s, ok := v.(string)
+	if !ok {
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+	if strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r > '~' || r == '"' || r == '\\' }) {
+		return strconv.Quote(s)
+	}
+	return s
 }
 
 // GetBuffer returns the log buffer for IPC access.

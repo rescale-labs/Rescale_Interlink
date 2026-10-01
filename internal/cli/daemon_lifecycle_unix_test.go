@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -15,13 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/cobra"
-
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/reporting"
+	"github.com/rescale/rescale-int/internal/service"
 )
 
 // isolateDaemonHome gives the test a home directory of its own, so the PID
@@ -36,6 +36,7 @@ func isolateDaemonHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.RemoveAll(home) })
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home) // where the report folder is on Linux
 	t.Setenv("RESCALE_API_KEY", "")
 	return home
 }
@@ -94,10 +95,7 @@ func TestDaemonRunRefusesBeforeItChangesAnything(t *testing.T) {
 		{"a PID lock it cannot take", "daemon.pid.lock", nil, "failed to lock PID file"},
 		{"a --max-concurrent below 1", "", []string{"--max-concurrent", "0"}, "--max-concurrent must be between 1 and 20, got 0"},
 		{"a --max-concurrent above 20", "", []string{"--max-concurrent", "21"}, "--max-concurrent must be between 1 and 20, got 21"},
-		// what Windows detection refuses a start for
-		{"a running Windows Service", "", nil, "cannot start daemon: Windows Service is running. Manage via Services.msc"},
-		{"a daemon Windows detection finds", "", nil, "cannot start daemon: Daemon already running (PID 1234)"},
-		{"an occupied daemon pipe", "", nil, "cannot start daemon: Daemon appears to be running but not responding (pipe exists)"},
+		{"what Windows detection refuses a start for", "", nil, "cannot start daemon: " + service.OldServiceRunning},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			isolateDaemonHome(t)
@@ -140,38 +138,27 @@ func TestDaemonRunRefusesBeforeItChangesAnything(t *testing.T) {
 	}
 }
 
-// A max_concurrent in daemon.conf that --max-concurrent would refuse is refused
-// by name before a background daemon starts, as in the foreground, and files no
-// report: every writer of daemon.conf keeps it in range, so a hand edit put it
-// there.
-func TestDaemonRunRefusesMaxConcurrentFromDaemonConf(t *testing.T) {
-	for _, args := range [][]string{{"--background"}, nil} {
-		t.Run(fmt.Sprint(args), func(t *testing.T) {
-			home := isolateDaemonHome(t)
-			keepDaemonRunGlobals(t)
-			conf, err := config.DefaultDaemonConfigPath()
-			if err != nil {
-				t.Fatal(err)
-			}
-			os.MkdirAll(filepath.Dir(conf), 0o700)
-			if err := os.WriteFile(conf, []byte("[daemon]\nmax_concurrent = 50\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			origDaemonize := daemonize
-			daemonize = func([]string) error { t.Error("daemon run --background started a daemon"); return nil }
-			t.Cleanup(func() { daemonize = origDaemonize })
+// 'daemon run --background' starts its daemon with the user's own arguments,
+// all but --background, so global flags such as --token-file, and --once,
+// reach it. The daemon reads daemon.conf for itself.
+func TestDaemonRunBackgroundPassesTheUsersArguments(t *testing.T) {
+	home := isolateDaemonHome(t)
+	keepDaemonRunGlobals(t)
+	var child []string
+	origDaemonize, origArgs, origToken := daemonize, os.Args, tokenFile
+	daemonize = func(args []string) error { child = args; return nil }
+	t.Cleanup(func() { daemonize, os.Args, tokenFile = origDaemonize, origArgs, origToken })
+	token, downloads := filepath.Join(home, "token"), filepath.Join(home, "downloads")
+	args := []string{"--token-file", token, "daemon", "run", "--background", "--once", "-d", downloads}
+	os.Args = append([]string{"rescale-int"}, args...)
 
-			_, err = runDaemonCommand(t, newDaemonRunCmd(), append(args, "--download-dir", filepath.Join(home, "downloads"), "--state-file", filepath.Join(home, "state.json"))...)
-			if want := "max_concurrent in daemon.conf must be between 1 and 20, got 50"; err == nil || !strings.Contains(err.Error(), want) {
-				t.Fatalf("daemon run: %v, want an error containing %q", err, want)
-			}
-			if saved := reporting.HandleCLIError(err, "cli", "rescale-int daemon run", ""); saved != "" {
-				t.Errorf("the refused start saved an error report to %s", saved)
-			}
-			if _, err := os.Stat(daemon.PIDFilePath()); !os.IsNotExist(err) {
-				t.Errorf("the refused start left a PID file (stat: %v)", err)
-			}
-		})
+	root := NewRootCmd()
+	AddCommands(root)
+	if _, err := runDaemonCommand(t, root, args...); err != nil {
+		t.Fatalf("rescale-int %q: %v", args, err)
+	}
+	if want := []string{"--token-file", token, "daemon", "run", "--once", "-d", downloads}; !slices.Equal(child, want) {
+		t.Errorf("the background daemon was started with %q, want %q", child, want)
 	}
 }
 
@@ -339,6 +326,9 @@ func TestDaemonStopWithoutAPIDFileCannotConfirmTheExit(t *testing.T) {
 // is reached through a proxy on a closed local port, so nothing leaves the
 // machine.
 func TestDaemonRunStopsOnSIGHUP(t *testing.T) {
+	if signal.Ignored(syscall.SIGHUP) {
+		t.Skip("SIGHUP is ignored in this process, as under nohup, and a daemon keeps it ignored")
+	}
 	home := isolateDaemonHome(t)
 	keepDaemonRunGlobals(t)
 	proxied := filepath.Join(home, "config.csv")
@@ -394,8 +384,9 @@ func TestDaemonRunStopsOnSIGHUP(t *testing.T) {
 
 // On Windows, a daemon that holds the PID file but does not answer on this
 // version's pipe may be an earlier version's, which listens where this version
-// does not look: status and stop say how to end it, with 'daemon stop --force',
-// which ends it by its process.
+// does not look: status says how to end it, with 'daemon stop --force', which
+// ends it by its process, and stop, which ends nothing, fails saying the same,
+// as a usage error: no error report.
 func TestDaemonStatusAndStopSayHowToEndAnEarlierVersionsDaemon(t *testing.T) {
 	isolateDaemonHome(t)
 	if err := daemon.WritePIDFile(); err != nil {
@@ -406,10 +397,15 @@ func TestDaemonStatusAndStopSayHowToEndAnEarlierVersionsDaemon(t *testing.T) {
 	onWindows = true
 	t.Cleanup(func() { onWindows = orig })
 
-	const want = "To end it, including one an earlier version of Interlink started, run 'rescale-int daemon stop --force' or end the rescale-int process in Task Manager."
-	for name, cmd := range map[string]*cobra.Command{"status": newDaemonStatusCmd(), "stop": newDaemonStopCmd()} {
-		if out, err := runDaemonCommand(t, cmd); err != nil || !strings.Contains(out, want) {
-			t.Errorf("daemon %s: %v; want the line %q\n%s", name, err, want, out)
-		}
+	const want = "To end it, including one an earlier version of Interlink started, run 'rescale-int daemon stop --force' or end the rescale-int process in Task Manager"
+	if out, err := runDaemonCommand(t, newDaemonStatusCmd()); err != nil || !strings.Contains(out, want) {
+		t.Errorf("daemon status: %v; want the line %q\n%s", err, want, out)
+	}
+	_, err := runDaemonCommand(t, newDaemonStopCmd())
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("daemon stop: %v, want it to fail saying %q", err, want)
+	}
+	if saved := reporting.HandleCLIError(err, "cli", "rescale-int daemon stop", ""); saved != "" {
+		t.Errorf("the stop that ended nothing saved an error report to %s", saved)
 	}
 }

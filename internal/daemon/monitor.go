@@ -54,14 +54,6 @@ type EligibilityConfig struct {
 	IncludeWorkspaceFolders bool
 }
 
-// DefaultEligibilityConfig returns the default eligibility configuration.
-func DefaultEligibilityConfig() *EligibilityConfig {
-	return &EligibilityConfig{
-		AutoDownloadTag: "autodownload",
-		LookbackDays:    7,
-	}
-}
-
 // SkipReasonCode is a stable machine-readable identifier for why a job was
 // skipped (or never considered) by the daemon. Codes drive the per-poll scan
 // summary buckets (ScanSummary) and the silent-vs-logged decision for the
@@ -138,6 +130,11 @@ const (
 	// failed. Logged.
 	ReasonCompletionTimeAPIError SkipReasonCode = "completion_time_api_error"
 
+	// ReasonCompletionTimeDeferred — an earlier scan ran out of time while it
+	// looked the job's completion time up; the job waits lookupRetryAfter for
+	// its next lookup. Silent (transient).
+	ReasonCompletionTimeDeferred SkipReasonCode = "completion_time_deferred"
+
 	// ReasonInRetryBackoff — job's download failed and it is waiting out its
 	// backoff, or has used up its attempts until 'daemon retry'. Silent:
 	// 'daemon list --failed' says which.
@@ -145,8 +142,8 @@ const (
 
 	// ReasonPendingTagApply — job's files are on disk but the downloaded
 	// tag API call failed; daemon retries the tag call separately. Silent
-	// (transient, recovers on its own). Added by Plan 3 so pending-tag jobs
-	// are not re-downloaded while the tag retry is still pending.
+	// (transient, recovers on its own). Skipped so that pending-tag jobs are
+	// not re-downloaded while the tag retry is still pending.
 	ReasonPendingTagApply SkipReasonCode = "pending_tag_apply"
 )
 
@@ -166,7 +163,8 @@ func (c SkipReasonCode) IsSilent() bool {
 		ReasonFieldCheckAPIError,
 		ReasonInRetryBackoff,
 		ReasonPendingTagApply,
-		ReasonHasDownloadedTag:
+		ReasonHasDownloadedTag,
+		ReasonCompletionTimeDeferred:
 		return true
 	default:
 		return false
@@ -194,6 +192,10 @@ type CheckEligibilityResult struct {
 	// job is eligible ("Auto Download is Enabled"), otherwise the skip
 	// detail (same string as Reason.Detail).
 	Detail string
+
+	// DownloadPath is an eligible job's own "Auto Download Path", read with
+	// its Auto Download field; "" when it has none.
+	DownloadPath string
 }
 
 // Monitor watches for completed jobs and triggers downloads.
@@ -201,7 +203,7 @@ type Monitor struct {
 	apiClient   *api.Client
 	state       *State
 	filter      *JobFilter
-	eligibility *EligibilityConfig
+	eligibility EligibilityConfig
 	logger      *logging.Logger
 
 	// flatten is Config.FlattenFolderStructure: no workspace folder is then
@@ -217,24 +219,18 @@ type Monitor struct {
 }
 
 // completion is when a job completed, or, the time zero, when looking that up
-// failed.
-type completion struct{ at, failed time.Time }
-
-// NewMonitor creates a new job monitor.
-func NewMonitor(client *api.Client, state *State, filter *JobFilter, logger *logging.Logger) *Monitor {
-	return &Monitor{
-		apiClient: client,
-		state:     state,
-		filter:    filter,
-		logger:    logger,
-	}
+// failed, and whether the scan's time ran out before the lookup did.
+type completion struct {
+	at, failed time.Time
+	cut        bool
 }
 
-// NewMonitorWithEligibility creates a new job monitor with eligibility checking.
-func NewMonitorWithEligibility(client *api.Client, state *State, filter *JobFilter, eligibility *EligibilityConfig, logger *logging.Logger) *Monitor {
-	if eligibility == nil {
-		eligibility = DefaultEligibilityConfig()
-	}
+// errLookupDeferred is the answer, until lookupRetryAfter has passed, for a job
+// whose completion time lookup the scan's time cut short.
+var errLookupDeferred = errors.New("its completion time lookup ran out of scan time recently")
+
+// NewMonitor creates a job monitor that checks each job's eligibility.
+func NewMonitor(client *api.Client, state *State, filter *JobFilter, eligibility EligibilityConfig, logger *logging.Logger) *Monitor {
 	return &Monitor{
 		apiClient:   client,
 		state:       state,
@@ -244,30 +240,22 @@ func NewMonitorWithEligibility(client *api.Client, state *State, filter *JobFilt
 	}
 }
 
-// SetEligibility sets the eligibility configuration.
-func (m *Monitor) SetEligibility(cfg *EligibilityConfig) {
-	m.eligibility = cfg
-}
-
 // CheckEligibility checks if a job is eligible for auto-download.
 //
-// Plan 3 tag-first order:
+// Tag-first order:
 //  1. `downloaded` tag present  → skip silently (common case every poll)
 //  2. `Auto Download` custom field check (Disabled/empty → silent skip)
 //  3. Conditional tag check (when field is Conditional)
 //
 // The tag check is step 1 so a user who revokes the `downloaded` tag in
-// the Rescale web UI triggers a re-download on the next poll — spec §7.6.
+// the Rescale web UI triggers a re-download on the next poll.
 // Field lookup failures are silent (workspaces without the Auto Download
 // field error here for every job, so logging each would be noise).
 func (m *Monitor) CheckEligibility(ctx context.Context, job *CompletedJob) CheckEligibilityResult {
-	if m.eligibility == nil {
-		return CheckEligibilityResult{EligibleForDownload: true, Detail: "eligibility checking disabled"}
-	}
 	jobID := job.ID
 
 	// Step 1: the job's tags, fetched once for every tag check below. The done
-	// tag is authoritative over local state (Plan 3 F9).
+	// tag is authoritative over local state.
 	tags, err := m.apiClient.GetJobTags(ctx, jobID)
 	if err != nil {
 		m.logger.Warn().Err(err).Str("job_id", jobID).Msg("Failed to check job tags")
@@ -296,8 +284,9 @@ func (m *Monitor) CheckEligibility(ctx context.Context, job *CompletedJob) Check
 		}
 	}
 
-	// Step 2: check custom field.
-	fieldValue, err := m.apiClient.GetJobCustomFieldValue(ctx, jobID, config.AutoDownloadFieldName)
+	// Step 2: the job's custom fields, read once for its Auto Download field
+	// and for its own download path.
+	fields, err := m.apiClient.GetJobCustomFields(ctx, jobID)
 	if err != nil {
 		m.logger.Debug().Err(err).Str("job_id", jobID).Msg("Failed to get Auto Download field")
 		detail := fmt.Sprintf("failed to check field: %v", err)
@@ -305,6 +294,10 @@ func (m *Monitor) CheckEligibility(ctx context.Context, job *CompletedJob) Check
 			Reason: SkipReason{Code: ReasonFieldCheckAPIError, Detail: detail},
 			Detail: detail,
 		}
+	}
+	fieldValue := customField(fields, config.AutoDownloadFieldName)
+	eligible := func(detail string) CheckEligibilityResult {
+		return CheckEligibilityResult{EligibleForDownload: true, Detail: detail, DownloadPath: customField(fields, config.AutoDownloadPathFieldName)}
 	}
 
 	fieldLower := strings.ToLower(strings.TrimSpace(fieldValue))
@@ -331,14 +324,14 @@ func (m *Monitor) CheckEligibility(ctx context.Context, job *CompletedJob) Check
 	// Step 3: Handle Enabled
 	if fieldLower == "enabled" {
 		m.logger.Debug().Str("job_id", jobID).Msg("Auto Download is Enabled - eligible")
-		return CheckEligibilityResult{EligibleForDownload: true, Detail: "Auto Download is Enabled"}
+		return eligible("Auto Download is Enabled")
 	}
 
-	// Step 5: Handle Conditional
+	// Step 4: Handle Conditional
 	if fieldLower == "conditional" {
 		if m.eligibility.AutoDownloadTag == "" {
 			m.logger.Debug().Str("job_id", jobID).Msg("Auto Download is Conditional but no tag configured - eligible")
-			return CheckEligibilityResult{EligibleForDownload: true, Detail: "Auto Download is Conditional (no tag configured)"}
+			return eligible("Auto Download is Conditional (no tag configured)")
 		}
 		if !slices.Contains(tags, m.eligibility.AutoDownloadTag) {
 			m.logger.Debug().Str("job_id", jobID).Str("required_tag", m.eligibility.AutoDownloadTag).Msg("Conditional but missing tag")
@@ -349,10 +342,7 @@ func (m *Monitor) CheckEligibility(ctx context.Context, job *CompletedJob) Check
 			}
 		}
 		m.logger.Debug().Str("job_id", jobID).Str("tag", m.eligibility.AutoDownloadTag).Msg("Conditional with required tag - eligible")
-		return CheckEligibilityResult{
-			EligibleForDownload: true,
-			Detail:              fmt.Sprintf("Auto Download is Conditional with tag %q", m.eligibility.AutoDownloadTag),
-		}
+		return eligible(fmt.Sprintf("Auto Download is Conditional with tag %q", m.eligibility.AutoDownloadTag))
 	}
 
 	// Unknown value - treat as not a candidate (silent skip)
@@ -429,15 +419,15 @@ func heldReason(c startedClaim) SkipReason {
 		c.tag, c.at.Add(claimLease).Format(time.RFC3339))}
 }
 
-// GetJobDownloadPath returns the download path for a job.
-// If the job has a custom "Auto Download Path" field, uses that; otherwise returns empty string.
-func (m *Monitor) GetJobDownloadPath(ctx context.Context, jobID string) string {
-	path, err := m.apiClient.GetJobCustomFieldValue(ctx, jobID, config.AutoDownloadPathFieldName)
-	if err != nil {
-		m.logger.Debug().Err(err).Str("job_id", jobID).Msg("Failed to get custom download path")
-		return ""
+// customField returns, as text, the value of the job's custom field of this
+// name, or "" when the job has none or it is unset.
+func customField(fields []api.JobCustomField, name string) string {
+	for _, f := range fields {
+		if f.Name == name && f.Value != nil {
+			return fmt.Sprint(f.Value)
+		}
 	}
-	return path
+	return ""
 }
 
 // CompletedJob represents a job ready for download.
@@ -462,12 +452,16 @@ type CompletedJob struct {
 // Uses completion time (not creation time) for accurate lookback filtering.
 // Retries once on failure (500ms delay) before returning error, unless ctx has
 // ended, which the retry could not outlast. A failure is returned again, with
-// no request, until lookupRetryAfter has passed.
+// no request, until lookupRetryAfter has passed; one the scan's time cut short
+// as errLookupDeferred, since a lookup that outlasts the budget would otherwise
+// stop every later poll at this job.
 func (m *Monitor) getJobCompletionTime(ctx context.Context, jobID string) (time.Time, error) {
 	if c, ok := m.completedAt[jobID]; ok {
 		switch {
 		case !c.at.IsZero():
 			return c.at, nil
+		case time.Since(c.failed) < lookupRetryAfter && c.cut:
+			return time.Time{}, errLookupDeferred
 		case time.Since(c.failed) < lookupRetryAfter:
 			return time.Time{}, errors.New("its completion time could not be looked up recently")
 		}
@@ -478,16 +472,14 @@ func (m *Monitor) getJobCompletionTime(ctx context.Context, jobID string) (time.
 		time.Sleep(500 * time.Millisecond)
 		completionTime, err = m.getJobCompletionTimeOnce(ctx, jobID)
 	}
-	if err == nil || ctx.Err() == nil {
-		if m.completedAt == nil {
-			m.completedAt = make(map[string]completion)
-		}
-		c := completion{at: completionTime}
-		if err != nil {
-			c.failed = time.Now()
-		}
-		m.completedAt[jobID] = c
+	if m.completedAt == nil {
+		m.completedAt = make(map[string]completion)
 	}
+	c := completion{at: completionTime}
+	if err != nil {
+		c.failed, c.cut = time.Now(), ctx.Err() != nil
+	}
+	m.completedAt[jobID] = c
 	return completionTime, err
 }
 
@@ -552,7 +544,7 @@ type ScanSummary struct {
 
 	// DownloadOutcomes counts jobs keyed by DownloadOutcome. Only populated
 	// by the poll loop.
-	DownloadOutcomes map[string]int
+	DownloadOutcomes map[DownloadOutcome]int
 }
 
 // AddSkip increments the count for a skip reason.
@@ -563,20 +555,17 @@ func (s *ScanSummary) AddSkip(code SkipReasonCode) {
 	s.SkipBuckets[code]++
 }
 
-// AddOutcome increments the count for a download outcome. The outcome arg
-// is typed as any string-like so daemon.poll can pass DownloadOutcome
-// without importing a circular dependency.
-func (s *ScanSummary) AddOutcome(outcome string) {
+// AddOutcome increments the count for a download outcome.
+func (s *ScanSummary) AddOutcome(outcome DownloadOutcome) {
 	if s.DownloadOutcomes == nil {
-		s.DownloadOutcomes = make(map[string]int)
+		s.DownloadOutcomes = make(map[DownloadOutcome]int)
 	}
 	s.DownloadOutcomes[outcome]++
 }
 
 // FindCompletedJobsResult contains the results of scanning for completed jobs.
 type FindCompletedJobsResult struct {
-	Candidates   []*CompletedJob
-	TotalScanned int
+	Candidates []*CompletedJob
 
 	// Summary carries the pre-eligibility skip buckets. The poll loop
 	// extends this in place with per-job eligibility skips and download
@@ -694,16 +683,16 @@ func buildFolderPaths(folders []models.MetaFolder, parentPath []string, pathByFo
 // FindCompletedJobs returns jobs that are completed and warrant an
 // eligibility check. The pendingSet (job IDs whose files are on disk but
 // whose downloaded tag call has not yet succeeded) are skipped
-// pre-eligibility so the tag-first check (Plan 3) cannot re-enqueue them
+// pre-eligibility so the tag-first check cannot re-enqueue them
 // for re-download while their tag is still being retried by the poll
 // loop's separate tag-retry pass.
 func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]struct{}) (*FindCompletedJobsResult, error) {
 	m.logger.Debug().Msg("Fetching job list")
 
-	// Calculate lookback cutoff date if eligibility is configured.
+	// Calculate the lookback cutoff date when a lookback is configured.
 	// Based on completion time, not creation time.
 	var lookbackCutoff time.Time
-	if m.eligibility != nil && m.eligibility.LookbackDays > 0 {
+	if m.eligibility.LookbackDays > 0 {
 		lookbackCutoff = time.Now().AddDate(0, 0, -m.eligibility.LookbackDays)
 		m.logger.Debug().
 			Int("lookback_days", m.eligibility.LookbackDays).
@@ -747,7 +736,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 	seen := make(map[string]struct{}, len(jobs))
 	var wsErr error
 	var skippedFolders int
-	if m.eligibility != nil && m.eligibility.IncludeWorkspaceFolders {
+	if m.eligibility.IncludeWorkspaceFolders {
 		var wsJobs []jobWithPath
 		wsJobs, skippedFolders, wsErr = m.collectWorkspaceJobs(ctx, creationCutoff)
 		if wsErr != nil {
@@ -791,7 +780,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 		TotalScanned:     len(worklist),
 		SkippedFolders:   skippedFolders,
 		SkipBuckets:      make(map[SkipReasonCode]int),
-		DownloadOutcomes: make(map[string]int),
+		DownloadOutcomes: make(map[DownloadOutcome]int),
 	}
 
 	now := time.Now()
@@ -803,7 +792,7 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 			continue
 		}
 
-		// Plan 3: jobs whose files are on disk but whose downloaded tag
+		// Jobs whose files are on disk but whose downloaded tag
 		// call has not yet succeeded are suppressed pre-eligibility so
 		// they are not re-downloaded during the poll loop's tag-retry
 		// pass (see Daemon.poll). Silent — this is a transient state.
@@ -861,6 +850,12 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 				summary.Unchecked = len(worklist) - i
 				break
 			}
+			if errors.Is(err, errLookupDeferred) {
+				// Not let past the lookback window unlooked: it waits for its
+				// next lookup.
+				summary.AddSkip(ReasonCompletionTimeDeferred)
+				continue
+			}
 			if err != nil {
 				summary.AddSkip(ReasonCompletionTimeAPIError)
 				m.logger.Debug().
@@ -908,7 +903,6 @@ func (m *Monitor) FindCompletedJobs(ctx context.Context, pendingSet map[string]s
 
 	return &FindCompletedJobsResult{
 		Candidates:   completed,
-		TotalScanned: len(worklist),
 		Summary:      summary,
 		WorkspaceErr: wsErr,
 	}, nil

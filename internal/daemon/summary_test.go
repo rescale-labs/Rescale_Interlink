@@ -35,7 +35,7 @@ func TestEmitScanSummary(t *testing.T) {
 			summary: &ScanSummary{
 				TotalScanned:     0,
 				SkipBuckets:      map[SkipReasonCode]int{},
-				DownloadOutcomes: map[string]int{},
+				DownloadOutcomes: map[DownloadOutcome]int{},
 			},
 			elapsed:     500 * time.Millisecond,
 			wantSubstrs: []string{"scanned=0", "downloaded=0", "silent-skipped=0 (none)", "logged-skipped=0 (none)"},
@@ -52,10 +52,10 @@ func TestEmitScanSummary(t *testing.T) {
 					ReasonHasDownloadedTag:       2,
 					ReasonConditionalMissingTag:  1,
 				},
-				DownloadOutcomes: map[string]int{
-					string(OutcomeDownloaded):      3,
-					string(OutcomePartialFailure):  1,
-					string(OutcomeListFilesFailed): 1,
+				DownloadOutcomes: map[DownloadOutcome]int{
+					OutcomeDownloaded:      3,
+					OutcomePartialFailure:  1,
+					OutcomeListFilesFailed: 1,
 				},
 			},
 			elapsed: 2 * time.Second,
@@ -78,7 +78,7 @@ func TestEmitScanSummary(t *testing.T) {
 				TotalScanned:     3,
 				SkippedFolders:   2,
 				SkipBuckets:      map[SkipReasonCode]int{},
-				DownloadOutcomes: map[string]int{string(OutcomeDownloaded): 1},
+				DownloadOutcomes: map[DownloadOutcome]int{OutcomeDownloaded: 1},
 			},
 			elapsed:     600 * time.Second,
 			interrupted: true,
@@ -91,7 +91,7 @@ func TestEmitScanSummary(t *testing.T) {
 				TotalScanned:     10,
 				Unchecked:        4,
 				SkipBuckets:      map[SkipReasonCode]int{ReasonNotCompleted: 2},
-				DownloadOutcomes: map[string]int{string(OutcomeInterrupted): 1},
+				DownloadOutcomes: map[DownloadOutcome]int{OutcomeInterrupted: 1},
 			},
 			elapsed:     1 * time.Second,
 			interrupted: true,
@@ -105,7 +105,7 @@ func TestEmitScanSummary(t *testing.T) {
 			name: "scan error before the job loop",
 			summary: &ScanSummary{
 				SkipBuckets:      map[SkipReasonCode]int{},
-				DownloadOutcomes: map[string]int{},
+				DownloadOutcomes: map[DownloadOutcome]int{},
 			},
 			elapsed: 3 * time.Second,
 			err:     errors.New("list jobs: 503, retry exhausted"),
@@ -123,9 +123,9 @@ func TestEmitScanSummary(t *testing.T) {
 				TotalScanned:       4,
 				EligibilityChecked: 4,
 				SkipBuckets:        map[SkipReasonCode]int{},
-				DownloadOutcomes: map[string]int{
-					string(OutcomeDownloaded): 1,
-					string(OutcomeNoFiles):    3,
+				DownloadOutcomes: map[DownloadOutcome]int{
+					OutcomeDownloaded: 1,
+					OutcomeNoFiles:    3,
 				},
 			},
 			elapsed:     time.Second,

@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -250,8 +252,8 @@ Examples:
 				defer daemon.RemovePIDFile()
 			}
 
-			// Plan 2 path migrations (idempotent). Must run before any file
-			// I/O that reads credentials / state / logs.
+			// Path migrations (idempotent). Must run before any file I/O that
+			// reads credentials / state / logs.
 			config.RunStartupMigrations(nil)
 			logStartup()
 
@@ -323,50 +325,28 @@ Examples:
 					return reporting.UsageError(fmt.Errorf("--background is not supported on Windows; start auto-download from the Interlink app, or run 'daemon run' without --background"))
 				}
 
-				// If we're not the daemon child, fork and exit
+				// If we're not the daemon child, fork and exit. The child gets the
+				// user's own arguments, global flags and --once included, and
+				// reads daemon.conf for itself.
 				if !daemon.IsDaemonChild() {
-					// Reconstruct args for the child, but remove --background
-					childArgs := []string{"daemon", "run"}
-					childArgs = append(childArgs, "--download-dir", downloadDir)
-					childArgs = append(childArgs, "--poll-interval", pollInterval)
-					if namePrefix != "" {
-						childArgs = append(childArgs, "--name-prefix", namePrefix)
-					}
-					if nameContains != "" {
-						childArgs = append(childArgs, "--name-contains", nameContains)
-					}
-					for _, ex := range excludeNames {
-						childArgs = append(childArgs, "--exclude", ex)
-					}
-					childArgs = append(childArgs, "--max-concurrent", fmt.Sprintf("%d", maxConcurrent))
-					childArgs = append(childArgs, "--state-file", stateFile)
-					if useJobID {
-						childArgs = append(childArgs, "--use-job-id")
-					}
-					if logFile != "" {
-						childArgs = append(childArgs, "--log-file", logFile)
-					}
-					if enableIPC {
-						childArgs = append(childArgs, "--ipc")
-					}
-
-					// Daemonize (this will exit the parent)
-					return daemonize(childArgs)
+					return daemonize(slices.DeleteFunc(slices.Clone(os.Args[1:]), func(arg string) bool {
+						return arg == "--background" || strings.HasPrefix(arg, "--background=")
+					}))
 				}
 			}
 
 			// Parse poll interval
 			interval, err := time.ParseDuration(pollInterval)
 			if err != nil {
-				return fmt.Errorf("invalid poll interval %q: %w", pollInterval, err)
+				return reporting.UsageError(fmt.Errorf("invalid poll interval %q: %w", pollInterval, err))
 			}
 
 			// Validate interval
 			if interval < 30*time.Second {
-				return fmt.Errorf("poll interval must be at least 30 seconds")
+				return reporting.UsageError(fmt.Errorf("poll interval must be at least 30 seconds"))
 			}
 			if interval > 24*time.Hour {
-				return fmt.Errorf("poll interval must be at most 24 hours")
+				return reporting.UsageError(fmt.Errorf("poll interval must be at most 24 hours"))
 			}
 
 			// Validate download directory
@@ -392,7 +372,6 @@ Examples:
 				UseJobNameDir:          !useJobID,
 				MaxConcurrent:          maxConcurrent,
 				StateFile:              stateFile,
-				LogFile:                logFile,
 				FlattenFolderStructure: daemonConf.Daemon.FlattenFolderStructure,
 			}
 
@@ -406,7 +385,7 @@ Examples:
 			}
 
 			// Simplified eligibility - mode is per-job, only tag and lookback configurable
-			daemonCfg.Eligibility = &daemon.EligibilityConfig{
+			daemonCfg.Eligibility = daemon.EligibilityConfig{
 				AutoDownloadTag:         daemonConf.Eligibility.AutoDownloadTag,
 				LookbackDays:            daemonConf.Daemon.LookbackDays,
 				IncludeWorkspaceFolders: daemonConf.Daemon.IncludeWorkspaceFolders,
@@ -752,8 +731,17 @@ func newDaemonStopCmd() *cobra.Command {
 
 This sends a shutdown command via IPC to gracefully stop the daemon,
 then waits up to 10 seconds for the daemon process to exit, and fails
-if it has not. The daemon must have been started with --ipc flag for
-this to work.`,
+if it has not. The daemon must have been started with --ipc: one found
+by its PID file that does not answer over IPC is not stopped, and the
+command fails.
+
+With --force, a daemon that does not answer over IPC, refuses the
+shutdown, or has not exited within the 10 seconds is ended through the
+PID in its PID file, if that process is this user's Interlink daemon.
+
+When no PID file names the daemon's process, the command sends the
+shutdown request and returns without waiting: it has no process to
+watch, so it cannot confirm the exit.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 			client := ipc.NewClient()
@@ -795,11 +783,11 @@ this to work.`,
 						return forceKill()
 					}
 					fmt.Println("The daemon may not have been started with --ipc flag.")
+					advice := fmt.Sprintf("Use 'rescale-int daemon stop --force' or 'kill %d' to terminate it", pid)
 					if onWindows {
-						fmt.Println(service.EarlierDaemonRunning + ".")
-					} else {
-						fmt.Printf("Use 'rescale-int daemon stop --force' or 'kill %d' to terminate it.\n", pid)
+						advice = service.EarlierDaemonRunning
 					}
+					return reporting.UsageError(fmt.Errorf("daemon (PID %d) was not stopped. %s", pid, advice))
 				}
 				return nil
 			}
@@ -958,7 +946,7 @@ Examples:
   rescale-int daemon retry --job-id XxYyZz`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !retryAll && len(jobIDs) == 0 {
-				return fmt.Errorf("either --all or --job-id must be specified")
+				return reporting.UsageError(fmt.Errorf("either --all or --job-id must be specified"))
 			}
 
 			if retryAll {
@@ -972,24 +960,19 @@ Examples:
 				removeStartedTags(stateFile, jobIDs)
 			}
 
-			if retryAll {
-				if len(failed) == 0 {
-					fmt.Println("No failed downloads to retry.")
-					return nil
-				}
-
-				for _, job := range failed {
-					fmt.Printf("Marked for retry: %s (%s)\n", job.JobName, job.JobID)
-				}
-
-				fmt.Printf("\n%d job(s) marked for retry.\n", len(failed))
-			} else {
-				for _, jobID := range jobIDs {
-					fmt.Printf("Marked for retry: %s\n", jobID)
-				}
-
-				fmt.Printf("\n%d job(s) marked for retry.\n", len(jobIDs))
+			for _, job := range failed {
+				fmt.Printf("Marked for retry: %s (%s)\n", job.JobName, job.JobID)
 			}
+			for _, id := range jobIDs {
+				if !slices.ContainsFunc(failed, func(job *daemon.DownloadedJob) bool { return job.JobID == id }) {
+					fmt.Printf("Not a failed download: %s\n", id)
+				}
+			}
+			if len(failed) == 0 {
+				fmt.Println("No failed downloads to retry.")
+				return nil
+			}
+			fmt.Printf("\n%d job(s) marked for retry.\n", len(failed))
 
 			fmt.Println("\nRun 'rescale-int daemon run --once' to retry immediately,")
 			fmt.Println("or wait for the next scheduled poll if daemon is running.")
@@ -1184,7 +1167,7 @@ Uses $EDITOR environment variable, or falls back to:
 						}
 					}
 					if editor == "" {
-						return fmt.Errorf("no editor found; set $EDITOR environment variable")
+						return reporting.UsageError(fmt.Errorf("no editor found; set $EDITOR environment variable"))
 					}
 				}
 			}
@@ -1231,6 +1214,9 @@ Available keys:
     show_download_complete   - true/false
     show_download_failed     - true/false
 
+A true/false setting also takes yes/no, on/off or 1/0, in any case;
+anything else is refused.
+
 Which jobs are downloaded (Enabled, Conditional or Disabled) is set per job
 in the "Auto Download" custom field of your Rescale workspace, not here.
 
@@ -1251,11 +1237,12 @@ Examples:
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Set the value
+			// Set the value; the confirmation shows it as stored.
+			var flag *bool // the true/false setting key names, if it names one
 			switch key {
 			// [daemon] section
 			case "enabled":
-				cfg.Daemon.Enabled = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Daemon.Enabled
 			case "download_folder":
 				expanded, err := pathutil.ExpandHome(value)
 				if err != nil {
@@ -1268,7 +1255,7 @@ Examples:
 				if err != nil {
 					return usage("invalid path: %w", err)
 				}
-				cfg.Daemon.DownloadFolder = absPath
+				cfg.Daemon.DownloadFolder, value = absPath, absPath
 			case "poll_interval_minutes":
 				var v int
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
@@ -1277,9 +1264,9 @@ Examples:
 				if v < 1 || v > 1440 {
 					return usage("poll_interval_minutes must be between 1 and 1440")
 				}
-				cfg.Daemon.PollIntervalMinutes = v
+				cfg.Daemon.PollIntervalMinutes, value = v, strconv.Itoa(v)
 			case "use_job_name_dir":
-				cfg.Daemon.UseJobNameDir = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Daemon.UseJobNameDir
 			case "max_concurrent":
 				var v int
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
@@ -1288,7 +1275,7 @@ Examples:
 				if err := daemon.CheckMaxConcurrent(v, "max_concurrent"); err != nil {
 					return err
 				}
-				cfg.Daemon.MaxConcurrent = v
+				cfg.Daemon.MaxConcurrent, value = v, strconv.Itoa(v)
 			case "lookback_days":
 				var v int
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
@@ -1297,11 +1284,11 @@ Examples:
 				if v < 1 || v > 365 {
 					return usage("lookback_days must be between 1 and 365")
 				}
-				cfg.Daemon.LookbackDays = v
+				cfg.Daemon.LookbackDays, value = v, strconv.Itoa(v)
 			case "include_workspace_folders":
-				cfg.Daemon.IncludeWorkspaceFolders = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Daemon.IncludeWorkspaceFolders
 			case "flatten_folder_structure":
-				cfg.Daemon.FlattenFolderStructure = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Daemon.FlattenFolderStructure
 
 			// [filters] section
 			case "name_prefix":
@@ -1324,14 +1311,25 @@ Examples:
 
 			// [notifications] section
 			case "notifications_enabled":
-				cfg.Notifications.Enabled = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Notifications.Enabled
 			case "show_download_complete":
-				cfg.Notifications.ShowDownloadComplete = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Notifications.ShowDownloadComplete
 			case "show_download_failed":
-				cfg.Notifications.ShowDownloadFailed = value == "true" || value == "1" || value == "yes"
+				flag = &cfg.Notifications.ShowDownloadFailed
 
 			default:
 				return usage("unknown setting %q; 'rescale-int daemon config set --help' lists them", key)
+			}
+			if flag != nil {
+				switch strings.ToLower(value) {
+				case "true", "1", "yes", "on":
+					*flag = true
+				case "false", "0", "no", "off":
+					*flag = false
+				default:
+					return usage("%s must be true or false, got %q", key, value)
+				}
+				value = strconv.FormatBool(*flag)
 			}
 
 			// Save config

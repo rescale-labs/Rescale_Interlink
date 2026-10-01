@@ -2,106 +2,25 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
-	"github.com/rescale/rescale-int/internal/logging"
-	"github.com/rescale/rescale-int/internal/models"
 )
 
-// budgetPlatform serves the user's own completed jobs and those in the
-// workspace's shared root, each done, and records which jobs' completion times
-// and tags are read; onLookup runs as a completion time is looked up, and
-// beforeTags before the nth tag read is answered.
-type budgetPlatform struct {
-	jobs, shared []string
-	onLookup     func()
-	beforeTags   func(n int)
-
-	mu               sync.Mutex
-	noTree           bool // the workspace folder tree is refused
-	failLookups      bool // completion times cannot be read
-	lookups, tagRead []string
-}
-
-func (p *budgetPlatform) serve(w http.ResponseWriter, r *http.Request) {
-	now := time.Now().UTC().Format(time.RFC3339)
-	id := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v3/jobs/"), "/")[0]
-	p.mu.Lock()
-	noTree, failLookups, ids := p.noTree, p.failLookups, p.jobs
-	if strings.HasPrefix(r.URL.Query().Get("q"), "folder:") {
-		ids = p.shared
+// doneJobs are jobs of the user's own that a client has downloaded: each
+// carries the done tag.
+func doneJobs(ids ...string) []*fakeJob {
+	var jobs []*fakeJob
+	for _, id := range ids {
+		jobs = append(jobs, &fakeJob{id: id, tags: []string{config.DownloadedTag}})
 	}
-	p.mu.Unlock()
-	var body any
-	switch {
-	case r.URL.Path == "/api/v3/meta/folders/" && noTree:
-		w.WriteHeader(http.StatusForbidden)
-		return
-	case r.URL.Path == "/api/v3/meta/folders/":
-		body = map[string]any{"sharedWithWorkspace": map[string]any{"id": "root", "name": "Shared"}}
-	case r.URL.Path == "/api/v3/jobs/":
-		var jobs []models.JobResponse
-		for _, id := range ids {
-			jobs = append(jobs, models.JobResponse{ID: id, Name: id, CreatedAt: now, JobStatus: models.JobStatusContent{Status: "Completed"}, Folder: &models.JobFolder{ID: "root"}})
-		}
-		body = map[string]any{"results": jobs}
-	case strings.HasSuffix(r.URL.Path, "/statuses/"):
-		p.mu.Lock()
-		p.lookups = append(p.lookups, id)
-		p.mu.Unlock()
-		if p.onLookup != nil {
-			p.onLookup()
-		}
-		if failLookups {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		body = map[string]any{"results": []models.JobStatusEntry{{Status: "Completed", StatusDate: now}}}
-	case strings.HasSuffix(r.URL.Path, "/tags/"):
-		p.mu.Lock()
-		p.tagRead = append(p.tagRead, id)
-		n := len(p.tagRead)
-		p.mu.Unlock()
-		if p.beforeTags != nil {
-			p.beforeTags(n)
-		}
-		body = []api.JobTag{{Name: config.DownloadedTag}}
-	default:
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-func (p *budgetPlatform) read() (lookups, tagReads []string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return slices.Clone(p.lookups), slices.Clone(p.tagRead)
-}
-
-// set changes, under the lock, what the platform serves.
-func (p *budgetPlatform) set(change func()) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	change()
-}
-
-func (p *budgetPlatform) url(t *testing.T) string {
-	srv := httptest.NewServer(http.HandlerFunc(p.serve))
-	t.Cleanup(srv.Close)
-	return srv.URL
+	return jobs
 }
 
 // A scan whose context ends, as the daemon stops or the scan budget runs out,
@@ -110,12 +29,12 @@ func (p *budgetPlatform) url(t *testing.T) string {
 func TestFindCompletedJobs_EndsWhenItsContextDoes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := &budgetPlatform{onLookup: cancel} // the daemon stops while the first job is looked up
+	p := newPlatform(t)
+	p.onLookup = func(context.Context) { cancel() } // the daemon stops while the first job is looked up
 	for i := range 40 {
-		p.jobs = append(p.jobs, fmt.Sprintf("job%02d", i))
+		p.jobs = append(p.jobs, &fakeJob{id: fmt.Sprintf("job%02d", i)})
 	}
-	client := api.NewClientForTest(&config.Config{APIKey: "test-key", APIBaseURL: p.url(t), ProxyMode: "no-proxy"})
-	m := NewMonitorWithEligibility(client, nil, nil, &EligibilityConfig{LookbackDays: 7}, logging.NewLoggerWithWriter(io.Discard))
+	m := p.monitor(nil, EligibilityConfig{LookbackDays: 7})
 
 	start := time.Now()
 	result, err := m.FindCompletedJobs(ctx, nil)
@@ -134,15 +53,13 @@ func TestPoll_TheNextPollCarriesOnWhereTheBudgetStoppedOne(t *testing.T) {
 	orig := scanBudget
 	scanBudget = 2 * time.Second
 	t.Cleanup(func() { scanBudget = orig })
-	p := &budgetPlatform{jobs: []string{"a", "b", "c", "d"}}
-	p.beforeTags = func(n int) {
+	p := newPlatform(t, doneJobs("a", "b", "c", "d")...)
+	p.beforeRead = func(_ string, n int) {
 		if n == 2 {
 			time.Sleep(scanBudget + time.Second) // the first poll's budget runs out on job b
 		}
 	}
-	elig := &EligibilityConfig{LookbackDays: 7}
-	d := newDownloadTestDaemon(t, p.url(t), t.TempDir(), elig)
-	d.monitor.SetEligibility(elig)
+	d := p.daemon(t.TempDir(), EligibilityConfig{LookbackDays: 7})
 
 	d.poll(context.Background())
 	if _, _, unchecked := d.state.GetLeftOut(); unchecked != 2 || d.state.GetLastPoll().IsZero() {
@@ -166,10 +83,9 @@ func TestPoll_TheNextPollCarriesOnWhereTheBudgetStoppedOne(t *testing.T) {
 func TestPoll_StoppingWhileTheScanLooksJobsUpIsNoScanError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	p := &budgetPlatform{jobs: []string{"a", "b"}, onLookup: cancel}
-	elig := &EligibilityConfig{LookbackDays: 7}
-	d := newDownloadTestDaemon(t, p.url(t), t.TempDir(), elig)
-	d.monitor.SetEligibility(elig)
+	p := newPlatform(t, doneJobs("a", "b")...)
+	p.onLookup = func(context.Context) { cancel() }
+	d := p.daemon(t.TempDir(), EligibilityConfig{LookbackDays: 7})
 
 	d.poll(ctx)
 	if msg, _ := d.LastScanError(); msg != "" {
@@ -177,18 +93,50 @@ func TestPoll_StoppingWhileTheScanLooksJobsUpIsNoScanError(t *testing.T) {
 	}
 }
 
+// controlScans gives each poll a scan with no deadline of its own, which the
+// returned endScan ends, as the scan budget would, for the poll under way. A
+// lookup cut short this way is cut short however long the poll took to reach it.
+func controlScans(t *testing.T) (endScan func()) {
+	t.Helper()
+	var mu sync.Mutex
+	var end context.CancelFunc
+	orig := scanContext
+	scanContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
+		scan, cancel := context.WithCancel(ctx)
+		mu.Lock()
+		end = cancel
+		mu.Unlock()
+		return scan, cancel
+	}
+	t.Cleanup(func() { scanContext = orig })
+	return func() {
+		mu.Lock()
+		defer mu.Unlock()
+		end()
+	}
+}
+
+// cutLookups returns a lookup hook that, while cut says so, ends the poll's
+// scan and holds the lookup open until the client gives up on it.
+func cutLookups(endScan func(), cut func() bool) func(context.Context) {
+	return func(request context.Context) {
+		if cut() {
+			endScan()
+			<-request.Done()
+		}
+	}
+}
+
 // A poll whose budget runs out while its scan looks jobs up is a partial scan,
 // as one that runs out later is: its time is kept as the last poll's, no scan
 // error is recorded, and 'daemon status' counts the jobs it left unchecked.
+// The job whose lookup the budget cut short waits for a later lookup, so the
+// next poll gets past it, instead of stopping at it poll after poll, and counts
+// it as waiting, not as a failed lookup.
 func TestPoll_OutOfBudgetWhileLookingJobsUpIsAPartialScan(t *testing.T) {
-	orig := scanBudget
-	scanBudget = time.Second
-	t.Cleanup(func() { scanBudget = orig })
-	p := &budgetPlatform{jobs: []string{"a", "b", "c"}}
-	p.onLookup = func() { time.Sleep(scanBudget + 500*time.Millisecond) }
-	elig := &EligibilityConfig{LookbackDays: 7}
-	d := newDownloadTestDaemon(t, p.url(t), t.TempDir(), elig)
-	d.monitor.SetEligibility(elig)
+	p := newPlatform(t, doneJobs("a", "b", "c")...)
+	p.onLookup = cutLookups(controlScans(t), func() bool { return true }) // every lookup runs out of time
+	d, logged := p.client("", EligibilityConfig{LookbackDays: 7})
 
 	d.poll(context.Background())
 	if msg, _ := d.LastScanError(); msg != "" || d.state.GetLastPoll().IsZero() {
@@ -197,16 +145,62 @@ func TestPoll_OutOfBudgetWhileLookingJobsUpIsAPartialScan(t *testing.T) {
 	if users := NewIPCHandler(d, nil).GetUserList(); len(users) != 1 || users[0].JobsUnchecked != 3 {
 		t.Errorf("daemon status gets %+v, want 3 jobs left unchecked", users)
 	}
+	if c := d.monitor.completedAt["a"]; !c.cut {
+		t.Errorf("the first poll recorded a's lookup as %+v, want it cut short", c)
+	}
+	d.poll(context.Background())
+	if lookups, _ := p.read(); !slices.Equal(lookups, []string{"a", "b"}) {
+		t.Errorf("completion times looked up for %v over two polls, want a then b: the second poll must get past a", lookups)
+	}
+	if s := pollSummary(logged()); strings.Contains(s, string(ReasonCompletionTimeAPIError)) || !strings.Contains(s, string(ReasonCompletionTimeDeferred)+"=1") {
+		t.Errorf("the second poll's summary does not count a as waiting for its lookup: %s", s)
+	}
+}
+
+// A job whose completion time lookup ran out of scan time waits for a later
+// lookup, and is not let past the lookback window unlooked: the next poll does
+// not look it up again, counts it as waiting, and does not download it, though
+// it completed before the window. Once lookupRetryAfter has passed, it is
+// looked up again, and left out.
+func TestPoll_AJobWhoseLookupRanOutOfTimeIsNotLetPastTheLookback(t *testing.T) {
+	shortenClaimSettle(t)
+	old := time.Now().Add(-10 * 24 * time.Hour) // made and completed before the 7-day window
+	p := newPlatform(t, &fakeJob{id: "old1", created: old, completed: old})
+	var first atomic.Bool
+	first.Store(true)
+	p.onLookup = cutLookups(controlScans(t), func() bool { return first.Swap(false) }) // the first lookup runs out of time
+	d, logged := p.client("", EligibilityConfig{LookbackDays: 7})
+	ctx := context.Background()
+
+	d.poll(ctx)
+	if c := d.monitor.completedAt["old1"]; !c.cut {
+		t.Fatalf("the first poll recorded old1's lookup as %+v, want it cut short", c)
+	}
+	d.poll(ctx)
+	if lookups, _ := p.read(); len(lookups) != 1 || p.listed() != 0 {
+		t.Errorf("the second poll looked old1 up again (lookups %v) or downloaded it (%d file listings); it completed before the lookback window", lookups, p.listed())
+	}
+	if s := pollSummary(logged()); strings.Contains(s, string(ReasonCompletionTimeAPIError)) || !strings.Contains(s, string(ReasonCompletionTimeDeferred)+"=1") {
+		t.Errorf("the second poll's summary does not count old1 as waiting for its lookup: %s", s)
+	}
+	origRetry := lookupRetryAfter
+	lookupRetryAfter = 0
+	t.Cleanup(func() { lookupRetryAfter = origRetry })
+	d.poll(ctx)
+	if lookups, _ := p.read(); !slices.Equal(lookups, []string{"old1", "old1"}) || p.listed() != 0 {
+		t.Errorf("lookups %v, %d file listings; want it looked up again, and left out", lookups, p.listed())
+	}
 }
 
 // A poll whose workspace folders could not be listed forgets nothing about the
 // jobs in them, neither their completion times nor when each was last checked:
 // they went unlisted, not away. A job no longer listed at all is forgotten.
 func TestPoll_AFailedWorkspaceListingForgetsNothing(t *testing.T) {
-	p := &budgetPlatform{jobs: []string{"own"}, shared: []string{"shared"}}
-	elig := &EligibilityConfig{LookbackDays: 7, IncludeWorkspaceFolders: true}
-	d := newDownloadTestDaemon(t, p.url(t), t.TempDir(), elig)
-	d.monitor.SetEligibility(elig)
+	tree := map[string]any{"sharedWithWorkspace": map[string]any{"id": "root", "name": "Shared"}}
+	shared := &fakeJob{id: "shared", folder: "root", tags: []string{config.DownloadedTag}}
+	p := newPlatform(t, append(doneJobs("own"), shared)...)
+	p.tree = tree
+	d := p.daemon(t.TempDir(), EligibilityConfig{LookbackDays: 7, IncludeWorkspaceFolders: true})
 	known := func() (looked, checked bool) {
 		_, looked = d.monitor.completedAt["shared"]
 		_, checked = d.lastChecked["shared"]
@@ -215,12 +209,12 @@ func TestPoll_AFailedWorkspaceListingForgetsNothing(t *testing.T) {
 	ctx := context.Background()
 
 	d.poll(ctx)
-	p.set(func() { p.noTree = true })
+	p.set(func() { p.tree = nil })
 	d.poll(ctx)
 	if looked, checked := known(); !looked || !checked {
 		t.Errorf("after a failed workspace listing: completion time kept %v, last check kept %v; want both", looked, checked)
 	}
-	p.set(func() { p.noTree, p.shared = false, nil })
+	p.set(func() { p.tree, p.jobs = tree, p.jobs[:1] })
 	d.poll(ctx)
 	if looked, checked := known(); looked || checked {
 		t.Errorf("a job no longer listed: completion time kept %v, last check kept %v; want neither", looked, checked)
@@ -235,9 +229,9 @@ func TestPoll_AFailedWorkspaceListingForgetsNothing(t *testing.T) {
 // the scan budget at every poll. Each is still scanned, its completion time
 // unknown.
 func TestFindCompletedJobs_ALookupThatFailedIsNotRepeatedAtOnce(t *testing.T) {
-	p := &budgetPlatform{jobs: []string{"a"}, failLookups: true}
-	client := api.NewClientForTest(&config.Config{APIKey: "test-key", APIBaseURL: p.url(t), ProxyMode: "no-proxy"})
-	m := NewMonitorWithEligibility(client, nil, nil, &EligibilityConfig{LookbackDays: 7}, logging.NewLoggerWithWriter(io.Discard))
+	p := newPlatform(t, &fakeJob{id: "a"})
+	p.failLookups = true
+	m := p.monitor(nil, EligibilityConfig{LookbackDays: 7})
 	scan := func() {
 		t.Helper()
 		result, err := m.FindCompletedJobs(context.Background(), nil)

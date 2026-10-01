@@ -2,12 +2,9 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,33 +49,12 @@ func (h logHook) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// fakeFailingJobServer serves a poll's worth of the Rescale API for one
-// completed job whose download always fails: its only file has a name the
-// daemon refuses, so each attempt is recorded as failed at once, with nothing
-// transferred. attempts counts the job file listings, the first call of every
-// download attempt.
-func fakeFailingJobServer(t *testing.T, jobID string) (string, *atomic.Int32) {
-	t.Helper()
-	var attempts atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body any
-		switch r.URL.Path {
-		case "/api/v3/jobs/":
-			body = map[string]any{"results": []models.JobResponse{{
-				ID: jobID, Name: "job", JobStatus: models.JobStatusContent{Status: "Completed"},
-			}}}
-		case fmt.Sprintf("/api/v2/jobs/%s/files/", jobID):
-			attempts.Add(1)
-			body = map[string]any{"results": []models.JobFile{{ID: "f1", Name: "../escape.txt", DecryptedSize: 4}}}
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL, &attempts
+// failingJob is a job whose download always fails: its only file has a name
+// the daemon refuses, so each attempt is recorded as failed at once, with
+// nothing transferred. The platform's file listings, the first call of every
+// download attempt, count the attempts.
+func failingJob(id string) *fakeJob {
+	return &fakeJob{id: id, name: "job", files: []models.JobFile{{ID: "f1", Name: "../escape.txt", DecryptedSize: 4}}}
 }
 
 // A failed job waits 5, 10, 20 and then 30 minutes before each new attempt.
@@ -86,24 +62,25 @@ func fakeFailingJobServer(t *testing.T, jobID string) (string, *atomic.Int32) {
 // job alone, and a poll a minute past it tries again. That there is no sixth
 // attempt is pinned by TestPoll_DaemonRetryReleasesAJobThatStoppedRetrying.
 func TestPoll_FailedJobWaitsOutItsBackoff(t *testing.T) {
+	shortenClaimSettle(t)
 	const jobID = "backoff1"
-	url, attempts := fakeFailingJobServer(t, jobID)
-	d := newDownloadTestDaemon(t, url, t.TempDir(), nil)
+	p := newPlatform(t, failingJob(jobID))
+	d := p.daemon(t.TempDir(), EligibilityConfig{})
 	ctx := context.Background()
 
 	d.poll(ctx)
 	for i, wait := range []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute} {
-		failed := int32(i + 1) // attempts made, and failed, so far
+		failed := i + 1 // attempts made, and failed, so far
 
 		ageLastAttempt(d.state, jobID, wait-time.Minute)
 		d.poll(ctx)
-		if got := attempts.Load(); got != failed {
+		if got := p.listed(); got != failed {
 			t.Fatalf("after %d failed attempts, a poll %s into the %s wait made attempt %d", failed, wait-time.Minute, wait, got)
 		}
 
 		ageLastAttempt(d.state, jobID, wait+time.Minute)
 		d.poll(ctx)
-		if got := attempts.Load(); got != failed+1 {
+		if got := p.listed(); got != failed+1 {
 			t.Fatalf("after %d failed attempts, a poll past the %s wait left %d attempts in all, want %d", failed, wait, got, failed+1)
 		}
 	}
@@ -113,9 +90,10 @@ func TestPoll_FailedJobWaitsOutItsBackoff(t *testing.T) {
 // it in the state file from another process. The daemon holds its state in
 // memory, so the release has to reach it there: the next poll tries again.
 func TestPoll_DaemonRetryReleasesAJobThatStoppedRetrying(t *testing.T) {
+	shortenClaimSettle(t)
 	const jobID = "gaveup1"
-	url, attempts := fakeFailingJobServer(t, jobID)
-	d := newDownloadTestDaemon(t, url, t.TempDir(), nil)
+	p := newPlatform(t, failingJob(jobID))
+	d := p.daemon(t.TempDir(), EligibilityConfig{})
 	ctx := context.Background()
 
 	for i := 1; i <= 5; i++ {
@@ -127,13 +105,13 @@ func TestPoll_DaemonRetryReleasesAJobThatStoppedRetrying(t *testing.T) {
 	}
 
 	d.poll(ctx)
-	if got := attempts.Load(); got != 0 {
+	if got := p.listed(); got != 0 {
 		t.Fatalf("a job with five failed attempts was tried again (%d attempts)", got)
 	}
 
 	daemonRetry(t, d.cfg.StateFile, jobID)
 	d.poll(ctx)
-	if got := attempts.Load(); got != 1 {
+	if got := p.listed(); got != 1 {
 		t.Fatalf("the poll after 'daemon retry' made %d attempts, want 1", got)
 	}
 	if got := d.state.AttemptCount(jobID); got != 1 {
@@ -154,8 +132,7 @@ func daemonRetry(t *testing.T, stateFile, jobID string) {
 // copy read before the daemon saved. The file is read back straight after, with
 // no later save of the daemon's to put anything back.
 func TestDownloadJob_RetryKeepsAFailureTheDaemonRecordsMeanwhile(t *testing.T) {
-	url, _ := fakeFailingJobServer(t, "other")
-	d := newDownloadTestDaemon(t, url, t.TempDir(), nil)
+	d := newPlatform(t, failingJob("other")).daemon(t.TempDir(), EligibilityConfig{})
 	for i := 1; i <= MaxDownloadAttempts; i++ {
 		d.state.MarkFailed("held", "Held", fmt.Errorf("attempt %d failed", i))
 	}
@@ -164,7 +141,7 @@ func TestDownloadJob_RetryKeepsAFailureTheDaemonRecordsMeanwhile(t *testing.T) {
 	}
 
 	recorded := stall(t, &stateFileStep, func() error {
-		d.downloadJob(context.Background(), &CompletedJob{ID: "other", Name: "Other"})
+		d.downloadJob(context.Background(), &CompletedJob{ID: "other", Name: "Other"}, d.cfg.DownloadDir)
 		return nil
 	})
 	daemonRetry(t, d.cfg.StateFile, "held")
@@ -184,7 +161,7 @@ func TestDownloadJob_RetryKeepsAFailureTheDaemonRecordsMeanwhile(t *testing.T) {
 // if that attempt fails, it is the first failure after the release, not the
 // fifth in all, which would stop the daemon trying the job at once.
 func TestMarkFailed_CountsFromARetryMadeDuringTheAttempt(t *testing.T) {
-	d := newDownloadTestDaemon(t, "", t.TempDir(), nil)
+	d := newDownloadTestDaemon(t, "", t.TempDir(), EligibilityConfig{})
 	ctx, job := context.Background(), &CompletedJob{ID: "inflight1", Name: "job"}
 	for i := 1; i <= 4; i++ {
 		d.markFailed(ctx, job, "", fmt.Errorf("attempt %d failed", i))
@@ -210,32 +187,21 @@ func TestDownloadJob_StoppingTheDaemonIsNotAFailedAttempt(t *testing.T) {
 			defer stopDaemon()
 			var d *Daemon
 			var once sync.Once
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case fmt.Sprintf("/api/v2/jobs/%s/files/", jobID):
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(map[string]any{
-						"results": []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 9}},
-					})
-				case "/api/v3/files/f1/":
-					// The file is downloading when the daemon is told to stop, or the user cancels it.
-					once.Do(func() {
-						if !userCancel {
-							stopDaemon()
-						} else if err := d.ts.CancelBatch(d.Queue().GetAllBatchStats()[0].BatchID); err != nil {
-							t.Errorf("CancelBatch: %v", err)
-						}
-					})
-					<-r.Context().Done()
-				default:
-					w.WriteHeader(http.StatusNotFound)
-				}
-			}))
-			t.Cleanup(srv.Close)
-			d = newDownloadTestDaemon(t, srv.URL, t.TempDir(), nil)
+			p := newPlatform(t, &fakeJob{id: jobID, files: []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 9}}})
+			p.onFetch = func() {
+				// The file is downloading when the daemon is told to stop, or the user cancels it.
+				once.Do(func() {
+					if !userCancel {
+						stopDaemon()
+					} else if err := d.ts.CancelBatch(d.ts.GetQueue().GetAllBatchStats()[0].BatchID); err != nil {
+						t.Errorf("CancelBatch: %v", err)
+					}
+				})
+			}
+			d = p.daemon(t.TempDir(), EligibilityConfig{})
 
 			done := make(chan DownloadOutcome, 1)
-			go func() { done <- d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"}) }()
+			go func() { done <- d.downloadJob(ctx, &CompletedJob{ID: jobID, Name: "job"}, d.cfg.DownloadDir) }()
 			select {
 			case outcome := <-done:
 				if outcome == OutcomeDownloaded {
@@ -272,25 +238,30 @@ func TestMarkFailed_WhileStoppingCountsAGenuineFailure(t *testing.T) {
 		"refused-then-b":  {refused, next},
 		"nofolder-then-b": {{ID: "f1", Name: "y.txt", RelativePath: "sub/y.txt"}, next},
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/jobs/"), "/files/")
-		_ = json.NewEncoder(w).Encode(map[string]any{"results": jobs[id]})
-	}))
-	t.Cleanup(srv.Close)
+	p := newPlatform(t)
+	for id, files := range jobs {
+		p.jobs = append(p.jobs, &fakeJob{id: id, files: files})
+	}
 	dir := t.TempDir()
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := p.daemon(dir, EligibilityConfig{})
 	writeFile(t, filepath.Join(ComputeOutputDir(dir, "nofolder-then-b", "job", false), "sub"), "") // where y.txt's folder belongs
 	var ctx context.Context
 	var stopDaemon context.CancelFunc
+	var job string
+	stopped := map[string]bool{} // the jobs whose dispatch the stop came in
 	d.logger = logging.NewLoggerWithWriter(logHook(func(line string) {
-		if strings.Contains(line, "invalid name") || strings.Contains(line, "Failed to create file directory") {
+		if strings.Contains(line, "Skipping file") {
+			stopped[job] = true
 			stopDaemon()
 		}
 	}))
-	for id := range jobs {
+	for job = range jobs {
 		ctx, stopDaemon = context.WithCancel(context.Background())
-		d.downloadJob(ctx, &CompletedJob{ID: id, Name: "job"})
+		d.downloadJob(ctx, &CompletedJob{ID: job, Name: "job"}, d.cfg.DownloadDir)
 		stopDaemon()
+	}
+	if len(stopped) != len(jobs) {
+		t.Errorf("the daemon was told to stop mid-dispatch for %v only, want every job", stopped)
 	}
 
 	for batchID, errs := range map[string][]error{
@@ -298,7 +269,7 @@ func TestMarkFailed_WhileStoppingCountsAGenuineFailure(t *testing.T) {
 		"mixed": {fmt.Errorf("download: %w", context.Canceled), errors.New("file not found")},
 	} {
 		for _, err := range errs {
-			d.Queue().Fail(d.Queue().TrackTransferWithBatch("f", 1, transfer.TaskTypeDownload, "id", "path", "", batchID, "").ID, err)
+			d.ts.GetQueue().Fail(d.ts.GetQueue().TrackTransferWithBatch("f", 1, transfer.TaskTypeDownload, "id", "path", "", batchID, "").ID, err)
 		}
 		d.markFailed(ctx, &CompletedJob{ID: batchID, Name: "job"}, batchID, context.Canceled)
 	}
@@ -339,14 +310,14 @@ func TestMarkFailed_AStopJustBeforeItLooksCountsAGenuineFailure(t *testing.T) {
 		{ID: "p", Name: "present.txt", DecryptedSize: 3, FileChecksums: sha512Of(t, payload)},
 	}
 	dir := t.TempDir()
-	d := newDownloadTestDaemon(t, fakeJobFilesServer(t, jobID, files, nil).URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: files}).daemon(dir, EligibilityConfig{})
 	outDir := ComputeOutputDir(dir, jobID, "job", false)
 	writeFile(t, filepath.Join(outDir, "present.txt"), string(payload))
 	writeFile(t, filepath.Join(outDir, "sub"), "") // where y.txt's folder belongs
 
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
-	d.downloadJob(&stopAtMarkFailed{ctx, stop}, &CompletedJob{ID: jobID, Name: "job"})
+	d.downloadJob(&stopAtMarkFailed{ctx, stop}, &CompletedJob{ID: jobID, Name: "job"}, d.cfg.DownloadDir)
 	if got := d.state.AttemptCount(jobID); got != 1 || ctx.Err() == nil {
 		t.Errorf("stopped as the failure was recorded (%v): %d failed attempts, want 1", ctx.Err(), got)
 	}
@@ -358,8 +329,7 @@ func TestMarkFailed_AStopJustBeforeItLooksCountsAGenuineFailure(t *testing.T) {
 // Here Stop starts during the first poll's first save; the stopped scan then
 // fails and saves nothing, so the next save must be Stop's, once the loop ends.
 func TestStop_DuringTheFirstPollWaitsForThePollLoop(t *testing.T) {
-	url, _ := fakeFailingJobServer(t, "job1")
-	d := newDownloadTestDaemon(t, url, t.TempDir(), nil)
+	d := newPlatform(t, failingJob("job1")).daemon(t.TempDir(), EligibilityConfig{})
 	var stopping, loopEnded atomic.Bool
 	d.logger = logging.NewLoggerWithWriter(logHook(func(line string) {
 		if strings.Contains(line, "Poll loop") {

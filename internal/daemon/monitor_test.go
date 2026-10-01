@@ -3,22 +3,14 @@ package daemon
 
 import (
 	"context"
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
-	"github.com/rescale/rescale-int/internal/api"
-	"github.com/rescale/rescale-int/internal/config"
-	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/validation"
 )
@@ -296,8 +288,7 @@ func TestDownloadJob_RefusesAFileWhereTheMarkerIs(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			const jobID = "abcdefgh"
 			dir := t.TempDir()
-			srv := fakeJobFilesServer(t, jobID, []models.JobFile{{ID: "m", Name: name, DecryptedSize: 6}}, nil)
-			d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+			d := newPlatform(t, &fakeJob{id: jobID, files: []models.JobFile{{ID: "m", Name: name, DecryptedSize: 6}}}).daemon(dir, EligibilityConfig{})
 			d.cfg.UseJobNameDir = true
 
 			outcome := runDownloadJob(t, d, &CompletedJob{ID: jobID, Name: "My Run"}, 20*time.Second)
@@ -336,8 +327,7 @@ func TestReadJobIDFile_TakesOnlyAnID(t *testing.T) {
 func TestDownloadJob_ReusesAnEarlierVersionsFolder(t *testing.T) {
 	const jobID = "abcdefgh"
 	dir := t.TempDir()
-	srv := fakeJobFilesServer(t, jobID, []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 5}}, nil)
-	d := newDownloadTestDaemon(t, srv.URL, dir, nil)
+	d := newPlatform(t, &fakeJob{id: jobID, files: []models.JobFile{{ID: "f1", Name: "out1.txt", DecryptedSize: 5}}}).daemon(dir, EligibilityConfig{})
 	d.cfg.UseJobNameDir = true
 	legacy := filepath.Join(dir, "My Run_abcdef")
 	writeFile(t, filepath.Join(legacy, "out1.txt"), "hello")
@@ -507,52 +497,6 @@ func TestWriteJobIDFile_RefusesALink(t *testing.T) {
 // Eligibility Engine Tests
 // =============================================================================
 
-// TestMonitorEligibilityConfig pins where a monitor's eligibility config comes
-// from: the defaults (autodownload, seven days) when none is given, the
-// caller's own when one is, none at all from NewMonitor, and SetEligibility.
-func TestMonitorEligibilityConfig(t *testing.T) {
-	defaults := EligibilityConfig{AutoDownloadTag: "autodownload", LookbackDays: 7}
-	if got := DefaultEligibilityConfig(); got == nil || *got != defaults {
-		t.Errorf("DefaultEligibilityConfig() = %+v, want %+v", got, defaults)
-	}
-	if m := NewMonitorWithEligibility(nil, nil, nil, nil, nil); m.eligibility == nil || *m.eligibility != defaults {
-		t.Errorf("NewMonitorWithEligibility(nil config) uses %+v, want the defaults", m.eligibility)
-	}
-	custom := &EligibilityConfig{AutoDownloadTag: "custom:tag", LookbackDays: 14}
-	if m := NewMonitorWithEligibility(nil, nil, nil, custom, nil); m.eligibility != custom {
-		t.Errorf("NewMonitorWithEligibility(custom) uses %+v, want the custom config", m.eligibility)
-	}
-
-	m := NewMonitor(nil, nil, nil, nil)
-	if m.eligibility != nil {
-		t.Errorf("NewMonitor set eligibility %+v, want none", m.eligibility)
-	}
-	m.SetEligibility(custom)
-	if m.eligibility != custom {
-		t.Error("SetEligibility did not set the config")
-	}
-	m.SetEligibility(nil)
-	if m.eligibility != nil {
-		t.Error("SetEligibility(nil) did not clear the config")
-	}
-}
-
-func TestCheckEligibility_NilConfig(t *testing.T) {
-	m := &Monitor{eligibility: nil}
-
-	result := m.CheckEligibility(nil, &CompletedJob{ID: "test-job-id"})
-
-	if !result.EligibleForDownload {
-		t.Errorf("expected EligibleForDownload=true for nil eligibility config, got false")
-	}
-	if result.Detail != "eligibility checking disabled" {
-		t.Errorf("expected 'eligibility checking disabled', got %q", result.Detail)
-	}
-	if result.Reason.Code != ReasonNone {
-		t.Errorf("expected Reason.Code=ReasonNone for eligible result, got %q", result.Reason.Code)
-	}
-}
-
 // TestSkipReasonCodeIsSilent asserts that every SkipReasonCode used by the
 // daemon has a deterministic silent-vs-logged classification. If a new code
 // is added and not classified in IsSilent, add it here and in the switch.
@@ -578,6 +522,7 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 		ReasonConditionalMissingTag:      false,
 		ReasonDownloadedTagCheckAPIError: false,
 		ReasonCompletionTimeAPIError:     false,
+		ReasonCompletionTimeDeferred:     true,
 	}
 	for code, want := range silent {
 		if got := code.IsSilent(); got != want {
@@ -595,31 +540,8 @@ func TestSkipReasonCodeIsSilent(t *testing.T) {
 // skipped before any eligibility lookup, so the poll's tag retry is not raced
 // by a second download of the same job.
 func TestFindCompletedJobsSkipsJobsPendingTheirTag(t *testing.T) {
-	var mu sync.Mutex
-	var requested []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		requested = append(requested, r.URL.Path)
-		mu.Unlock()
-		var body any
-		switch r.URL.Path {
-		case "/api/v3/jobs/":
-			body = map[string]any{"results": []models.JobResponse{
-				{ID: "pending-job", Name: "pending", JobStatus: models.JobStatusContent{Status: "Completed"}},
-				{ID: "ready-job", Name: "ready", JobStatus: models.JobStatusContent{Status: "Completed"}},
-			}}
-		case "/api/v3/jobs/ready-job/statuses/":
-			body = map[string]any{"results": []models.JobStatusEntry{{Status: "Completed", StatusDate: time.Now().UTC().Format(time.RFC3339)}}}
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(body)
-	}))
-	t.Cleanup(server.Close)
-	client := api.NewClientForTest(&config.Config{APIKey: "test-key", APIBaseURL: server.URL, ProxyMode: "no-proxy"})
-	m := NewMonitorWithEligibility(client, nil, nil, DefaultEligibilityConfig(), logging.NewLoggerWithWriter(io.Discard))
+	p := newPlatform(t, &fakeJob{id: "pending-job", name: "pending"}, &fakeJob{id: "ready-job", name: "ready"})
+	m := p.monitor(nil, EligibilityConfig{LookbackDays: 7})
 
 	result, err := m.FindCompletedJobs(context.Background(), map[string]struct{}{"pending-job": {}})
 	if err != nil {
@@ -635,10 +557,8 @@ func TestFindCompletedJobsSkipsJobsPendingTheirTag(t *testing.T) {
 	if n := result.Summary.SkipBuckets[ReasonPendingTagApply]; n != 1 {
 		t.Errorf("skipped %d jobs as pending their tag, want 1 (buckets %v)", n, result.Summary.SkipBuckets)
 	}
-	mu.Lock()
-	defer mu.Unlock()
 	// The ready job's completion time was looked up, so the pending one would have been.
-	if !slices.Contains(requested, "/api/v3/jobs/ready-job/statuses/") || slices.ContainsFunc(requested, func(p string) bool { return strings.Contains(p, "pending-job") }) {
-		t.Errorf("requests %v: want ready-job's completion time looked up and nothing asked about pending-job", requested)
+	if lookups, tagReads := p.read(); !slices.Equal(lookups, []string{"ready-job"}) || len(tagReads) != 0 {
+		t.Errorf("completion times looked up for %v, tags read for %v: want ready-job's completion time only, and nothing asked about pending-job", lookups, tagReads)
 	}
 }
