@@ -62,7 +62,23 @@ Most of this release is fixes, but some of them change what a script or a routin
     `download_folder` is not an absolute path or whose `max_concurrent` is outside 1–20,
     0 included, and `daemon config set` refuses a relative folder, a `max_concurrent`
     outside 1–20, and a true/false setting given anything but true/false, yes/no, on/off
-    or 1/0, in any case (`True` and `on` used to store false).
+    or 1/0, in any case (`True` and `on` used to store false);
+  - `pur run`, `pur resume` and a PUR run in the app refuse, before the run starts, two
+    common input files that would be uploaded under one name, naming both; v4.9.8
+    uploaded both;
+  - `jobs submit --script`, compat mode's `submit` and loading an SGE script in the app
+    refuse, naming its line, a directive Interlink cannot carry out and a value that does
+    not fit, such as `#RESCALE_WALLTIME twelve`, a count of 0 or
+    `#USE_RESCALE_LICENSE yes`; such a line used to be ignored or overridden by a
+    default.
+- **Job scripts run as written.** A bare `#USE_RESCALE_LICENSE` line now turns the
+  Rescale license on; it used to be ignored. Compat mode's `submit` reads a script written
+  for rescale-cli, `#RESCALE_NAME=job1` and the rest, as rescale-cli does, where it used
+  to run it as "Unnamed Job" on the default core type with one core for 48 hours; in that
+  spelling `#RESCALE_CORES=8` asks for 8 cores, while Interlink's `#RESCALE_CORES emerald`
+  still names the core type. `jobs submit --files` adds its uploads to the input files a
+  `--job-file` or a script names, instead of replacing them. See
+  [Compat mode](#compat-mode-reads-rescale-clis-job-scripts).
 - **Transfer diagnostics are hidden by default.** They could corrupt the progress bars.
   Add `--verbose` (or `--debug`, or set `RESCALE_DEBUG`) to see them; rate-limit and
   retry notices are always shown. Please include `--verbose` output when you report a
@@ -152,15 +168,15 @@ case1.inp:  abaqus job=case1 input=case1.inp cpus=8
 case2.inp:  abaqus job=case2 input=case2.inp cpus=8
 ```
 
-Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. Two files that render to the same job name fail the scan too: a job name is the identifier progress and state are tracked by, so a duplicate would misroute one job's updates onto the other. That message names both files by folder and file name — `case1/model.inp` and `case2/model.inp` under a bare `{{base}}` — and suggests adding `{{index}}` or `{{dir}}`. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged. The same command and name length limits apply as in a sweep.
+Five tokens are available in both the command and the job name: `{{file}}`, `{{base}}` (the stem), `{{ext}}`, `{{dir}}` and `{{index}}`. A misspelled token fails the scan with a message naming it, rather than submitting a batch of jobs carrying a literal `{{bse}}` on their command lines. Two files that render to the same job name fail the scan too: a job name is the identifier progress and state are tracked by, so a duplicate would misroute one job's updates onto the other. That message names both files by folder and file name — `case1/model.inp` and `case2/model.inp` under a bare `{{base}}` — and suggests adding `{{index}}` or `{{dir}}`, or `{{index}}` alone when the name already uses `{{dir}}`. A job name with no tokens keeps the existing `Name_1` / `Name_2` numbering, so existing setups are unchanged. The same command and name length limits apply as in a sweep.
 
 Each job also uploads **only its own files** now — its primary file plus the secondary files resolved for it — flattened into its working directory, instead of the whole containing folder. Secondary patterns that reach outside the primary's folder (`../meshes/*.cfg`) are therefore uploaded rather than validated and dropped, and jobs sharing a folder no longer overwrite each other's archive, which previously surfaced as `upload incomplete: received 1 of 9 parts`. A secondary pattern that resolves to the primary file itself is dropped rather than listed twice, and two different files that would flatten onto one name skip the job at scan time with both paths named. Data genuinely shared by every job still belongs in `--common-input-files`, which uploads it once for the batch.
 
 The per-job file list survives the `scan-files` → `jobs.csv` → `pur run` round trip through a new semicolon-separated `LocalInputFiles` column; jobs CSVs written before it still load. A path the column cannot carry, such as one containing a semicolon, is refused when the CSV is written, naming the job and the path. `pur scan-files` leaves the `LicensesPerJob` and `SSHPort` columns empty when they are not set, instead of writing `0`.
 
-In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason and its path from the scan root. The **Recursive** and **hidden directories** options appear only for a folder scan, since a file scan never read them.
+In the GUI, **Job Source → Files** lists the five tokens and what each one resolves to beside the file pattern, and the scan results name every file it declined to turn into a job, with the reason and its path from the scan root. **Include hidden directories** appears only for a folder scan, since a file scan does not read it.
 
-- A primary pattern can use `**` to match any number of folders, so `**/vasprun.xml` finds every `vasprun.xml` under the root, at any depth. Such a search matches files only, skips hidden folders and does not follow links to folders. When a bare pattern such as `*.xml` finds nothing, the error suggests `**/*.xml`. (#69)
+- A primary pattern can use `**` to match any number of folders, so `**/vasprun.xml` finds every `vasprun.xml` under the root, at any depth. Such a search matches files only, skips hidden folders and does not follow links to folders. When a bare pattern such as `*.xml` finds nothing, the error suggests `**/*.xml`. **Recursive scan** in a file scan, or `pur scan-files --recursive`, does the same for a pattern without `**`: `*.xml` is searched as `**/*.xml`. To search a hidden folder, make it the scan root. (#69)
 
 ### PUR uploads can target a folder and carry file tags
 
@@ -177,6 +193,25 @@ The old `--extra-input-files` and `--decompress-extras` names still work as hidd
 but emit a deprecation warning, and passing both a flag and its alias is an error.
 Contributed by @ctusa-rescale as part of
 [PR #66](https://github.com/rescale-labs/Rescale_Interlink/pull/66).
+
+### PUR common input files: several files, folders and library files (#68)
+
+The PUR tab's **Common Input Files** gains **Add Files**, which takes several files at
+once, **Add Folder** and **Browse Rescale Library**, and lists the entries as Single Job
+does, with a remove button for each and **Clear All**. The text field stays, for typed
+paths and `id:<fileId>` references. `pur run` and `pur resume` take a folder in
+`--common-input-files` too.
+
+- A folder adds every file under it, leaving out files and folders whose names start
+  with `.`; such a file listed by name is included. Each file is uploaded once, under its own name, and
+  attached to every job, and `--decompress-common` applies to it as to any listed file.
+- The entries are checked before the run starts, before anything is created or
+  uploaded, and by `--dry-run` too: a path whose file information cannot be read, a
+  special file, an empty folder, an `id:` with no file ID, and two files that would be
+  uploaded under one name are refused, naming them. A folder used to fail the run after
+  it had started, with `cannot upload a directory`.
+- A folder given as a link is followed, in Single Job's **Add Folder** too, which used to
+  fail it with `cannot upload a directory`.
 
 ### PUR pipeline fixes
 
@@ -322,9 +357,13 @@ The non-functional Shared Jobs tab was removed.
   `--job-id`, `daemon config edit` with no editor, and a `daemon stop` that timed out or
   found a daemon it could not reach; `jobs submit` given both `--job-file` and
   `--script`, or a job specification and `--job-id`; a PUR template that cannot be
-  loaded; a missing conflict mode; a download refused because its destination is a
-  symbolic link; an API key that `config test` or `daemon config validate` rejects; and a
-  workspace without the "Auto Download" field.
+  loaded; a jobs CSV row refused as it loads, for half a license pair (`pur run`,
+  `pur resume`) or a `Submit` value Interlink cannot read (those and
+  `pur submit-existing`); a job script that `jobs submit --script` refuses, for a
+  directive Interlink cannot carry out, a value that does not fit, a missing required
+  directive or a project you do not have; a missing conflict mode; a download refused
+  because its destination is a symbolic link; an API key that `config test` or
+  `daemon config validate` rejects; and a workspace without the "Auto Download" field.
 - A failure whose file or folder name contains digits such as `503` or `404` is no longer
   mistaken for a server error: it is not retried as one and does not produce an error
   report.
@@ -448,8 +487,12 @@ row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-l
 - Only one daemon per user runs at a time. Every `daemon run` mode, foreground and
   `--once` included, claims the PID file under an operating-system lock before it does
   anything else, so a second launch refuses without changing anything. `daemon status` sees a
-  foreground daemon, and the PID file is removed when the daemon exits on its own; a PID
-  file whose process has exited is ignored.
+  foreground daemon, and the PID file is removed when the daemon exits on its own. A PID
+  file left by a forced stop or a crash no longer blocks a start once its process ID
+  names another program, as Windows often reuses it: the file counts only while its
+  process is a running `daemon run`, or while that cannot be told, as for another
+  user's process. `daemon status`, `daemon stop`, the app and the tray judge it the same
+  way.
 - `daemon stop` waits up to 10 seconds for the daemon to exit and exits 1 with a clear
   message if it does not. A daemon that does not answer is not stopped without
   `--force`: the command exits 1 and says how to end it.
@@ -488,9 +531,12 @@ row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-l
 - **Scan now** reports why a scan did not start (stopped, paused, or one already
   running). **Save all settings**, turning auto-download on and **Retry** ask the running
   daemon to reload and report what happened, or say that auto-download needs starting.
-  The Setup tab's status check and its **Test Connection** write-probe the download
-  folder, creating it if need be, as saving already did, so a read-only folder is
-  reported before the first download fails.
+  While downloads run, auto-download keeps its old settings and the message says to
+  restart it to apply them; it used to promise they would apply when the downloads
+  finished. Switching **Enable Auto-Download** off stops auto-download that is running,
+  as **Stop Auto-Download** does, and says so. The Setup tab's status check and its
+  **Test Connection** write-probe the download folder, creating it if need be, as saving
+  already did, so a read-only folder is reported before the first download fails.
 - The daemon's persistent state is now bounded. As part of this, the lifetime
   `JobsDownloaded` counter becomes a trailing count covering `lookback_days` plus 30 days
   (37 days at the default); jobs still waiting for their tag are kept at any age. Error
@@ -518,6 +564,39 @@ row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-l
 - `jobs submit -E`, `jobs tail` and compat mode's wait end when a job reaches Stopped or
   Force Stopped instead of polling forever. Compat mode counts only Completed as
   success; `jobs submit -E` and `jobs tail` report the status and exit 0.
+
+### Compat mode reads rescale-cli's job scripts
+
+Compat mode's `submit` and `jobs submit --script` read the directives as rescale-cli
+writes them, `#RESCALE_NAME=job1` and the rest, with rescale-cli's meanings. Compat
+`submit` used to read none of them, and ran such a script as "Unnamed Job" on the
+default core type, with one core for 48 hours, without a message. Interlink's own
+spelling, `#RESCALE_NAME job1`, keeps its meanings.
+
+- In the `=` spelling, `#RESCALE_CORES=8` is a core count (`#RESCALE_CORES emerald` still
+  names the core type) and `#RESCALE_PROJECT_ID=` the name of one of your projects.
+  `#RESCALE_CORE_TYPE` takes a core type's code or name, `#RESCALE_EXISTING_FILES`
+  attaches files already on Rescale, `#RESCALE_PRIORITY` and `#RESCALE_LOW_PRIORITY` set
+  low priority, and a bare `#USE_RESCALE_LICENSE` turns the Rescale license on. The
+  parser handles quoted values, repeated directives and environment variables, and empty
+  values using the rules in the CLI guide.
+- A directive Interlink cannot carry out is refused with its line number instead of being
+  ignored: a core type set, an on-demand license seller, a start hour, a second
+  analysis, a priority other than `ON_DEMAND` or `INSTANT`, and an empty
+  `#RESCALE_INBOUND_SSH_CIDR=`. A nonblank `#RESCALE_AUTO_TERMINATE_CLUSTER` is accepted
+  with a warning that the platform no longer reads it. A malformed value is refused the
+  same way, in either spelling, instead of being replaced by a default.
+- With `#RESCALE_CORE_TYPE` and no core count, compat `submit` takes the first core count
+  the core type offers, as rescale-cli does, instead of 1.
+- `#$ -pe <environment> N` gives the core count for any parallel environment, not only
+  `smp`, and `#$ -N` drops the quotes around a name.
+- `jobs submit --files` adds its uploads after the input files a `--job-file` or a
+  script names, instead of replacing them, and compat `submit` adds `run.sh` and
+  `input.zip` after the script's own.
+- Loading an SGE script in the app reads rescale-cli's spelling too. Low priority loads
+  into the template, and the script's existing files are attached to every job run from
+  it. A script that gives its project by name is refused, naming the line, since the
+  template takes a project's ID.
 
 ### Disk-space errors report real numbers (#34)
 
@@ -711,8 +790,8 @@ rights. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescal
 
 ### Build and release
 
-Go toolchain 1.26.7 with refreshed dependencies. Six advisories in the frontend's build
-and test tools were cleared; none of them affected the shipped application. Release
+Go toolchain 1.26.7 with refreshed dependencies. Nine advisories in the frontend's build,
+test and lint tools were cleared; none of them affected the shipped application. Release
 builds use pinned toolchains: Go, checked against its published SHA-256; Node.js 24.21.0
 (Node 20 is end of life), checksum-verified in the Linux build; and, for the Windows
 installer, a WebView2 runtime pinned by version and SHA-256, whose build now stops if
@@ -739,7 +818,9 @@ exits with an error instead of panicking.
 }
 ```
 
-Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. Clearing the feature name in the GUI releases the count. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. `pur run` and `pur resume` refuse such a row as the jobs CSV loads, `--dry-run` included, before anything is archived or uploaded. Clearing the feature name in the GUI releases the count. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+
+An SGE script gives the same object in `#RESCALE_USER_DEFINED_LICENSE_SETTINGS`, written with a space or, as rescale-cli writes it, with `=`, and `jobs submit --script` and compat mode's `submit` send it as that object, with one or more feature sets; it used to go out as text, and the `=` spelling was ignored. A value that is not that object, or a feature that lacks a name or a count above zero, is refused with its line number before anything is uploaded; left empty after `=`, as rescale-cli allows, it sets nothing. Saving a job template as an SGE script writes its feature and count as the directive, and loading an SGE script reads a directive with one feature set holding one feature back into them; any other shape is refused, naming the line.
 
 ### Job template: project picker and coretype-aware core stepper
 

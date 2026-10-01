@@ -137,7 +137,7 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Detailed job info: status and status reason, command, compute resources, timing, owner
 
 ### Submit Job
-- Submit from a JSON job specification (`--job-file`) or an SGE-style script (`--script`), or submit an already-created job by ID
+- Submit from a JSON job specification (`--job-file`) or an SGE-style script (`--script`), whose directives may be written Interlink's way (`#RESCALE_NAME job1`) or rescale-cli's (`#RESCALE_NAME=job1`), or submit an already-created job by ID
 - Three workflow modes: `--create` (create only), `--submit` (default), `-E/--end-to-end` (upload → create → submit → monitor, with `--download` for results)
 - Automatic file upload with encryption
 - Core type, walltime, slots, tags, project, environment variables, license settings, and automation parameters
@@ -173,7 +173,7 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 
 ## CLI Compatibility Mode
 
-Drop-in replacement for `rescale-cli` (the legacy Java-based Rescale CLI). Existing scripts and automation workflows can migrate to Interlink without modification.
+Compatibility mode implements ten commands from `rescale-cli`, the legacy Java-based Rescale CLI. Check the defaults and script-handling differences in [CLI_GUIDE.md](CLI_GUIDE.md#compatibility-mode) before migrating an existing workflow.
 
 ### Activation
 - `--compat` flag: `rescale-int --compat status -j JOB_ID`
@@ -190,6 +190,7 @@ Drop-in replacement for `rescale-cli` (the legacy Java-based Rescale CLI). Exist
 - JSON output modes (`-e` flag)
 - Quiet mode (`-q`)
 - `sync` command: watch and incrementally download job outputs (wraps shared watch engine)
+- `submit` reads a job script's directives as rescale-cli writes them (`#RESCALE_NAME=job1`), with rescale-cli's meanings, and refuses one Interlink cannot carry out, naming its line
 
 ### Deferred Commands
 `spub` (software publisher) subcommands: clear error indicating deferral to v5.0.0.
@@ -216,7 +217,7 @@ Background service for automatically downloading completed jobs.
 - **Shared transfer engine**: Daemon downloads route through the same `TransferService` the GUI uses. Multi-file jobs download in parallel with adaptive concurrency; there is no parallel transfer implementation inside the daemon.
 - **Unified Transfers tab**: Daemon transfers appear alongside GUI transfers with a `Daemon` badge. Per-row Cancel/Retry works on daemon rows, routed via IPC; `Cancel All` cancels both engines.
 - **Failures are reported, not just absent**: a scan that throws (expired key, dead network, proxy trouble) records the error, its code, and when it happened. `daemon status` and the Setup tab show it with its age and an actionable hint; the next successful scan clears it. Previously the only outward symptom was a last-scan timestamp that stopped advancing.
-- **Actions that did not happen say so**: a scan trigger that could not start (stopped, paused, or a poll already running) reports why instead of returning success, and "Save all settings" asks the running daemon to reload and reports the result — writing `daemon.conf` alone leaves a running daemon on its old settings.
+- **Actions that did not happen say so**: a scan trigger that could not start (stopped, paused, or a poll already running) reports why instead of returning success, and "Save all settings" asks the running daemon to reload and reports the result — writing `daemon.conf` alone leaves a running daemon on its old settings, and a daemon that is downloading keeps them until auto-download is restarted, which the message says. Switching **Enable Auto-Download** off stops a running daemon, as **Stop Auto-Download** does.
 - **Pre-flight validates the download folder** with the same write probe the config save uses, so a read-only folder is caught before every download fails.
 - **Bounded growth**: the report directory keeps the newest 500 files; state entries are dropped once no scan could select them again (jobs still owed a tag call are exempt); and terminal transfer tasks beyond the 20 most recent batches are cleared, keeping recent auto-downloads visible without accumulating one task per file forever.
 - **The downloaded count is a trailing window, not a lifetime total**: `daemon status` and the Setup tab count the state entries still retained, and retention is `lookback_days` + 30 days — about 37 days at the default. Jobs downloaded before that fall out of the count.
@@ -253,7 +254,7 @@ Batch job submission pipeline for parallel computational studies.
 - Concurrent tar/upload/submit workers
 - Context-aware cancellation
 - Tar subpath and scan prefix support
-- Common input files (upload once, attach to every job) — `--common-input-files`, with `--extra-input-files` kept as a deprecated hidden alias
+- Common input files (upload once, attach to every job) — `--common-input-files`, with `--extra-input-files` kept as a deprecated hidden alias. Takes local files, folders (every file under one, leaving out files and folders whose names start with `.`) and `id:<fileId>` references, all checked before the run starts
 - Iterate command patterns (vary commands across runs)
 - Optional remote folder and file tags for a batch's uploads (`--folder`, `--folder-parent`, `--file-tags`)
 
@@ -268,7 +269,7 @@ Batch job submission pipeline for parallel computational studies.
 
 ### Additional Commands
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
-- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, render each job's command from its own file (`{{file}}`, `{{base}}`, `{{ext}}`, `{{dir}}`, `{{index}}`), and optionally generate a jobs CSV from a template. Each job uploads only its own primary plus secondary files
+- `scan-files` — Scan a tree for primary input files plus optional secondary attachments, render each job's command from its own file (`{{file}}`, `{{base}}`, `{{ext}}`, `{{dir}}`, `{{index}}`), and optionally generate a jobs CSV from a template. Each job uploads only its own primary plus secondary files. `--recursive` searches subfolders too, as `**/` in front of the pattern does
 - `plan` — Validate pipeline (dry-run)
 - `resume` — Resume interrupted pipeline from state file. Failure markers belonging to stages being retried are cleared, so a run that failed at tar and then resumed cleanly reports success instead of the previous run's failures. A job whose tar and upload both succeeded keeps its submit failure, which is a real unretried outcome
 - `submit-existing` — Submit jobs using previously uploaded files
@@ -277,6 +278,7 @@ Batch job submission pipeline for parallel computational studies.
 - Three-step workflow: configure → scan → execute
 - Jobs come from a folder scan, a file scan, or a parameter sweep built in the tab with a live case preview
 - Load/Save settings (CSV, JSON, SGE formats)
+- Common input files from **Add Files**, **Add Folder** or **Browse Rescale Library**, listed as in Single Job
 - Pipeline Settings (workers, tar options)
 - Real-time monitoring dashboard with live progress
 - Run queue: "Queue Run" when another run is active, auto-start on completion

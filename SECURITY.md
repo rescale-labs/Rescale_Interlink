@@ -198,7 +198,7 @@ API keys should be stored securely:
 - Keys are never logged (not even partially)
 - `config init` does not echo the key while you type it
 - The GUI allows viewing the key (toggle) but never exposes it externally
-- **Auth scheme selected by key shape**: API tokens use `Authorization: Token <key>`; short-lived JWT-shaped credentials (three dot-separated `ey…` segments) automatically switch to `Authorization: Bearer <key>`. Selection is per request, based on the credential value at the time of the call
+- **Auth scheme selected by key shape**: a key with three dot-separated segments whose first segment starts with `ey` uses `Authorization: Bearer <key>`; other keys use `Authorization: Token <key>`. The scheme is chosen for each request, from the key the API client was created with
 
 ---
 

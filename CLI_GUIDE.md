@@ -1665,7 +1665,7 @@ rescale-int jobs submit --job-id <id>
 - `-f, --job-file string` - Path to job specification JSON file
 - `-s, --script string` - Path to SGE-style script with `#RESCALE_*` metadata
 - `-j, --job-id string` - Existing job ID to submit (use with `--submit` only)
-- `--files strings` - Input files to upload (comma-separated, supports glob patterns)
+- `--files strings` - Input files to upload (comma-separated, supports glob patterns). They are attached after the input files the job file (`inputFiles`) or the script (`#RESCALE_EXISTING_FILES`) already names
 - `--create` - Create job only (don't submit)
 - `--submit` - Create and submit job (default behavior)
 - `-E, --end-to-end` - Full workflow: upload, create, submit, then monitor until the job finishes. Results are downloaded only if `--download` is also given
@@ -1674,19 +1674,88 @@ rescale-int jobs submit --job-id <id>
 - `-m, --max-concurrent int` - Maximum concurrent file uploads, 1-20 (default 5)
 - `--automation strings` - Automation ID(s) to attach (comma-separated or repeated)
 
-**SGE script directives** (`--script`): `#RESCALE_NAME`, `#RESCALE_COMMAND`,
-`#RESCALE_ANALYSIS`, `#RESCALE_ANALYSIS_VERSION`, `#RESCALE_CORES`,
+**SGE script directives** (`--script`, and compat mode's `submit`): `#RESCALE_NAME`,
+`#RESCALE_COMMAND`, `#RESCALE_ANALYSIS`, `#RESCALE_ANALYSIS_VERSION`, `#RESCALE_CORES`,
 `#RESCALE_CORES_PER_SLOT`, `#RESCALE_SLOTS`, `#RESCALE_WALLTIME`, `#RESCALE_TAGS`,
 `#RESCALE_PROJECT_ID`, `#RESCALE_INBOUND_SSH_CIDR`, `#RESCALE_PUBLIC_KEY`,
 `#RESCALE_USER_DEFINED_LICENSE_SETTINGS`, `#RESCALE_AUTOMATION`,
-`#RESCALE_ENV_<NAME>`, and `#USE_RESCALE_LICENSE`. The qsub forms `#$ -l key=value`,
-`#$ -N NAME`, and `#$ -pe smp N` are read as fallbacks — `#RESCALE_*` directives take
-precedence. If `#RESCALE_COMMAND` is absent the script body is used as the command.
+`#RESCALE_ENV_<NAME>`, and `#USE_RESCALE_LICENSE`, and rescale-cli's
+`#RESCALE_CORE_TYPE` (a core type's code or name; a value that is neither is sent as
+written), `#RESCALE_EXISTING_FILES` (comma-separated IDs of files already on Rescale,
+attached to be decompressed on the cluster, ahead of any file the command uploads),
+`#RESCALE_LOW_PRIORITY`, `#RESCALE_PRIORITY` (`ON_DEMAND` or `INSTANT`) and
+`#RESCALE_AUTO_TERMINATE_CLUSTER`. `#RESCALE_PRIORITY=ON_DEMAND` sets low priority and
+`#RESCALE_PRIORITY=INSTANT` clears it; the `=` form takes precedence over
+`#RESCALE_LOW_PRIORITY`. With space-form priority directives, a later
+`#RESCALE_LOW_PRIORITY` can change the setting. The qsub forms `#$ -l key=value`,
+`#$ -N NAME` (quotes around the name are dropped), and `#$ -pe <environment> N`, for any
+parallel environment, are read as fallbacks — `#RESCALE_*` directives take precedence.
+If `#RESCALE_COMMAND` is absent the script body is used as the command.
 
-Six values are required, and a script that leaves one unset is rejected naming
-the directive that would have supplied it: `RESCALE_NAME`, `RESCALE_COMMAND`,
-`RESCALE_ANALYSIS`, `RESCALE_CORES` (the core type), `RESCALE_CORES_PER_SLOT`
-(must be > 0) and `RESCALE_WALLTIME` (must be > 0). The check is on the values,
+A directive can be written with a space, `#RESCALE_NAME job1`, or as rescale-cli writes
+it, `#RESCALE_NAME=job1`, and may be indented. The two spellings mean the same, except
+for three directives, where the `=` spelling means what it means in rescale-cli:
+
+| Directive | With a space | With `=` |
+|---|---|---|
+| `#RESCALE_CORES` | the core type: `#RESCALE_CORES emerald` | the number of cores: `#RESCALE_CORES=8` (rescale-cli names the core type with `#RESCALE_CORE_TYPE=`) |
+| `#RESCALE_PROJECT_ID` | the project's ID | the name of one of your projects, whose ID is looked up before anything is uploaded |
+| `#USE_RESCALE_LICENSE` | `true` or `false`, in any case | turns the Rescale license on, as the directive on its own does |
+
+In the `=` spelling, one double quote is dropped from each end of a value. Of a
+directive given twice, the first line counts, except that `#RESCALE_CORES=` takes the
+first line that holds a count, a second `#RESCALE_ANALYSIS=` or
+`#RESCALE_ANALYSIS_VERSION=` is refused, and `#RESCALE_TAGS` and `#RESCALE_AUTOMATION`
+add up in either spelling. Mixing spellings does not reset the first-`=` rule. A later
+space-form scalar value can replace an earlier value, but another `=` occurrence is
+still subject to the repetition rules above. Existing-file lists accumulate across
+accepted lines. An empty value sets nothing, with these exceptions:
+`#RESCALE_ENV_<NAME>=` sets an empty variable, `#USE_RESCALE_LICENSE=` turns the license
+on, and an empty `#RESCALE_ANALYSIS=`, `#RESCALE_PRIORITY=` or
+`#RESCALE_INBOUND_SSH_CIDR=` is refused. Quoted whitespace is not universally empty:
+`RESCALE_SLOTS` and `RESCALE_CORES_PER_SLOT` reject it. An environment variable given
+twice gets both values, joined with `:`, and its name runs to the line's last `=`; for a
+value that holds `=`, use the space spelling, `#RESCALE_ENV_JAVA_OPTS -Dx=1`.
+
+A directive Interlink cannot carry out, and a value that does not fit, are refused with
+the line, before anything is uploaded or created. The message starts `failed to parse
+SGE script: `, or `failed to parse script: ` in compat mode, followed by, for example:
+
+- `RESCALE_CORE_TYPE_SET at line 2: Interlink cannot submit to a core type set; give one core type with #RESCALE_CORE_TYPE=`
+- `RESCALE_ONDEMAND_LICENSE at line 2: Interlink cannot send an on-demand license seller; delete the line`
+- `RESCALE_START_JOB_ON_HOUR at line 2: Interlink cannot set when the job starts; delete the line to use your profile's setting`
+- `RESCALE_ANALYSIS at line 3: given before, at line 2, and Interlink's job runs one analysis`
+- `invalid RESCALE_PRIORITY at line 2: Interlink can set ON_DEMAND or INSTANT, not "RESERVED"`
+- `RESCALE_INBOUND_SSH_CIDR at line 2: it has no value, which rescale-cli sends as an empty setting and Interlink cannot; delete the line to use your profile's setting`
+- `invalid RESCALE_CORES at line 2: "eight" is not a whole number above zero`, and the same for `RESCALE_CORES_PER_SLOT`, `RESCALE_SLOTS` and `RESCALE_WALLTIME` in either spelling. The leading digits are read, so `#RESCALE_WALLTIME 24 # hours` is 24
+- `invalid USE_RESCALE_LICENSE at line 2: want true or false, not "yes"`. With `=`, an empty value turns the license on. Nonempty values `true`, `yes`, `on`, `t` and `y` are accepted case-insensitively; other values are refused: `invalid USE_RESCALE_LICENSE at line 2: rescale-cli turns the license on whatever follows "="; delete the line to leave it off`
+- `invalid RESCALE_ENV_ at line 2: the variable has no name`; a name that would hold `=` is refused too
+- `RESCALE_PROJECT_ID at line 2: you have no project named "Nope" (#RESCALE_PROJECT_ID= takes a project's name, #RESCALE_PROJECT_ID <id> its ID)`
+
+`#RESCALE_AUTO_TERMINATE_CLUSTER` sends no setting. A nonblank value produces the
+warning `RESCALE_AUTO_TERMINATE_CLUSTER at line N is ignored: the platform no longer
+reads this setting`; an empty value produces none. Compat quiet mode (`-q`) suppresses
+the warning. A `#RESCALE_` name Interlink does not know is ignored.
+
+`#RESCALE_USER_DEFINED_LICENSE_SETTINGS` takes the API's object as JSON, with one or
+more feature sets, each listing its features, and sends it as that object, for example
+`{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`.
+Every feature needs a name and a count above zero. A value that is not that object
+(not JSON, cut short, a key the object does not have, text after it, or no feature
+sets) is refused as `invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line N: <reason>;
+write it as {…}`, and so is an empty value in the space spelling; with `=`, an empty
+value sets nothing. A feature without a name or a count above zero, or a set without
+features, is refused before anything is uploaded, for example `invalid
+RESCALE_USER_DEFINED_LICENSE_SETTINGS at line N: license feature "ansys_hpc" needs a
+licenses-per-job count greater than zero`. The job template in the app holds one
+feature set with one feature, so loading a script with any other shape into it is
+refused.
+
+For `jobs submit --script`, six values are required, and a script that leaves one
+unset is rejected naming the directive that would have supplied it: `RESCALE_NAME`,
+`RESCALE_COMMAND`, `RESCALE_ANALYSIS`, `RESCALE_CORES` (the core type, or rescale-cli's
+`RESCALE_CORE_TYPE=`), `RESCALE_CORES_PER_SLOT` (must be > 0; or rescale-cli's
+`RESCALE_CORES=`) and `RESCALE_WALLTIME` (must be > 0). The check is on the values,
 not on the literal directives, so the fallbacks can satisfy it: `#$ -N` or
 `#$ -l rescale_name=` supplies the name, `#$ -l rescale_code=`,
 `rescale_coretype=`, `rescale_cores=` and `rescale_walltime=` the rest, and the
@@ -1757,7 +1826,7 @@ rescale-int daemon run [flags]
 
 **Config File:** `~/.config/rescale/daemon.conf` (macOS/Linux) or `%APPDATA%\Rescale\Interlink\daemon.conf` (Windows — Roaming, unlike `config.csv` and the state file, which live under Local)
 
-The daemon automatically loads settings from the config file. CLI flags override config file values, allowing you to test different settings without modifying the config file. `daemon run` does not consult `daemon.conf`'s `enabled` setting, which is the GUI's **Enable Auto-Download** switch. A `download_folder` in `daemon.conf` must be an absolute path: `daemon run` refuses a relative one, or one starting with `~`, with `download_folder in daemon.conf must be an absolute path, got "results"; choose a folder in the Interlink app or run 'rescale-int daemon config set download_folder <absolute path>'`. A relative `--download-dir` is taken from the folder you run the command in.
+The daemon automatically loads settings from the config file. CLI flags override config file values, allowing you to test different settings without modifying the config file. `daemon run` does not consult `daemon.conf`'s `enabled` setting, which is the GUI's **Enable Auto-Download** switch; switching that off in the app stops a running daemon, as **Stop Auto-Download** does. A `download_folder` in `daemon.conf` must be an absolute path: `daemon run` refuses a relative one, or one starting with `~`, with `download_folder in daemon.conf must be an absolute path, got "results"; choose a folder in the Interlink app or run 'rescale-int daemon config set download_folder <absolute path>'`. A relative `--download-dir` is taken from the folder you run the command in.
 
 **Flags:**
 - `-d, --download-dir string` - Directory to download job outputs to (default: value from `daemon.conf` `download_folder`, falling back to the platform default at `~/Downloads/rescale-jobs` on Unix or `%USERPROFILE%\Downloads\rescale-jobs` on Windows)
@@ -1785,8 +1854,13 @@ work. A second launch refuses with `daemon is already running (PID N)` (on Windo
 `cannot start daemon: Auto-download is already running (PID N)`, followed by how to
 end a daemon an earlier version started), changes nothing and writes no error report. Because every mode writes the PID file,
 `daemon status` sees a foreground daemon too. The file is removed when the daemon
-exits on its own, and a PID file whose process has exited is ignored. Saves of the
-state file take the
+exits on its own, and a PID file whose process is not a running `daemon run` is
+ignored, so a file left by a forced stop no longer blocks a start once its process ID
+names another program: `daemon status` and `daemon stop` then print `No running daemon
+detected.` A daemon started from a renamed copy of `rescale-int`, through a link, or
+with options between `daemon` and `run` holds the file like any other. Where how the
+process was started cannot be read, as for another user's process, the file still
+holds and a start is refused. Saves of the state file take the
 same kind of lock, on `daemon-state.json.lock`.
 
 **Examples:**
@@ -1841,7 +1915,7 @@ run 'rescale-int service uninstall' as administrator.`, and `daemon stop` still 
 your own daemon.
 
 **Flags:**
-- `--force` — if the daemon is not reachable over IPC (e.g. started without `--ipc`), refuses the shutdown or does not exit in time, terminate the process directly using its recorded PID, and wait for it to exit. The process is ended only if it is your own Interlink daemon; on macOS and Linux it is sent SIGTERM first, and SIGKILL if that has not ended it.
+- `--force` — if the daemon is not reachable over IPC (e.g. started without `--ipc`), refuses the shutdown or does not exit in time, terminate the process directly using its recorded PID, and wait for it to exit. The process is ended only if it is your own Interlink daemon, started as `rescale-int daemon run` (or, on macOS and Linux, `rescale-int-gui daemon run`), so a daemon run from a renamed copy, or with options between `daemon` and `run`, is not ended; on macOS and Linux it is sent SIGTERM first, and SIGKILL if that has not ended it.
 
 #### daemon config
 
@@ -2465,7 +2539,7 @@ case-insensitively. (`pur submit-existing --ids` reads no CSV, and
 | `Automations` | Automation IDs, `;`-separated |
 | `ProjectID`, `OrgCode` | Project and organization the job is charged to |
 | `OnDemandLicenseSeller` | On-demand license seller |
-| `LicenseFeatureName`, `LicensesPerJob` | User-defined license feature and how many seats the job takes. `LicensesPerJob` is an integer and fails the load as `row N: invalid LicensesPerJob: <value>` if it is not one. The two columns go together: a name with no positive count, or a non-zero count with no name, fails the job with a message naming which half is missing. Together they produce a single `featureSets` entry, `USER_SPECIFIED_0`, in the job request |
+| `LicenseFeatureName`, `LicensesPerJob` | User-defined license feature and how many seats the job takes. `LicensesPerJob` is an integer and fails the load as `row N: invalid LicensesPerJob: <value>` if it is not one. The two columns go together: a name with no positive count, or a non-zero count with no name, is refused with a message naming which half is missing. `pur run` and `pur resume` refuse such a row as the CSV loads, `--dry-run` included, before anything is archived or uploaded: `job N (<name>): license feature "<feature>" needs a licenses-per-job count greater than zero`, or `job N (<name>): licenses per job is set to <n> but no license feature name was given`. Together they produce a single `featureSets` entry, `USER_SPECIFIED_0`, in the job request |
 | `CIDRRule`, `PublicKey`, `SSHPort` | Inbound SSH access. `CIDRRule` and `PublicKey` are passed through verbatim; `SSHPort` must parse as an integer, and a row that fails fails the load with `row N: invalid SSHPort: <value>` |
 | `NoDecompress`, `IsLowPriority` | Booleans; `true`, `yes` or `1` mean true, anything else false |
 | `Submit` | Whether the created job is also submitted. `yes`, `true`, `submit` or `create_and_submit` submit it; `no`, `false`, `create_only` or `draft` create it and stop. Empty or absent means submit. Matching ignores case and surrounding spaces. Anything else is rejected — see below |
@@ -2594,6 +2668,7 @@ rescale-int pur scan-files --primary <pattern> [flags]
 **Flags:**
 - `-r, --root string` - Root directory to scan (default: current directory)
 - `--primary string` - Primary file pattern, e.g., `*.inp`, or `**/*.inp` to search subfolders too (required)
+- `--recursive` - Search subfolders too, as `**/` in front of `--primary` does; a pattern holding `**` is unchanged
 - `--secondary stringArray` - Secondary file pattern; repeat for multiple. Each entry may end with `:required` (default) or `:optional`. Wildcard `*` is replaced with the primary file's basename. Unlike `--part-dirs`, this is a repeat-only flag: a comma inside one value is part of the pattern, not a separator
 - `-t, --template string` - Template CSV used as the row prototype when generating jobs CSV
 - `-o, --output string` - Output jobs CSV path. A CSV is written only when both `--template` and `--output` are given; `--output` on its own prints the summary and writes nothing
@@ -2606,8 +2681,15 @@ So `--primary "*.inp"` finds only the `.inp` files sitting directly in the root,
 and `--primary "inputs/*.inp"` finds those one level down in `inputs/`. A `**`
 matches any number of folders, so `--primary "**/vasprun.xml"` finds every
 `vasprun.xml` under the root at any depth; that search matches files only, skips
-hidden folders and does not follow links to folders. An absolute
-pattern, or one that climbs out of the root with `..`, is rejected. A match that is
+hidden folders and does not follow links to folders. `--recursive` (**Recursive scan**
+in the PUR tab's file scan) searches a pattern without `**` the same way, as
+`**/<pattern>`, so `--primary "*.xml" --recursive` finds every `.xml` file under the
+root. Because it searches as `**/` does, it never goes through a hidden or linked
+folder, even one the pattern names: `--primary ".hidden/*.xml"` finds the files in
+`.hidden`, and with `--recursive` finds none, failing with `no files found matching
+pattern: **/.hidden/*.xml; a recursive scan does not go into hidden or linked folders`.
+Leave `--recursive` off for such a pattern, or make the hidden folder the `--root`. An
+absolute pattern, or one that climbs out of the root with `..`, is rejected. A match that is
 not a regular file — a directory named `model.inp`, say — is skipped and reported
 rather than failing the job later at tar time.
 
@@ -2651,7 +2733,8 @@ being substituted and not otherwise.
 
 A job name containing tokens is rendered the same way, and an unknown token there
 is an error too. Two files that render to one job name are an error as well,
-naming both files and suggesting `{{index}}` or `{{dir}}`: progress and skip
+naming both files and suggesting `{{index}}` or `{{dir}}` (`{{index}}` alone when the
+job name already uses `{{dir}}`): progress and skip
 messages are reported by job name, so a duplicate would make two jobs
 indistinguishable in the output. A job name with no tokens keeps the `Name_1`,
 `Name_2` numbering. A generation in which every matched file was skipped fails
@@ -2849,7 +2932,7 @@ the contents of any run directory, so a plan that passes is not a promise that
 every job will create.
 
 `pur plan`, `pur run --dry-run` and `pur resume --dry-run` all load the
-configuration before doing anything, so an API key must be resolvable even when
+configuration before they read the jobs CSV, so an API key must be resolvable even when
 the command reaches no network. Without one they stop with
 `failed to load config: API key is required`.
 
@@ -2896,7 +2979,7 @@ printed when `--state` is given.
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file. Optional; without it the run's state lives in memory for the life of the process (see above)
 - `--multipart` - Archive a run directory by its absolute path (`tar -P`) instead of relative to its parent, so runs of the same name coming from different project trees stay distinct inside their archives. It applies to directory archives only, and only when `--flatten-tar` is off — flattening wins, and a row with `LocalInputFiles` is archived under bare filenames whatever this flag says. This is about tar layout only and has nothing to do with multi-part uploads to storage, which happen anyway
-- `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>` to share across all jobs. Because the separator is a comma, a path containing one cannot be expressed here
+- `--common-input-files string` - Comma-separated local files, folders and/or `id:<fileId>` references to share across all jobs. A folder adds every file under it, leaving out hidden files and folders; a hidden file listed by name is included. Here, hidden means a file or folder whose name starts with `.`; Windows hidden attributes do not affect this check. Each file is uploaded once, under its own name, and attached to every job. Because the separator is a comma, a path containing one cannot be expressed here. The entries are checked before anything else, `--dry-run` included (see **Common input files are checked first** below)
 - `--decompress-common` - Decompress common input files on cluster (default: false). This governs the common files only; a job's own inputs follow its `NoDecompress` column, and `ExtraInputFileIDs` are always decompressed. A common file ID that is *already* among a job's own inputs is not attached twice, and the setting that stands is the one the earlier entry carried — so for such a job this flag has no effect
 - `--folder string` - Remote folder path for this batch's uploads, created if missing (e.g. `"sweeps/alpha-beta"`)
 - `--folder-parent string` - Folder ID that `--folder` is resolved beneath (default: My Library). Given on its own, it is the upload target
@@ -2910,7 +2993,7 @@ printed when `--state` is given.
 - `--job-workers int` - Parallel job creation workers (default from config), same rule
 - `--rm-tar-on-success` - Delete local tar after successful upload
 - `--recreate-indeterminate` - Create again every job in the batch whose creation a previous run could not confirm. Use it only after checking the platform for each of them: the flag is batch-wide, and any job that already exists is created a second time
-- `--dry-run` - List the jobs that would run and stop. It loads the configuration and the jobs CSV and prints one line per job — index, name, run directory, core type, walltime and a truncated command — without creating or submitting anything. Its own help calls this "validate and show plan"; what it validates is what loading the inputs enforces anyway — the CSV's own rules, the worker counts and the `Submit` values. It does not run `pur plan`'s remaining per-row checks, so use [`pur plan`](#pur-plan) for those
+- `--dry-run` - List the jobs that would run and stop. It loads the configuration and the jobs CSV and prints one line per job — index, name, run directory, core type, walltime and a truncated command — without creating or submitting anything. Its own help calls this "validate and show plan"; what it validates is what loading the inputs enforces anyway — the common input files, the CSV's own rules, the worker counts, the `Submit` values and the license pairs. It does not run `pur plan`'s remaining per-row checks, so use [`pur plan`](#pur-plan) for those
 
 **What gets archived.** A row with `LocalInputFiles` archives exactly the files
 that column names, under their bare filenames, and `Directory` is not walked for
@@ -2955,12 +3038,33 @@ submits as 2 hours; written back out it becomes `1.0`, which submits as 1. Keep
 the hand-written CSV as the source of truth when the fractions are finer than a
 tenth, rather than a copy some command has rewritten.
 
+**Common input files are checked first.** Before the run starts, before they read the
+jobs CSV, reach the platform or create the upload folder, `pur run` and `pur resume`
+check every `--common-input-files` entry for its file information and file type, and
+expand each folder. The run is refused, naming the entry, for a path whose file
+information cannot be read, a special file, a folder that holds no files once hidden
+ones are left out, an `id:` with no file ID, and two local files that would be uploaded
+under one name:
+
+```
+Error: common input files /data/m1/model.inp and /data/m2/model.inp would both be uploaded as "model.inp"
+```
+
+The other refusals read `common input file <path> cannot be read: <reason>`,
+`common input file <path> is not a regular file`, `common input folder <path> holds
+no files (hidden ones are left out)` and `common input file id: names no file ID`. A
+folder given as a link is followed. Inside a folder, a link to a file is uploaded like
+a file, a link to a folder is refused as `common input file <path> is a directory, not
+a file`, and a subfolder that cannot be read is passed over. The same checks run when
+the PUR tab starts a run. File contents are read during upload, so an unreadable regular
+file can pass this check.
+
 **Common input files transfer once per invocation, not once per batch.** Local
-paths given to `--common-input-files` are uploaded before any row is processed,
-and their file IDs are not recorded in the state file. A resumed run therefore
-uploads them again, even when every job it would attach them to is already done.
-Entries given as `id:<fileId>` are referenced as they are: not uploaded, not
-moved into `--folder`, and not tagged by `--file-tags`.
+files given to `--common-input-files`, those a folder adds included, are uploaded
+before any row is processed, and their file IDs are not recorded in the state file.
+A resumed run therefore uploads them again, even when every job it would attach them
+to is already done. Entries given as `id:<fileId>` are referenced as they are: not
+uploaded, not moved into `--folder`, and not tagged by `--file-tags`.
 
 **Where the archives go.** A batch writes its tar archives to
 `<common parent>/.rescale-int-<hash>/`, where the common parent is the directory
@@ -3048,7 +3152,7 @@ rescale-int pur resume --jobs-csv FILE --state FILE [--multipart]
 - `-j, --jobs-csv string` - Jobs CSV file (required)
 - `-s, --state string` - State file (required)
 - `--multipart` - Archive run directories by absolute path, as for [`pur run`](#pur-run)
-- `--common-input-files string` - Comma-separated local paths and/or `id:<fileId>`
+- `--common-input-files string` - Comma-separated local files, folders and/or `id:<fileId>` references, as for [`pur run`](#pur-run), checked the same way before anything else
 - `--decompress-common` - Decompress common input files on cluster
 - `--folder string` - Remote folder path for this batch's uploads, created if missing
 - `--folder-parent string` - Folder ID that `--folder` is resolved beneath (default: My Library)
@@ -3409,6 +3513,15 @@ rescale-cli submit -i SCRIPT [FILE...] [-E] [-e] [-f GLOB] [-s SEARCH]
 ```
 `-f`, `-s` and `--exclude` filter the download in `-E` (end-to-end) mode.
 
+The script's directives are read as for [`jobs submit --script`](#jobs-submit), in
+Interlink's spelling and in rescale-cli's (`#RESCALE_NAME=job1`), and a directive
+Interlink cannot carry out is refused, naming its line. Where the script leaves a value
+unset, `submit` fills it instead of refusing the script: the name `Unnamed Job`, the
+analysis `user_included`, the core type `emerald`, a walltime of 48 hours, and 1 core,
+or, when `#RESCALE_CORE_TYPE` names a core type and the script gives no core count, the
+first core count that core type offers. `--waive-sla` makes the job low priority;
+without it, the script's `#RESCALE_LOW_PRIORITY` or `#RESCALE_PRIORITY` decides.
+
 **`list-files`** — List files from a running job's cluster
 ```
 rescale-cli list-files -j JOB_ID [-r RUN_ID]
@@ -3460,7 +3573,9 @@ demonstrate.
 4. **Known differences**: `spub` commands are not yet supported. The
    `list-info -d` (desktops), `check-for-update -i` (install available),
    `upload -T` (target) and `upload --copy-to-cfs` flags return "not yet
-   implemented" errors.
+   implemented" errors. In a job script, a core type set, an on-demand license
+   seller, a start hour, a second analysis and a priority other than `ON_DEMAND` or
+   `INSTANT` are refused, naming the line (see [`jobs submit`](#jobs-submit)).
 
 ## Compatibility Reference
 
@@ -3528,7 +3643,7 @@ Every user-facing command but `spub` is implemented.
 | `status` | Implemented | Text and JSON (`-e`) modes, `--load-hours` |
 | `stop` | Implemented | Prints `Job <id> is stopping.` to stdout even under `-q`, matching rescale-cli |
 | `delete` | Implemented | |
-| `submit` | Implemented | SGE parsing; the script is staged as `run.sh` and any additional input files are zipped into `input.zip`, and those two files are what is uploaded. `-E` end-to-end, `-e` JSON transformation |
+| `submit` | Implemented | SGE parsing, in Interlink's directive spelling and rescale-cli's; the script is staged as `run.sh` and any additional input files are zipped into `input.zip`, and those two files are what is uploaded. `-E` end-to-end, `-e` JSON transformation |
 | `upload` | Implemented | Multi-file, `-e` JSON, `-r` report |
 | `download-file` | Implemented | By job+filename, by file-id, by run-id, `-e` metadata |
 | `list-info` | Implemented | Core types (`-c`) and analyses (`-a`) as JSON |
@@ -3541,7 +3656,9 @@ Two details of `submit` are worth knowing before scripting against it.
 `input.zip` is **flat**: every additional input file goes in under its basename,
 with no directory structure and no duplicate check, so two inputs sharing a
 basename become two entries of the same name in the archive. The job's command is
-overridden to `./run.sh` whatever the script was called. And `-e` and `-E` do not
+overridden to `./run.sh` whatever the script was called, and `run.sh` and
+`input.zip` are attached after the files the script's `#RESCALE_EXISTING_FILES`
+names. And `-e` and `-E` do not
 combine:
 `-e` prints the transformed job JSON as soon as the job is submitted and returns
 there, so a run given both gets the JSON and no monitoring and no download.
@@ -3587,6 +3704,8 @@ Compat mode reproduces rescale-cli's output format:
 - The `spub` tree is flat: `spub` plus five placeholder subcommands, all of which
   report the deferral rather than doing the work.
 - `sync` writes no `.rescale` metadata directory (see above).
+- `submit` uploads the script as it is, line endings included, and reads a directive
+  only from a line that begins with it, indentation aside.
 - Ctrl+C does not cancel a compat command. The signal handler prints
   `Received signal interrupt, cancelling...` but leaves the command's context
   alone, so the work in flight runs to completion.
@@ -3925,8 +4044,10 @@ rescale-int upload input.txt --verbose
 
 If a command fails in a way Interlink can report, it writes a diagnostic report
 file. Mistakes you can fix yourself, such as conflicting flags, an output file that
-already exists, or an upload refused by another transfer's lock, print only the
-error and write no report. Credentials in a report are redacted.
+already exists, a jobs CSV row with half a license pair or a `Submit` value Interlink
+cannot read, a job script that `jobs submit --script` refuses, or an upload refused by
+another transfer's lock, print only the error and write no report. Credentials in a
+report are redacted.
 Look for it under `%LOCALAPPDATA%\Rescale\Interlink\reports` on Windows,
 `~/Library/Application Support/rescale/reports` on macOS and
 `~/.config/rescale/reports` on Linux — where, unlike the config file, the
