@@ -41,12 +41,9 @@ type fakeConfig struct {
 
 func (f fakeConfig) LoadUserDaemonConfig() (*config.DaemonConfig, error) { return f.cfg, nil }
 
-type fakeIdentity struct {
-	sid, username string
-}
+type fakeIdentity struct{ sid string }
 
-func (f fakeIdentity) CurrentSID() string      { return f.sid }
-func (f fakeIdentity) CurrentUsername() string { return f.username }
+func (f fakeIdentity) CurrentSID() string { return f.sid }
 
 func newEnabledConfig() *config.DaemonConfig {
 	return &config.DaemonConfig{
@@ -278,18 +275,14 @@ func TestCompute(t *testing.T) {
 			},
 		},
 		{
-			// The matching user is found by SID, not by list position.
 			name: "running user matched by SID",
 			now:  time.Unix(0, 0),
 			ipc: fakeIPC{
-				status: &ipc.StatusData{ServiceState: "running"},
-				users: []ipc.UserStatus{
-					{Username: "other", SID: "S-1-0-0-1", State: "paused"},
-					{Username: "alice", SID: "S-1-0-0-2", State: "running", JobsDownloaded: 5},
-				},
+				status: &ipc.StatusData{},
+				users:  []ipc.UserStatus{{Username: "alice", SID: "S-1-0-0-2", State: "running", JobsDownloaded: 5}},
 			},
 			cfg:      newEnabledConfig(),
-			identity: fakeIdentity{sid: "S-1-0-0-2", username: "alice"},
+			identity: fakeIdentity{sid: "S-1-0-0-2"},
 			validate: func(t *testing.T, s State) {
 				if s.PerUser != PerUserRunning {
 					t.Errorf("PerUser = %v, want PerUserRunning", s.PerUser)
@@ -300,20 +293,15 @@ func TestCompute(t *testing.T) {
 			},
 		},
 		{
+			// A daemon of an earlier version can send the text without its code.
 			name: "error text is reverse-looked-up to a code",
 			now:  time.Unix(0, 0),
 			ipc: fakeIPC{
-				status: &ipc.StatusData{ServiceState: "running"},
-				users: []ipc.UserStatus{
-					{Username: "alice", State: "error", LastError: ipc.CanonicalText[ipc.CodeNoAPIKey]},
-				},
+				status: &ipc.StatusData{LastError: ipc.CanonicalText[ipc.CodeNoAPIKey]},
+				users:  []ipc.UserStatus{{Username: "alice", State: "running"}},
 			},
-			cfg:      newEnabledConfig(),
-			identity: fakeIdentity{username: "alice"},
+			cfg: newEnabledConfig(),
 			validate: func(t *testing.T, s State) {
-				if s.PerUser != PerUserError {
-					t.Errorf("PerUser = %v, want PerUserError", s.PerUser)
-				}
 				if s.LastErrorCode != ipc.CodeNoAPIKey {
 					t.Errorf("LastErrorCode = %q, want %q (reverse-looked-up from canonical text)",
 						s.LastErrorCode, ipc.CodeNoAPIKey)
@@ -326,16 +314,13 @@ func TestCompute(t *testing.T) {
 			name: "explicit error code beats reverse lookup",
 			now:  time.Unix(0, 0),
 			ipc: fakeIPC{
-				status: &ipc.StatusData{ServiceState: "running"},
-				users: []ipc.UserStatus{{
-					Username:  "alice",
-					State:     "error",
-					LastError: "some evolved wording",
-					ErrorCode: ipc.CodeDownloadFolderInaccessible,
-				}},
+				status: &ipc.StatusData{
+					LastError:     ipc.CanonicalText[ipc.CodeNoAPIKey],
+					LastErrorCode: ipc.CodeDownloadFolderInaccessible,
+				},
+				users: []ipc.UserStatus{{Username: "alice", State: "running"}},
 			},
-			cfg:      newEnabledConfig(),
-			identity: fakeIdentity{username: "alice"},
+			cfg: newEnabledConfig(),
 			validate: func(t *testing.T, s State) {
 				if s.LastErrorCode != ipc.CodeDownloadFolderInaccessible {
 					t.Errorf("LastErrorCode = %q, want explicit CodeDownloadFolderInaccessible", s.LastErrorCode)
@@ -351,15 +336,13 @@ func TestCompute(t *testing.T) {
 			now:  time.Unix(1700000060, 0),
 			ipc: fakeIPC{
 				status: &ipc.StatusData{
-					ServiceState:  "running",
 					LastError:     ipc.CanonicalText[ipc.CodeScanFailed] + ": list jobs failed: 503",
 					LastErrorCode: ipc.CodeScanFailed,
 					LastErrorTime: &errAt,
 				},
 				users: []ipc.UserStatus{{Username: "alice", State: "running"}},
 			},
-			cfg:      newEnabledConfig(),
-			identity: fakeIdentity{username: "alice"},
+			cfg: newEnabledConfig(),
 			validate: func(t *testing.T, s State) {
 				if s.PerUser != PerUserRunning {
 					t.Errorf("PerUser = %v, want PerUserRunning (a failed scan is not a dead daemon)", s.PerUser)
@@ -428,98 +411,30 @@ func TestCompute_PendingTimeoutPromotesToError(t *testing.T) {
 	}
 }
 
-// --- matchesWindowsUsername ---
-
-func TestMatchesWindowsUsername(t *testing.T) {
-	cases := []struct {
-		a, b string
-		want bool
-	}{
-		{"alice", "alice", true},
-		{"Alice", "alice", true},
-		{"DOMAIN\\alice", "alice", true},
-		{"alice", "BOB", false},
-		{"", "alice", false},
-		{"alice", "", false},
-		// UPN: a domain on one side only, or domains that agree.
-		{"jdoe@corp.example.com", "jdoe", true},
-		{"CORP\\jdoe", "JDoe@Corp.Example.com", true},
-		{"jdoe@corp.example.com", "jdoe@CORP.example.com", true},
-		{"CORP\\jdoe", "jdoe", true},
-		// Conflicting domains.
-		{"jdoe@corp.example.com", "jdoe@other.example.com", false},
-		{"jdoe@corp.example.com", "jdoe@corp.example.org", false},
-		{"OTHER\\jdoe", "jdoe@corp.example.com", false},
-		{"CORP\\jdoe", "WORKSTATION\\jdoe", false},
-		// Malformed UPNs and empty names never match, not even each other.
-		{"@corp.example.com", "@corp.example.com", false},
-		{"@corp.example.com", "@other.example.com", false},
-		{"jdoe@", "jdoe", false},
-		{"jdoe@corp@example.com", "jdoe", false},
-		{"CORP\\", "OTHER\\", false},
-		{"CORP\\", "CORP\\", false},
-		{"  ", " ", false},
-		// Case and space around the name are not part of it.
-		{"CORP\\ JDoe ", "corp\\jdoe", true},
-		// Display names, as before.
-		{"Jane Doe", "jane doe", true},
-		{"CORP\\Jane Doe", " Jane Doe ", true},
-		{"jdoe.CORP", "CORP\\jdoe", false},
-	}
-	for _, tc := range cases {
-		for _, c := range [][2]string{{tc.a, tc.b}, {tc.b, tc.a}} {
-			if got := matchesWindowsUsername(c[0], c[1]); got != tc.want {
-				t.Errorf("matchesWindowsUsername(%q,%q)=%v, want %v", c[0], c[1], got, tc.want)
-			}
-		}
-	}
-}
-
-// TestMatchUser pins which IPC entry is the caller's: an exact SID match
-// anywhere in the list beats any name match, a name never overrides a SID that
-// differs, and the single entry a single-user daemon reports is taken only when
-// nothing about it says it is someone else's.
+// TestMatchUser pins which IPC entry is the caller's: a daemon serves one user
+// and reports one entry, which is ours unless it names another SID.
 func TestMatchUser(t *testing.T) {
-	const mine, theirs, third = "S-1-5-21-1000000001-1000000002-1000000003-1001", "S-1-5-21-1000000001-1000000002-1000000003-1002", "S-1-5-21-1000000001-1000000002-1000000003-1003"
-	me := fakeIdentity{sid: mine, username: "CORP\\jdoe"}
+	const mine, theirs = "S-1-5-21-1000000001-1000000002-1000000003-1001", "S-1-5-21-1000000001-1000000002-1000000003-1002"
+	me := fakeIdentity{sid: mine}
 	tests := []struct {
 		name     string
 		identity fakeIdentity
 		users    []ipc.UserStatus
-		want     int // index into users, or -1 for no match
+		want     bool
 	}{
-		{"SID match after a SID-less name match", me, []ipc.UserStatus{{Username: "jdoe"}, {Username: "other", SID: mine}}, 1},
-		{"SID match before a SID-less name match", me, []ipc.UserStatus{{Username: "other", SID: mine}, {Username: "jdoe"}}, 0},
-		{"SID match after a name match with another SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}, {Username: "jdoe.CORP", SID: mine}}, 1},
-		{"a name does not override a different SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}, {Username: "other", SID: third}}, -1},
-		{"name match when the entry has no SID", fakeIdentity{sid: mine, username: "jdoe@corp.example.com"}, []ipc.UserStatus{{Username: "other"}, {Username: "jdoe"}}, 1},
-		{"name match when the caller has no SID", fakeIdentity{username: "jdoe"}, []ipc.UserStatus{{Username: "other", SID: theirs}, {Username: "CORP\\jdoe", SID: mine}}, 1},
-		{"no match among conflicting domains", fakeIdentity{username: "jdoe@corp.example.com"}, []ipc.UserStatus{{Username: "jdoe@other.example.com"}, {Username: "OTHER\\jdoe"}}, -1},
-		{"no entries", me, nil, -1},
-
-		// The single entry of a single-user daemon.
-		{"single entry with our SID", me, []ipc.UserStatus{{Username: "unknown", SID: mine}}, 0},
-		{"single entry with our name", me, []ipc.UserStatus{{Username: "jdoe"}}, 0},
-		{"single entry with neither SID nor name", me, []ipc.UserStatus{{}}, 0},
-		{"single entry with a different SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}}, -1},
-		{"single entry with a different SID and no name", me, []ipc.UserStatus{{SID: theirs}}, -1},
-		{"single entry with another name", me, []ipc.UserStatus{{Username: "other"}}, -1},
-		{"single entry in a conflicting domain", fakeIdentity{sid: mine, username: "jdoe@corp.example.com"}, []ipc.UserStatus{{Username: "jdoe@other.example.com"}}, -1},
-		{"single entry with a malformed UPN", me, []ipc.UserStatus{{Username: "@corp.example.com"}}, -1},
-		{"single entry with a domain and no name", me, []ipc.UserStatus{{Username: "CORP\\"}}, -1},
-		{"single entry with a display name", fakeIdentity{sid: mine, username: "Jane Doe"}, []ipc.UserStatus{{Username: "jane doe"}}, 0},
-		{"single entry whose name is only spaces", me, []ipc.UserStatus{{Username: "  "}}, 0},
-		{"SID match ignores case", me, []ipc.UserStatus{{Username: "other", SID: strings.ToLower(mine)}}, 0},
+		{"our SID", me, []ipc.UserStatus{{Username: "jdoe", SID: mine}}, true},
+		{"our SID in another case", me, []ipc.UserStatus{{SID: strings.ToLower(mine)}}, true},
+		{"no SID, whatever the name, as on macOS and Linux", me, []ipc.UserStatus{{Username: "someone"}}, true},
+		{"we have no SID", fakeIdentity{}, []ipc.UserStatus{{SID: theirs}}, true},
+		{"another SID", me, []ipc.UserStatus{{Username: "jdoe", SID: theirs}}, false},
+		{"no entries", me, nil, false},
+		{"more than one entry", me, []ipc.UserStatus{{SID: mine}, {SID: mine}}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := (&Computer{Identity: tt.identity}).matchUser(tt.users)
-			want := (*ipc.UserStatus)(nil)
-			if tt.want >= 0 {
-				want = &tt.users[tt.want]
-			}
-			if got != want {
-				t.Fatalf("matchUser = %+v, want %+v", got, want)
+			if (got != nil) != tt.want || got != nil && got != &tt.users[0] {
+				t.Fatalf("matchUser = %+v, want the entry: %v", got, tt.want)
 			}
 		})
 	}

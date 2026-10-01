@@ -1,7 +1,5 @@
 //go:build !windows
 
-// Package ipc provides inter-process communication between the daemon
-// and the GUI application using Unix domain sockets.
 package ipc
 
 import (
@@ -16,57 +14,6 @@ import (
 
 	"github.com/rescale/rescale-int/internal/logging"
 )
-
-const maxIPCMessageSize = 1 << 20 // 1MB - bounds IPC message reads to prevent OOM
-
-// ServiceHandler defines the interface for daemon operations.
-// The daemon implements this to handle IPC requests.
-type ServiceHandler interface {
-	// GetStatus returns the current daemon status.
-	GetStatus() *StatusData
-
-	// GetUserList returns the list of user daemon statuses.
-	// On Unix single-user mode, returns a single user.
-	GetUserList() []UserStatus
-
-	// PauseUser pauses auto-download.
-	PauseUser(userID string) error
-
-	// ResumeUser resumes auto-download.
-	ResumeUser(userID string) error
-
-	// TriggerScan triggers an immediate job scan.
-	TriggerScan(userID string) error
-
-	// OpenLogs opens the log viewer.
-	OpenLogs(userID string) error
-
-	// Shutdown gracefully stops the daemon.
-	// This is supported on Unix (unlike Windows where SCM handles it).
-	Shutdown() error
-
-	// GetRecentLogs returns recent log entries from the daemon, which serves
-	// one user, so userID is ignored.
-	GetRecentLogs(userID string, count int) []LogEntryData
-
-	// ReloadConfig requests daemon config reload. It returns the active
-	// download count for the GUI to decide when to restart the daemon.
-	ReloadConfig(userID string) *ReloadConfigData
-
-	// GetTransferStatus returns a snapshot of the daemon's transfer queue
-	// filtered to SourceLabel=Daemon. Replaces the old TransferStatusData
-	// shape with a GUI-aligned tasks+batches projection.
-	GetTransferStatus(userID string) (*DaemonTransferSnapshot, error)
-
-	// CancelDaemonBatch cancels non-terminal tasks in a daemon batch.
-	CancelDaemonBatch(userID, batchID string) error
-
-	// CancelDaemonTransfer cancels one daemon task.
-	CancelDaemonTransfer(userID, taskID string) error
-
-	// RetryFailedInDaemonBatch retries failed tasks in a daemon batch.
-	RetryFailedInDaemonBatch(userID, batchID string) error
-}
 
 // Server handles IPC requests from clients via Unix domain socket.
 type Server struct {
@@ -164,35 +111,6 @@ func (s *Server) GetSocketPath() string {
 	return s.socketPath
 }
 
-// acceptLoop accepts incoming connections.
-func (s *Server) acceptLoop() {
-	defer s.wg.Done()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-		}
-
-		// Accept with timeout to allow checking context
-		conn, err := s.listener.Accept()
-		if err != nil {
-			select {
-			case <-s.ctx.Done():
-				return
-			default:
-				s.logger.Warn().Err(err).Msg("Failed to accept IPC connection")
-				continue
-			}
-		}
-
-		// Handle connection in goroutine
-		s.wg.Add(1)
-		go s.handleConnection(conn)
-	}
-}
-
 // handleConnection processes a single client connection.
 func (s *Server) handleConnection(conn net.Conn) {
 	defer s.wg.Done()
@@ -269,20 +187,6 @@ func (s *Server) handleRequest(req *Request) *Response {
 		}
 		return NewOKResponse()
 
-	case MsgOpenLogs:
-		userID := req.UserID
-		if userID == "" {
-			userID = "service"
-		}
-		if err := s.handler.OpenLogs(userID); err != nil {
-			return NewErrorResponse(err.Error())
-		}
-		return NewOKResponse()
-
-	case MsgOpenGUI:
-		// GUI opening is handled by the caller, not the daemon
-		return NewOKResponse()
-
 	case MsgGetRecentLogs:
 		logs := s.handler.GetRecentLogs(req.UserID, 100) // Default to 100 entries
 		return NewRecentLogsResponse(logs)
@@ -333,22 +237,5 @@ func (s *Server) handleRequest(req *Request) *Response {
 
 	default:
 		return NewErrorResponse(fmt.Sprintf("unknown message type: %s", req.Type))
-	}
-}
-
-// sendResponse sends a response to the client.
-func (s *Server) sendResponse(conn net.Conn, resp *Response) {
-	data, err := resp.Encode()
-	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to encode IPC response")
-		return
-	}
-
-	// Append newline delimiter
-	data = append(data, '\n')
-
-	_, err = conn.Write(data)
-	if err != nil {
-		s.logger.Warn().Err(err).Msg("Failed to send IPC response")
 	}
 }

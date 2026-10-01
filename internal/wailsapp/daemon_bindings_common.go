@@ -6,10 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/pathutil"
+	"github.com/rescale/rescale-int/internal/service"
+	"github.com/rescale/rescale-int/internal/version"
 )
 
 // DaemonStatusDTO represents the daemon status for the frontend.
@@ -57,9 +61,6 @@ type DaemonStatusDTO struct {
 	// that just failed from one that failed hours ago and never recovered.
 	LastErrorTime string `json:"lastErrorTime,omitempty"`
 
-	// UserConfigured indicates if this user has daemon.conf with enabled=true
-	UserConfigured bool `json:"userConfigured"`
-
 	// UserState is the user-specific state: "not_configured", "pending", "running", "paused", "stopped", "error"
 	UserState string `json:"userState"`
 
@@ -67,9 +68,83 @@ type DaemonStatusDTO struct {
 	// user's state, suitable for rendering verbatim in the GUI. Same across
 	// every surface via service.Presentation.
 	UserStateDetail string `json:"userStateDetail,omitempty"`
+}
 
-	// UserRegistered indicates if service has this user registered (daemon.conf was found by service)
-	UserRegistered bool `json:"userRegistered"`
+// GetDaemonStatus returns the current daemon status, derived from the
+// shared service.Computer (see internal/service/state.go). This is the
+// primary method for the frontend to check daemon state.
+func (a *App) GetDaemonStatus() DaemonStatusDTO {
+	comp := a.ensureStateComputer()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	a.stateMu.Lock()
+	prior := a.priorState
+	a.stateMu.Unlock()
+
+	st := comp.Compute(ctx, prior)
+
+	a.stateMu.Lock()
+	a.priorState = st
+	a.stateMu.Unlock()
+
+	pres := st.Presentation()
+	pid := daemon.IsDaemonRunning()
+
+	userState := "not_configured"
+	switch st.PerUser {
+	case service.PerUserPending:
+		userState = "pending"
+	case service.PerUserRunning:
+		userState = "running"
+	case service.PerUserPaused:
+		userState = "paused"
+	case service.PerUserError:
+		userState = "error"
+	}
+
+	// The State field keeps the older "running"/"paused"/"stopped"/"error"/
+	// "pending" vocabulary.
+	legacyState := "stopped"
+	switch st.PerUser {
+	case service.PerUserRunning:
+		legacyState = "running"
+	case service.PerUserPaused:
+		legacyState = "paused"
+	case service.PerUserError:
+		legacyState = "error"
+	case service.PerUserPending:
+		legacyState = "pending"
+	}
+
+	lastScan := ""
+	if st.LastScanTime != nil && !st.LastScanTime.IsZero() {
+		lastScan = st.LastScanTime.Format(time.RFC3339)
+	}
+
+	lastErrorTime := ""
+	if st.LastErrorTime != nil && !st.LastErrorTime.IsZero() {
+		lastErrorTime = st.LastErrorTime.Format(time.RFC3339)
+	}
+
+	return DaemonStatusDTO{
+		Running:         st.IPCConnected || pid != 0,
+		PID:             pid,
+		IPCConnected:    st.IPCConnected,
+		State:           legacyState,
+		Version:         version.Version,
+		Uptime:          st.Uptime,
+		LastScan:        lastScan,
+		ActiveDownloads: st.ActiveDownloads,
+		JobsDownloaded:  st.JobsDownloaded,
+		DownloadFolder:  st.DownloadFolder,
+		Error:           st.LastError,
+		ErrorCode:       string(st.LastErrorCode),
+		LastErrorTime:   lastErrorTime,
+		UserState:       userState,
+		UserStateDetail: pres.GUILongForm,
+	}
 }
 
 // ReloadConfigResultDTO represents the result of a config reload request from the frontend.
@@ -89,12 +164,12 @@ type PreFlightResultDTO struct {
 }
 
 // ValidateAutoDownloadPreFlight checks prerequisites before enabling auto-download.
-// Only checks API key and folder — not service/IPC, since user may configure first.
+// Only checks API key and folder — not the daemon, since the user may configure first.
 func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResultDTO {
 	result := PreFlightResultDTO{}
 
 	// Check API key
-	apiKey := config.ResolveAPIKeyForCurrentUser("")
+	apiKey := config.ResolveAPIKey("")
 	if apiKey != "" {
 		result.APIKeyOK = true
 	} else {
@@ -109,7 +184,7 @@ func (a *App) ValidateAutoDownloadPreFlight(downloadFolder string) PreFlightResu
 		downloadFolder = config.DefaultDownloadFolder()
 	}
 	if downloadFolder != "" {
-		if res := pathutil.ValidateWritablePath(downloadFolder, pathutil.ConsumerCurrentUser); res.Reachable {
+		if res := pathutil.ValidateWritablePath(downloadFolder); res.Reachable {
 			result.FolderOK = true
 		} else {
 			result.FolderError = fmt.Sprintf("%s: %s",
@@ -128,12 +203,7 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	path, _ := config.DefaultDaemonConfigPath()
 	result.ConfigPath = path
 
-	// Load config
-	cfg, err := config.LoadDaemonConfig("")
-	if err != nil {
-		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf: %v", err))
-		cfg = config.NewDaemonConfig()
-	}
+	cfg := a.loadDaemonConfig()
 
 	// Map to DTO
 	result.Enabled = cfg.Daemon.Enabled
@@ -154,6 +224,185 @@ func (a *App) GetDaemonConfig() DaemonConfigDTO {
 	result.NotificationsEnabled = cfg.Notifications.Enabled
 	result.ShowDownloadComplete = cfg.Notifications.ShowDownloadComplete
 	result.ShowDownloadFailed = cfg.Notifications.ShowDownloadFailed
+
+	return result
+}
+
+// DaemonConfigDTO represents the daemon configuration for the frontend.
+type DaemonConfigDTO struct {
+	// Daemon core settings
+	Enabled             bool   `json:"enabled"`
+	DownloadFolder      string `json:"downloadFolder"`
+	PollIntervalMinutes int    `json:"pollIntervalMinutes"`
+	UseJobNameDir       bool   `json:"useJobNameDir"`
+	MaxConcurrent       int    `json:"maxConcurrent"`
+	LookbackDays        int    `json:"lookbackDays"`
+
+	// Workspace folder scanning
+	IncludeWorkspaceFolders bool `json:"includeWorkspaceFolders"`
+	FlattenFolderStructure  bool `json:"flattenFolderStructure"`
+
+	// Filter settings
+	NamePrefix   string `json:"namePrefix"`
+	NameContains string `json:"nameContains"`
+	Exclude      string `json:"exclude"` // Comma-separated
+
+	// Eligibility
+	AutoDownloadTag string `json:"autoDownloadTag"` // Tag for "Conditional" jobs
+
+	// Notifications
+	NotificationsEnabled bool `json:"notificationsEnabled"`
+	ShowDownloadComplete bool `json:"showDownloadComplete"`
+	ShowDownloadFailed   bool `json:"showDownloadFailed"`
+
+	// Config file path (read-only)
+	ConfigPath string `json:"configPath"`
+}
+
+// SaveDaemonConfig saves daemon configuration to daemon.conf.
+func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
+	// Load existing config to preserve any fields not in DTO
+	cfg := a.loadDaemonConfig()
+
+	// Map DTO to config
+	cfg.Daemon.Enabled = dto.Enabled
+	cfg.Daemon.DownloadFolder = dto.DownloadFolder
+	cfg.Daemon.PollIntervalMinutes = dto.PollIntervalMinutes
+	cfg.Daemon.UseJobNameDir = dto.UseJobNameDir
+	cfg.Daemon.MaxConcurrent = dto.MaxConcurrent
+	cfg.Daemon.LookbackDays = dto.LookbackDays
+	cfg.Daemon.IncludeWorkspaceFolders = dto.IncludeWorkspaceFolders
+	cfg.Daemon.FlattenFolderStructure = dto.FlattenFolderStructure
+
+	cfg.Filters.NamePrefix = dto.NamePrefix
+	cfg.Filters.NameContains = dto.NameContains
+	cfg.Filters.Exclude = dto.Exclude
+
+	cfg.Eligibility.AutoDownloadTag = dto.AutoDownloadTag
+
+	cfg.Notifications.Enabled = dto.NotificationsEnabled
+	cfg.Notifications.ShowDownloadComplete = dto.ShowDownloadComplete
+	cfg.Notifications.ShowDownloadFailed = dto.ShowDownloadFailed
+
+	// Validate before saving, and before the probe below creates the folder.
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
+	// Refuse a folder the user's own daemon could not create or write.
+	if result := pathutil.ValidateWritablePath(dto.DownloadFolder); !result.Reachable {
+		return fmt.Errorf("%s: %s",
+			ipc.CanonicalText[result.ErrorCode], result.Reason)
+	}
+
+	// Persist config.csv + token alongside daemon.conf so every identity
+	// that later reads any of these files sees consistent state.
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		return err
+	}
+
+	// Save daemon.conf.
+	if err := config.SaveDaemonConfig(cfg, ""); err != nil {
+		return fmt.Errorf("failed to save daemon.conf: %w", err)
+	}
+
+	a.logInfo("Daemon", "Configuration saved to daemon.conf")
+
+	// If a daemon answers, ask it to poll now rather than at its next interval.
+	if dto.Enabled {
+		client := ipc.NewClient()
+		client.SetTimeout(3 * time.Second)
+		ctx := context.Background()
+		if client.IsServiceRunning(ctx) {
+			if err := a.TriggerProfileRescan(); err != nil {
+				a.logWarn("Daemon", fmt.Sprintf("Poll after save failed (non-fatal): %v", err))
+			}
+		}
+	}
+	return nil
+}
+
+// TestAutoDownloadConnection tests API connectivity and folder access for auto-download.
+func (a *App) TestAutoDownloadConnection(downloadFolder string) {
+	go func() {
+		result := struct {
+			Success     bool   `json:"success"`
+			Email       string `json:"email,omitempty"`
+			FolderOK    bool   `json:"folderOk"`
+			FolderError string `json:"folderError,omitempty"`
+			Error       string `json:"error,omitempty"`
+		}{}
+
+		// Test API connection using the main config's API client
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if a.engine != nil && a.engine.API() != nil {
+			profile, err := a.engine.API().GetUserProfile(ctx)
+			if err != nil {
+				result.Error = "API connection failed: " + err.Error()
+				runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
+				return
+			}
+			result.Success = true
+			result.Email = profile.Email
+		} else {
+			result.Error = "No API client configured - please test connection in Setup tab first"
+			runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
+			return
+		}
+
+		// The same probe as pre-flight and save.
+		if downloadFolder != "" {
+			res := pathutil.ValidateWritablePath(downloadFolder)
+			result.FolderOK, result.FolderError = res.Reachable, res.Reason
+		}
+
+		runtime.EventsEmit(a.ctx, "interlink:autodownload_test_result", result)
+	}()
+}
+
+// ReloadDaemonConfig restarts the running daemon so that it takes the saved
+// configuration, or defers while it downloads.
+func (a *App) ReloadDaemonConfig() ReloadConfigResultDTO {
+	result := ReloadConfigResultDTO{}
+
+	// Persist in-memory config to disk before the daemon reloads it.
+	if err := a.ensureAllConfigPersisted(); err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+
+	if !client.IsServiceRunning(ctx) {
+		result.Error = "daemon not running"
+		return result
+	}
+
+	data, err := client.ReloadConfig(ctx)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	if data.Applied {
+		a.logInfo("Daemon", "Config reload accepted — restarting daemon for new config")
+		if err := a.StopDaemon(); err != nil {
+			result.Error = fmt.Sprintf("failed to stop daemon for restart: %v", err)
+			return result
+		}
+		time.Sleep(500 * time.Millisecond)
+		if err := a.StartDaemon(); err != nil {
+			result.Error = fmt.Sprintf("daemon stopped but failed to restart: %v", err)
+			return result
+		}
+		result.Applied = true
+	} else if data.Deferred {
+		result.Deferred = true
+		result.ActiveDownloads = data.ActiveDownloads
+	}
 
 	return result
 }
@@ -297,10 +546,8 @@ type DaemonTransferSnapshotDTO struct {
 	Batches []DaemonBatchStatsDTO   `json:"batches"`
 }
 
-// daemonReachable reports whether there's a daemon we can talk to via IPC
-// — either a subprocess PID (non-service) or the Windows service, when
-// applicable. Unified helper used by all Plan 3 daemon bindings so service
-// mode no longer gets short-circuited by daemon.IsDaemonRunning()==0.
+// daemonReachable reports whether this user's daemon may answer over IPC: its
+// PID file names a live process, or it answers.
 func (a *App) daemonReachable(ctx context.Context, client *ipc.Client) bool {
 	if daemon.IsDaemonRunning() != 0 {
 		return true
@@ -340,6 +587,149 @@ func (a *App) RetryFailedInDaemonBatch(batchID string) error {
 		return fmt.Errorf("daemon not reachable")
 	}
 	return client.RetryFailedInDaemonBatch(ctx, "", batchID)
+}
+
+// TriggerDaemonScan triggers an immediate job scan.
+func (a *App) TriggerDaemonScan() error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon is not running")
+	}
+	if err := client.TriggerScan(ctx, ""); err != nil {
+		return fmt.Errorf("failed to trigger scan: %w", err)
+	}
+	a.logInfo("Daemon", "Scan triggered")
+	return nil
+}
+
+// PauseDaemon pauses the daemon's auto-download polling.
+func (a *App) PauseDaemon() error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon is not running")
+	}
+	if err := client.PauseUser(ctx, ""); err != nil {
+		return fmt.Errorf("failed to pause daemon: %w", err)
+	}
+	a.logInfo("Daemon", "Daemon paused")
+	return nil
+}
+
+// ResumeDaemon resumes the daemon's auto-download polling.
+func (a *App) ResumeDaemon() error {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return fmt.Errorf("daemon is not running")
+	}
+	if err := client.ResumeUser(ctx, ""); err != nil {
+		return fmt.Errorf("failed to resume daemon: %w", err)
+	}
+	a.logInfo("Daemon", "Daemon resumed")
+	return nil
+}
+
+// TriggerProfileRescan asks the user's running daemon to poll for completed
+// jobs now, as TriggerDaemonScan does; the frontend calls both.
+func (a *App) TriggerProfileRescan() error {
+	return a.TriggerDaemonScan()
+}
+
+// GetDaemonTransferSnapshot retrieves a point-in-time view of daemon
+// transfers (tasks + batches) via IPC. Frontend merges these into the
+// main Transfers tab's unified tasks/batches arrays; daemon rows render
+// with a Daemon badge.
+func (a *App) GetDaemonTransferSnapshot() *DaemonTransferSnapshotDTO {
+	client := ipc.NewClient()
+	client.SetTimeout(3 * time.Second)
+	ctx := context.Background()
+
+	if !a.daemonReachable(ctx, client) {
+		return &DaemonTransferSnapshotDTO{}
+	}
+
+	data, err := client.GetTransferStatus(ctx)
+	if err != nil {
+		// Without this log line, an IPC auth regression looks like an
+		// empty Transfers tab in the UI. Surface the failure to the file
+		// logger + Activity tab so it is diagnosable.
+		a.logWarn("daemon", "GetTransferStatus failed: "+err.Error())
+		return &DaemonTransferSnapshotDTO{}
+	}
+	if data == nil {
+		return &DaemonTransferSnapshotDTO{}
+	}
+
+	out := &DaemonTransferSnapshotDTO{
+		Tasks:   make([]DaemonTransferTaskDTO, 0, len(data.Tasks)),
+		Batches: make([]DaemonBatchStatsDTO, 0, len(data.Batches)),
+	}
+	for _, t := range data.Tasks {
+		out.Tasks = append(out.Tasks, DaemonTransferTaskDTO{
+			ID: t.ID, Type: t.Type, State: t.State, Name: t.Name,
+			Source: t.Source, Dest: t.Dest, Size: t.Size,
+			Progress: t.Progress, Speed: t.Speed, Error: t.Error,
+			SourceLabel: t.SourceLabel, BatchID: t.BatchID, BatchLabel: t.BatchLabel,
+			CreatedAt: t.CreatedAt, StartedAt: t.StartedAt, CompletedAt: t.CompletedAt,
+		})
+	}
+	for _, b := range data.Batches {
+		out.Batches = append(out.Batches, DaemonBatchStatsDTO{
+			BatchID: b.BatchID, BatchLabel: b.BatchLabel, Direction: b.Direction,
+			SourceLabel: b.SourceLabel,
+			Total:       b.Total, Queued: b.Queued, Active: b.Active,
+			Completed: b.Completed, Failed: b.Failed, Cancelled: b.Cancelled,
+			TotalBytes: b.TotalBytes, Progress: b.Progress, Speed: b.Speed,
+			TotalKnown: b.TotalKnown, StartedAt: b.StartedAt,
+		})
+	}
+	return out
+}
+
+// GetDaemonLogs retrieves recent log entries from the running daemon.
+func (a *App) GetDaemonLogs(count int) []DaemonLogEntryDTO {
+	client := ipc.NewClient()
+	client.SetTimeout(5 * time.Second)
+	ctx := context.Background()
+	if !a.daemonReachable(ctx, client) {
+		return nil
+	}
+
+	logs, err := client.GetRecentLogs(ctx, count)
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to get daemon logs: %v", err))
+		return nil
+	}
+
+	// Convert to DTO
+	result := make([]DaemonLogEntryDTO, len(logs))
+	for i, log := range logs {
+		result[i] = DaemonLogEntryDTO{
+			Timestamp: log.Timestamp,
+			Level:     log.Level,
+			Stage:     log.Stage,
+			Message:   log.Message,
+			Fields:    log.Fields,
+		}
+	}
+
+	return result
+}
+
+// loadDaemonConfig returns daemon.conf, or its defaults when it cannot be
+// read, as 'daemon run' does.
+func (a *App) loadDaemonConfig() *config.DaemonConfig {
+	cfg, err := config.LoadDaemonConfig("")
+	if err != nil {
+		a.logWarn("Daemon", fmt.Sprintf("Failed to load daemon.conf, using defaults: %v", err))
+		return config.NewDaemonConfig()
+	}
+	return cfg
 }
 
 // DaemonLogEntryDTO represents a log entry from the daemon.

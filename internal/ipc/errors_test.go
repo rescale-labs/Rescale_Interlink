@@ -66,11 +66,12 @@ func TestCodeFromCanonicalTextUnknown(t *testing.T) {
 
 // Every text and hint, as the surfaces compose them, names the controls the
 // app has: auto-download runs in the user's own session, not as a service,
-// and the API key is set in API Configuration.
+// nothing raises a UAC prompt, and elevation cannot help a daemon that runs as
+// the user; the API key is set in API Configuration.
 func TestTextsNameCurrentControls(t *testing.T) {
 	for _, code := range allCodes {
 		composed := CanonicalText[code] + ". " + HintFor(code)
-		for _, stale := range []string{"service", "connection settings"} {
+		for _, stale := range []string{"service", "connection settings", "uac", "as administrator", "administrator account"} {
 			if strings.Contains(strings.ToLower(composed), stale) {
 				t.Errorf("%s: %q mentions %q", code, composed, stale)
 			}
@@ -78,6 +79,9 @@ func TestTextsNameCurrentControls(t *testing.T) {
 	}
 	if hint := HintFor(CodeNoAPIKey); !strings.Contains(hint, "API Configuration") {
 		t.Errorf("no-API-key hint %q does not say where the key is set", hint)
+	}
+	if hint := HintFor(CodePermissionDenied); !strings.Contains(hint, "security software") || !strings.Contains(hint, "rescale-int.exe") {
+		t.Errorf("permission-denied hint %q does not name what refuses the start", hint)
 	}
 	// A daemon that does not answer IPC cannot be stopped through it: the
 	// recovery goes through a command that stops it or names its process.

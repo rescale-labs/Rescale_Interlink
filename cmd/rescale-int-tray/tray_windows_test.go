@@ -14,34 +14,6 @@ import (
 	"github.com/rescale/rescale-int/internal/service"
 )
 
-// An action that fails records why and returns: redrawing takes the lock the
-// failure was recorded under.
-func TestFailedActionsReturn(t *testing.T) {
-	t.Setenv("LOCALAPPDATA", t.TempDir()) // the startup log and PID file
-	t.Setenv("APPDATA", t.TempDir())      // no daemon.conf: defaults
-	t.Setenv("USERPROFILE", t.TempDir())  // the default download folder
-	origRedraw := redraw
-	t.Cleanup(func() { redraw = origRedraw })
-	redraw = func(a *trayApp) { a.mu.RLock(); a.mu.RUnlock() } // as updateUI does
-
-	a := &trayApp{}
-	for name, action := range map[string]func(){
-		"start": a.startService, // no API key, and no rescale-int.exe beside the test binary
-	} {
-		done := make(chan struct{})
-		go func() { action(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("%s did not return after failing", name)
-		}
-		if a.failure == "" {
-			t.Errorf("%s failed without saying why", name)
-		}
-		a.failure = ""
-	}
-}
-
 // Start's refusals of daemon.conf are shown where the user looks: the status
 // line carries the whole reason and the tooltip its start, until failureShown
 // has passed and the state shows again.
@@ -49,9 +21,10 @@ func TestStartRefusalsAreShown(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("APPDATA", dir)
 	t.Setenv("LOCALAPPDATA", dir)
-	origRedraw := redraw
-	t.Cleanup(func() { redraw = origRedraw })
+	origRedraw, origBlock := redraw, shouldBlockSubprocess
+	t.Cleanup(func() { redraw, shouldBlockSubprocess = origRedraw, origBlock })
 	redraw = func(*trayApp) {}
+	shouldBlockSubprocess = func() (bool, string) { return false, "" } // not this user's real pipe and SCM
 	conf, err := config.DefaultDaemonConfigPath()
 	if err != nil {
 		t.Fatal(err)
@@ -79,9 +52,9 @@ func TestStartRefusalsAreShown(t *testing.T) {
 
 // At tray launch auto-download starts only when daemon.conf enables it, and a
 // start that daemon.conf refuses, that cannot read it, or that has no API key,
-// as the app's Start refuses, is shown as Start's refusals are. A daemon
-// already running is left alone, but a pipe another user holds, which refuses
-// every start, is shown.
+// as the app's Start refuses, is shown as Start's refusals are, once the lock
+// the failure was recorded under is released. A daemon already running is left
+// alone, but a pipe another user holds, which refuses every start, is shown.
 func TestStartupStartsOnlyWhenEnabledAndShowsWhy(t *testing.T) {
 	dir := t.TempDir()
 	for _, env := range []string{"APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME"} {
@@ -90,7 +63,13 @@ func TestStartupStartsOnlyWhenEnabledAndShowsWhy(t *testing.T) {
 	t.Setenv("RESCALE_API_KEY", "")
 	origRedraw, origBlock := redraw, shouldBlockSubprocess
 	t.Cleanup(func() { redraw, shouldBlockSubprocess = origRedraw, origBlock })
-	redraw = func(*trayApp) {}
+	redraw = func(a *trayApp) { // as updateUI does, which would wait forever
+		if !a.mu.TryRLock() {
+			t.Error("redraw ran under the lock")
+		} else {
+			a.mu.RUnlock()
+		}
+	}
 	conf, err := config.DefaultDaemonConfigPath()
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +127,7 @@ func TestStartupWaitsForTheDownloadFolder(t *testing.T) {
 		why               string
 	}{
 		{"reconnects", 2, 2, false, 2 * folderWait, ipc.CanonicalText[ipc.CodeNoAPIKey]},
-		{"never reconnects", 0, folderTries - 1, false, time.Minute, "Cannot create download folder"},
+		{"never reconnects", 0, folderTries - 1, false, time.Minute, "cannot create download folder"},
 		{"reconnects, and the user starts auto-download", 1, 1, true, folderWait, ""},
 	} {
 		os.RemoveAll(drive)

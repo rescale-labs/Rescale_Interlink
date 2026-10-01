@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"fmt"
-	"os/user"
 	"runtime"
 	"strings"
 	"time"
@@ -15,7 +14,6 @@ import (
 
 // PendingTimeout is how long the system can remain in a transient pending
 // state before Compute promotes it to Error with CodeTransientTimeout.
-// Per old-reference/AUTO_DOWNLOAD_SPEC.md §5.5.
 const PendingTimeout = 10 * time.Second
 
 // InstallationState describes whether and how a service-level installation
@@ -31,12 +29,12 @@ const (
 	// subprocess daemon is the only option.
 	InstallationSubprocessOnly
 
-	// InstallationNotInstalled — Windows MSI is present but the service has
-	// not been registered with SCM.
+	// InstallationNotInstalled — no service from an earlier version is
+	// registered with the Windows SCM.
 	InstallationNotInstalled
 
-	// InstallationStopped — Windows SCM has the service registered but it is
-	// currently stopped.
+	// InstallationStopped — a service from an earlier version is registered
+	// but stopped.
 	InstallationStopped
 
 	// InstallationStarting — SCM reports StartPending.
@@ -59,9 +57,9 @@ const (
 	// PerUserNotConfigured — no daemon.conf, or daemon.conf has Enabled=false.
 	PerUserNotConfigured
 
-	// PerUserPending — daemon.conf is enabled, but the service has not yet
-	// registered this user. Promotes to PerUserError if the pending state
-	// persists beyond PendingTimeout.
+	// PerUserPending — daemon.conf is enabled, but this user's daemon does not
+	// answer yet. Promotes to PerUserError if the pending state persists
+	// beyond PendingTimeout.
 	PerUserPending
 
 	// PerUserRunning — this user's daemon is registered and polling.
@@ -160,31 +158,17 @@ func (realConfigLoader) LoadUserDaemonConfig() (*config.DaemonConfig, error) {
 	return config.LoadDaemonConfig("")
 }
 
-// UserIdentity abstracts the platform-specific lookup of the current user's
-// identity. On Windows, SID is used to match the IPC user list. On
-// macOS/Linux only username is needed.
+// UserIdentity abstracts the lookup of the current user's Windows SID, which
+// the daemon's entry must not contradict. Users elsewhere have none.
 type UserIdentity interface {
 	CurrentSID() string
-	CurrentUsername() string
 }
 
 type realUserIdentity struct{}
 
 func (realUserIdentity) CurrentSID() string {
-	if u, err := user.Current(); err == nil {
-		// On Windows, Uid is the SID. On Unix, it's a numeric UID; the IPC
-		// peer uses SO_PEERCRED so SID matching is unnecessary, but we
-		// return what we have for consistency.
-		return u.Uid
-	}
-	return ""
-}
-
-func (realUserIdentity) CurrentUsername() string {
-	if u, err := user.Current(); err == nil {
-		return u.Username
-	}
-	return ""
+	sid, _ := ipc.CurrentUserSID()
+	return sid
 }
 
 // Computer composes State from injected dependencies. Tests substitute fakes
@@ -245,36 +229,21 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 		s.LastScanTime = status.LastScanTime
 
 		if users, err2 := c.IPC.GetUserList(ctx); err2 == nil {
-			matched := c.matchUser(users)
-			if matched != nil {
+			if matched := c.matchUser(users); matched != nil {
 				switch matched.State {
 				case "running":
 					s.PerUser = PerUserRunning
 				case "paused":
 					s.PerUser = PerUserPaused
-				case "error":
-					s.PerUser = PerUserError
-				case "stopped":
-					s.PerUser = PerUserNotConfigured
 				}
 				s.JobsDownloaded = matched.JobsDownloaded
 				if matched.DownloadFolder != "" {
 					s.DownloadFolder = matched.DownloadFolder
 				}
-				if matched.LastError != "" {
-					s.LastError = matched.LastError
-				}
-				if matched.ErrorCode != "" {
-					s.LastErrorCode = matched.ErrorCode
-				} else if matched.LastError != "" {
-					// Backwards compatibility: older servers don't set
-					// ErrorCode. Reverse-lookup the canonical text.
-					s.LastErrorCode = ipc.CodeFromCanonicalText(matched.LastError)
-				}
 			}
 		}
 
-		if status.LastError != "" && s.LastError == "" {
+		if status.LastError != "" {
 			s.LastError = status.LastError
 			s.LastErrorTime = status.LastErrorTime
 			if status.LastErrorCode != "" {
@@ -305,33 +274,16 @@ func (c *Computer) Compute(ctx context.Context, prior State) State {
 	return s
 }
 
-// matchUser finds the IPC user entry corresponding to the current process
-// identity. Windows matches by SID primarily, with a username fallback;
-// Unix matches by username. A SID match anywhere in the list wins, and an
-// entry whose SID differs from ours is never ours.
+// matchUser returns the entry of this user's daemon. A daemon serves one user
+// and reports one entry, which is ours unless it names another SID.
 func (c *Computer) matchUser(users []ipc.UserStatus) *ipc.UserStatus {
-	sid := c.Identity.CurrentSID()
-	if sid != "" {
-		for i := range users {
-			if strings.EqualFold(users[i].SID, sid) {
-				return &users[i]
-			}
-		}
+	if len(users) != 1 {
+		return nil
 	}
-	noSIDConflict := func(u ipc.UserStatus) bool { return sid == "" || u.SID == "" }
-	username := c.Identity.CurrentUsername()
-	for i := range users {
-		if noSIDConflict(users[i]) && matchesWindowsUsername(users[i].Username, username) {
-			return &users[i]
-		}
+	if sid := c.Identity.CurrentSID(); sid != "" && users[0].SID != "" && !strings.EqualFold(users[0].SID, sid) {
+		return nil
 	}
-	// A single-user daemon reports one entry by convention. It is ours only
-	// when nothing on it says otherwise: no other SID, and no name, since a
-	// name here has already failed to match.
-	if len(users) == 1 && noSIDConflict(users[0]) && strings.TrimSpace(users[0].Username) == "" {
-		return &users[0]
-	}
-	return nil
+	return &users[0]
 }
 
 // CanStartDaemon reports whether a surface may offer to start the user's own
@@ -376,42 +328,6 @@ func classifyInstallation(d ServiceDetectionResult) InstallationState {
 		return InstallationStopped
 	}
 	return InstallationNotInstalled
-}
-
-// matchesWindowsUsername compares two renderings of a Windows account,
-// CORP\jdoe, a UPN such as jdoe@corp.example.com, or a bare name,
-// case-insensitively.
-// The names must be equal and not empty, and when both sides name a domain the
-// domains must agree: a NetBIOS domain agrees with a DNS domain whose first
-// label it is, as CORP does with corp.example.com.
-func matchesWindowsUsername(a, b string) bool {
-	nameA, domainA := splitWindowsUsername(a)
-	nameB, domainB := splitWindowsUsername(b)
-	if nameA == "" || nameA != nameB {
-		return false
-	}
-	if domainA == "" || domainB == "" || domainA == domainB {
-		return true
-	}
-	labelA, _, dnsA := strings.Cut(domainA, ".")
-	labelB, _, dnsB := strings.Cut(domainB, ".")
-	return dnsA != dnsB && labelA == labelB
-}
-
-// splitWindowsUsername returns the lower-cased name and domain of s. The name
-// is empty when there is none, as in a malformed UPN.
-func splitWindowsUsername(s string) (name, domain string) {
-	s = strings.ToLower(strings.TrimSpace(s))
-	if i := strings.LastIndex(s, `\`); i >= 0 {
-		return strings.TrimSpace(s[i+1:]), s[:i]
-	}
-	if n, d, ok := strings.Cut(s, "@"); ok {
-		if d == "" || strings.Contains(d, "@") {
-			return "", ""
-		}
-		return n, d
-	}
-	return s, ""
 }
 
 // Presentation returns the canonical rendering of s across all surfaces.

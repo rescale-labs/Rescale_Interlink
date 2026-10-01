@@ -42,15 +42,13 @@ const (
 	MsgPauseUser         MessageType = "PauseUser"
 	MsgResumeUser        MessageType = "ResumeUser"
 	MsgTriggerScan       MessageType = "TriggerScan"
-	MsgOpenLogs          MessageType = "OpenLogs"
-	MsgOpenGUI           MessageType = "OpenGUI"
 	MsgGetUserList       MessageType = "GetUserList"
 	MsgShutdown          MessageType = "Shutdown"
 	MsgGetRecentLogs     MessageType = "GetRecentLogs"
 	MsgReloadConfig      MessageType = "ReloadConfig"
 	MsgGetTransferStatus MessageType = "GetTransferStatus"
-	// Plan 3: per-row cancel/retry actions on daemon-initiated transfers.
-	// Payload carries BatchID or TaskID via Request extension below.
+	// Cancel and retry on the daemon's own transfers carry a BatchID or a
+	// TaskID.
 	MsgCancelDaemonBatch        MessageType = "CancelDaemonBatch"
 	MsgCancelDaemonTransfer     MessageType = "CancelDaemonTransfer"
 	MsgRetryFailedInDaemonBatch MessageType = "RetryFailedInDaemonBatch"
@@ -68,8 +66,7 @@ const (
 // Request represents an IPC request from client to server.
 type Request struct {
 	Type MessageType `json:"type"`
-	// UserID is the user identifier (SID or username) for user-specific operations.
-	// Use "all" for operations that should affect all users.
+	// UserID is ignored, and sent empty: a daemon serves one user.
 	UserID string `json:"user_id,omitempty"`
 	// BatchID is carried on CancelDaemonBatch / RetryFailedInDaemonBatch.
 	BatchID string `json:"batch_id,omitempty"`
@@ -85,12 +82,9 @@ type Response struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
-// StatusData contains the service status information.
+// StatusData contains the daemon status information.
 type StatusData struct {
-	// ServiceState is the overall service state ("running", "paused", "stopped")
-	ServiceState string `json:"service_state"`
-
-	// Version is the service version string
+	// Version is the daemon version string
 	Version string `json:"version"`
 
 	// LastScanTime is when the last job scan completed
@@ -98,9 +92,6 @@ type StatusData struct {
 
 	// ActiveDownloads is the number of downloads currently in progress
 	ActiveDownloads int `json:"active_downloads"`
-
-	// ActiveUsers is the number of users with running daemons
-	ActiveUsers int `json:"active_users"`
 
 	// LastError is the most recent error message (if any), as canonical
 	// English text (see CanonicalText in errors.go).
@@ -114,7 +105,7 @@ type StatusData struct {
 	// stale the failure is, which matters when LastScanTime has frozen.
 	LastErrorTime *time.Time `json:"last_error_time,omitempty"`
 
-	// Uptime is how long the service has been running
+	// Uptime is how long the daemon has been running
 	Uptime string `json:"uptime,omitempty"`
 }
 
@@ -126,7 +117,7 @@ type UserStatus struct {
 	// SID is the user's Security Identifier (Windows)
 	SID string `json:"sid,omitempty"`
 
-	// State is the daemon state ("running", "paused", "stopped", "error")
+	// State is the daemon state ("running" or "paused")
 	State string `json:"state"`
 
 	// DownloadFolder is the configured download directory
@@ -149,15 +140,6 @@ type UserStatus struct {
 	WorkspaceFoldersSkipped int `json:"workspace_folders_skipped,omitempty"`
 	JobsOutsideLookback     int `json:"jobs_outside_lookback,omitempty"`
 	JobsUnchecked           int `json:"jobs_unchecked,omitempty"`
-
-	// LastError is the most recent error for this user (if any), as canonical
-	// English text (see CanonicalText in errors.go).
-	LastError string `json:"last_error,omitempty"`
-
-	// ErrorCode is the machine-readable ErrorCode corresponding to LastError.
-	// Optional for backwards compatibility: older servers omit it, older
-	// clients ignore it. New code should prefer comparing on ErrorCode.
-	ErrorCode ErrorCode `json:"error_code,omitempty"`
 }
 
 // UserListData contains the list of user statuses.
@@ -253,7 +235,7 @@ func NewRequest(msgType MessageType) *Request {
 	return &Request{Type: msgType}
 }
 
-// NewRequestWithUser creates a new IPC request for a specific user.
+// NewRequestWithUser creates a new IPC request carrying userID.
 func NewRequestWithUser(msgType MessageType, userID string) *Request {
 	return &Request{Type: msgType, UserID: userID}
 }

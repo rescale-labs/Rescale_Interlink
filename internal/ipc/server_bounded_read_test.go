@@ -109,8 +109,8 @@ func TestIPCNormalMessageAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetStatus failed after bounded read change: %v", err)
 	}
-	if status.ServiceState != "running" {
-		t.Errorf("Expected state 'running', got '%s'", status.ServiceState)
+	if status.Version != "test" {
+		t.Errorf("Expected version 'test', got '%s'", status.Version)
 	}
 
 	// Test with a raw request to verify scanner handles valid JSON

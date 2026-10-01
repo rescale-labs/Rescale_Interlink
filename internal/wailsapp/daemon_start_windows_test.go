@@ -3,57 +3,43 @@
 package wailsapp
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/daemon"
+	"github.com/rescale/rescale-int/internal/ipc"
 )
 
-// Start refuses a max_concurrent 'daemon run' refuses before it writes a
-// startup log or spawns anything, and a child that stops says why.
+// A daemon that stops as it starts says why in its captured stderr: Start
+// reports Cobra's "Error:" line, not the usage text after it, or else the
+// last lines. daemon.TestStartSaysWhyItCannotStart covers the refusals.
 func TestStartDaemonSaysWhyItCannotStart(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("APPDATA", dir)
-	t.Setenv("LOCALAPPDATA", dir)
-	conf, err := config.DefaultDaemonConfigPath()
-	if err == nil {
-		os.MkdirAll(filepath.Dir(conf), 0o700)
-		err = os.WriteFile(conf, []byte("[daemon]\nmax_concurrent = 50\n"), 0o600)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	const want = "max_concurrent in daemon.conf must be between 1 and 20, got 50"
-	if err := (&App{}).startDaemonSubprocess(); err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("startDaemonSubprocess: %v, want an error containing %q", err, want)
-	}
-	if _, err := os.Stat(config.LogDirectory()); !os.IsNotExist(err) {
-		t.Errorf("the refused start wrote diagnostics in %s", config.LogDirectory())
-	}
-	// Only an omitted key means the default; past the checks, Start finds no
-	// rescale-int.exe beside the test binary.
-	for section, want := range map[string]string{
-		"max_concurrent = 0":        "max_concurrent in daemon.conf must be between 1 and 20, got 0",
-		"max_concurrent = -1":       "max_concurrent in daemon.conf must be between 1 and 20, got -1",
-		"download_folder = rel":     `download_folder in daemon.conf must be an absolute path, got "rel"`,
-		"poll_interval_minutes = 5": "CLI not found",
-	} {
-		if err := os.WriteFile(conf, []byte("[daemon]\r\n"+section+"\r\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := (&App{}).startDaemonSubprocess(); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("startDaemonSubprocess with %s: %v, want an error containing %q", section, err, want)
-		}
-	}
-
+	const why = "Error: max_concurrent in daemon.conf must be between 1 and 20, got 50"
 	for stderr, want := range map[string]string{
-		"Error: " + want + "\r\nUsage:\r\n  rescale-int daemon run [flags]\r\n\r\nFlags:\r\n  -v, --verbose   verbose\r\n": "Error: " + want,
+		why + "\r\nUsage:\r\n  rescale-int daemon run [flags]\r\n\r\nFlags:\r\n  -v, --verbose   verbose\r\n": why,
 		"one\ntwo\n\nthree\nfour\n": "two | three | four",
 	} {
 		if got := childStderr(stderr); got != want {
 			t.Errorf("childStderr(%q) = %q, want %q", stderr, got, want)
 		}
+	}
+}
+
+// Stop names a daemon whose PID file names a live process that does not
+// answer, and how to end it, instead of reporting it stopped.
+func TestStopDaemonNamesADaemonItCannotReach(t *testing.T) {
+	setIsolatedUserConfigEnv(t) // WritePIDFile also removes an earlier version's PID file
+	if ipc.IsPipeInUse() {
+		t.Skip("this user's daemon answers on its pipe")
+	}
+	if err := daemon.WritePIDFile(); err != nil { // this test's process stands in
+		t.Fatal(err)
+	}
+	t.Cleanup(daemon.RemovePIDFile)
+	err := (&App{}).StopDaemon()
+	if want := fmt.Sprintf("PID %d", os.Getpid()); err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "Task Manager") {
+		t.Errorf("StopDaemon: %v, want it to name %s and how to end it", err, want)
 	}
 }

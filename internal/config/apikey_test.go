@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
@@ -19,55 +18,30 @@ func createTokenFile(t *testing.T, path, key string) {
 	}
 }
 
-// TestResolveAPIKey pins the resolution chain: an explicit key, then the
-// profile's own token file, before the default token file and the environment.
+// TestResolveAPIKey pins the resolution chain: an explicit key, then the token
+// file, then an older version's apiconfig, then the environment.
 func TestResolveAPIKey(t *testing.T) {
-	profile := filepath.Join(t.TempDir(), "profile")
+	dir := t.TempDir()
+	for _, env := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"} {
+		t.Setenv(env, dir)
+	}
 	t.Setenv("RESCALE_API_KEY", "env-key-456")
-	if key := ResolveAPIKey("explicit-key", profile); key != "explicit-key" {
+	if key := ResolveAPIKey("explicit-key"); key != "explicit-key" {
 		t.Errorf("explicit key: got %q", key)
 	}
-	// The real default token file may exist on the machine running this, so
-	// only that some later source answered is asserted.
-	if key := ResolveAPIKey("", profile); key == "" {
-		t.Error("no per-user sources: got no key, want the token file's or the environment's")
+	if key := ResolveAPIKey(""); key != "env-key-456" {
+		t.Errorf("only the environment: got %q, want env-key-456", key)
 	}
-	createTokenFile(t, GetUserTokenPath(profile), "user-key-123")
-	if key := ResolveAPIKey("", profile); key != "user-key-123" {
-		t.Errorf("per-user token file: got %q, want user-key-123", key)
+	apiconfig, err := DefaultAPIConfigPath()
+	if err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestGetUserTokenPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// With neither location on disk, the current (Local) path is returned.
-		profile := t.TempDir()
-		expected := filepath.Join(profile, "AppData", "Local", "Rescale", "Interlink", "token")
-		if path := GetUserTokenPath(profile); path != expected {
-			t.Errorf("Windows path: expected %q, got %q", expected, path)
-		}
-
-		// Transition window: an existing Roaming token still takes precedence.
-		oldDir := filepath.Join(profile, "AppData", "Roaming", "Rescale", "Interlink")
-		if err := os.MkdirAll(oldDir, 0700); err != nil {
-			t.Fatalf("MkdirAll %s: %v", oldDir, err)
-		}
-		oldToken := filepath.Join(oldDir, "token")
-		if err := os.WriteFile(oldToken, []byte("k"), 0600); err != nil {
-			t.Fatalf("WriteFile %s: %v", oldToken, err)
-		}
-		if path := GetUserTokenPath(profile); path != oldToken {
-			t.Errorf("Windows Roaming fallback: expected %q, got %q", oldToken, path)
-		}
-	} else {
-		path := GetUserTokenPath("/home/testuser")
-		expected := "/home/testuser/.config/rescale/token"
-		if path != expected {
-			t.Errorf("Unix path: expected %q, got %q", expected, path)
-		}
+	createTokenFile(t, apiconfig, "[rescale]\napi_key = legacy-key-789")
+	if key := ResolveAPIKey(""); key != "legacy-key-789" {
+		t.Errorf("apiconfig and the environment: got %q, want legacy-key-789", key)
 	}
-
-	if path := GetUserTokenPath(""); path != "" {
-		t.Errorf("empty profile: expected empty, got %q", path)
+	createTokenFile(t, GetDefaultTokenPath(), "token-key-123")
+	if key := ResolveAPIKey(""); key != "token-key-123" {
+		t.Errorf("every source: got %q, want token-key-123", key)
 	}
 }

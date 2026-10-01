@@ -22,7 +22,7 @@ import (
 	// Go runs init() functions in import order. By importing mesainit first,
 	// its init() runs before any OpenGL usage, allowing us to preload Mesa's
 	// opengl32.dll before Windows loads System32's version.
-	_ "github.com/rescale/rescale-int/internal/mesainit"
+	"github.com/rescale/rescale-int/internal/mesainit"
 
 	"github.com/rescale/rescale-int/internal/cli"
 	"github.com/rescale/rescale-int/internal/cli/compat"
@@ -97,7 +97,7 @@ func main() {
 		return
 	}
 
-	if isCLIMode() {
+	if !mesainit.GUIMode() {
 		// CLI mode - use the proper CLI root command with all persistent flags
 		if err := cli.Execute(); err != nil {
 			os.Exit(1)
@@ -111,41 +111,4 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-}
-
-// isCLIMode determines whether to run in CLI mode based on arguments and environment.
-//
-// CLI mode when:
-// - --cli flag is present (force CLI mode)
-// - any other argument is present (subcommands, flags, typos alike)
-// - No display available (DISPLAY/WAYLAND_DISPLAY not set on Linux)
-//
-// GUI mode when:
-// - --gui flag is present (force GUI mode)
-// - No arguments and display is available
-func isCLIMode() bool {
-	// Explicit flags
-	if slices.Contains(os.Args, "--cli") {
-		return true
-	}
-	if slices.Contains(os.Args, "--gui") {
-		return false
-	}
-
-	// No explicit mode or commands - check for display
-	if len(os.Args) == 1 {
-		// No arguments: default to GUI if display available, CLI otherwise
-		if runtime.GOOS == "linux" {
-			// On Linux, check for display
-			if os.Getenv("DISPLAY") == "" && os.Getenv("WAYLAND_DISPLAY") == "" {
-				return true // No display, default to CLI
-			}
-		}
-		// On macOS/Windows or Linux with display: default to GUI
-		return false
-	}
-
-	// Unknown arguments - let CLI handle (might be typos or new commands)
-	// This ensures ./AppRun somethingUnknown shows CLI help rather than opening GUI
-	return true
 }

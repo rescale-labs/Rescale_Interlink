@@ -37,13 +37,10 @@ func DetectDaemon() ServiceDetectionResult {
 	installed, reason := IsInstalledWithReason()
 	debugLog("SCM: installed=%v, reason=%s", installed, reason)
 	result.Installed = installed
-	if installed {
-		// Windows Service is installed - check if running
-		if status, err := QueryStatus(); err == nil && status == StatusRunning {
-			result.ServiceMode = true
-			debugLog("Result: ServiceMode=true (via SCM)")
-			return result
-		}
+	if installed && OldServiceIsRunning() {
+		result.ServiceMode = true
+		debugLog("Result: ServiceMode=true (via SCM)")
+		return result
 	}
 
 	// Layer 2: Check for subprocess via PID file
@@ -71,9 +68,9 @@ func DetectDaemon() ServiceDetectionResult {
 // name of this user's pipe.
 const PipeTaken = "Another user on this computer holds the name auto-download listens on; restart Windows, or ask your administrator"
 
-// ShouldBlockSubprocess returns true if subprocess spawn should be blocked.
-// Returns (blocked, reason). Only blocks when service is RUNNING, not just
-// installed — this allows subprocess mode when service is installed but stopped.
+// ShouldBlockSubprocess reports whether starting this user's daemon must be
+// refused, and why: one runs, its pipe exists, or a service from an earlier
+// version is running. An installed service that is stopped blocks nothing.
 func ShouldBlockSubprocess() (bool, string) {
 	return blockSubprocess(DetectDaemon())
 }

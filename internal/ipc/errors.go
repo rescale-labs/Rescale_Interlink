@@ -33,8 +33,9 @@ const (
 	// starting another would conflict.
 	CodeServiceAlreadyRunning ErrorCode = "service_already_running"
 
-	// CodePermissionDenied indicates the operation requires elevated privileges
-	// (typically administrator on Windows) that the caller does not have.
+	// CodePermissionDenied indicates Windows denied access, as when security
+	// software blocks rescale-int.exe. Elevation does not help: the daemon
+	// runs as the user.
 	CodePermissionDenied ErrorCode = "permission_denied"
 
 	// CodeTransientTimeout indicates a transient pending state that has
@@ -82,7 +83,7 @@ var CanonicalText = map[ErrorCode]string{
 	CodeIPCNotResponding:             "Auto-download is not responding",
 	CodeCLINotFound:                  "Interlink CLI not found",
 	CodeServiceAlreadyRunning:        "Auto-download is already running",
-	CodePermissionDenied:             "Permission denied — run as administrator",
+	CodePermissionDenied:             "Permission denied",
 	CodeTransientTimeout:             "Auto-download is taking longer than expected to respond",
 	CodeConfigInvalid:                "Configuration is invalid",
 	CodeWorkspaceMissingField:        "Workspace is missing the 'Auto Download' custom field",
@@ -101,7 +102,7 @@ var hintText = map[ErrorCode]string{
 	CodeIPCNotResponding:             "Run 'rescale-int daemon stop', which stops the daemon or says how to end its process, then start auto-download from the Interlink app.",
 	CodeCLINotFound:                  "Reinstall Interlink or verify rescale-int.exe is next to the GUI binary.",
 	CodeServiceAlreadyRunning:        "",
-	CodePermissionDenied:             "Re-run the action and approve the UAC prompt, or use an administrator account.",
+	CodePermissionDenied:             "Check that security software is not blocking rescale-int.exe, then try again.",
 	CodeTransientTimeout:             "If this persists, click Retry, or Open Logs to see the daemon's startup log.",
 	CodeConfigInvalid:                "Review the Setup tab for fields highlighted as invalid.",
 	CodeWorkspaceMissingField:        "A workspace administrator must add an 'Auto Download' custom field (select-list with Enabled/Disabled/Conditional options) in Rescale workspace settings.",
@@ -117,9 +118,9 @@ func HintFor(code ErrorCode) string {
 	return hintText[code]
 }
 
-// CodeFromCanonicalText looks up an ErrorCode by its canonical English text.
-// Used to migrate legacy error strings (from older IPC peers or pre-Plan-1
-// code paths) into the code-based model. Returns empty ErrorCode on miss.
+// CodeFromCanonicalText looks up an ErrorCode by its canonical English text,
+// for a daemon of an earlier version that sends the text without its code.
+// Returns empty ErrorCode on miss.
 func CodeFromCanonicalText(text string) ErrorCode {
 	for code, canonical := range CanonicalText {
 		if canonical == text {

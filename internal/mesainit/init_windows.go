@@ -13,21 +13,13 @@
 //
 // This allows the EXE to be distributed standalone - it will automatically
 // extract the required DLLs on first run.
-//
-// Usage in main.go:
-//
-//	import (
-//	    _ "github.com/rescale/rescale-int/internal/mesainit"  // MUST BE FIRST!
-//	    "github.com/rescale/rescale-int/internal/cli"
-//	    "github.com/rescale/rescale-int/internal/gui"
-//	)
 package mesainit
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
+	"slices"
 
 	"github.com/rescale/rescale-int/internal/mesa"
 )
@@ -36,8 +28,8 @@ import (
 const reexecEnvVar = "_RESCALE_MESA_REEXEC_DONE"
 
 func init() {
-	// Skip if not GUI mode - no need to load Mesa for CLI operations
-	if !isGUIMode() {
+	// The CLI needs no Mesa; the GUI and the Mesa doctor do.
+	if !GUIMode() && !slices.Contains(os.Args, "--mesa-doctor") {
 		return
 	}
 
@@ -135,41 +127,4 @@ func debugLog(format string, args ...interface{}) {
 	if os.Getenv("RESCALE_MESA_DEBUG") != "" {
 		fmt.Printf("[MESA-INIT] "+format+"\n", args...)
 	}
-}
-
-// isGUIMode checks if the application was launched in GUI mode.
-// We check for --gui flag or absence of other command flags.
-func isGUIMode() bool {
-	for _, arg := range os.Args[1:] {
-		// Explicit GUI mode
-		if arg == "--gui" || arg == "-gui" {
-			return true
-		}
-
-		// Mesa doctor also needs OpenGL
-		if arg == "--mesa-doctor" {
-			return true
-		}
-
-		// CLI mode flags - don't need Mesa
-		if strings.HasPrefix(arg, "jobs") ||
-			strings.HasPrefix(arg, "files") ||
-			strings.HasPrefix(arg, "folders") ||
-			strings.HasPrefix(arg, "upload") ||
-			strings.HasPrefix(arg, "download") ||
-			strings.HasPrefix(arg, "hardware") ||
-			strings.HasPrefix(arg, "software") ||
-			strings.HasPrefix(arg, "pur") ||
-			strings.HasPrefix(arg, "config") ||
-			arg == "--version" ||
-			arg == "-v" ||
-			arg == "--help" ||
-			arg == "-h" {
-			return false
-		}
-	}
-
-	// Default: If no arguments, we might launch GUI
-	// Return true to be safe - we'll load Mesa even if not needed
-	return len(os.Args) == 1
 }

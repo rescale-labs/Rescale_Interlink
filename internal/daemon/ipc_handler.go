@@ -1,5 +1,3 @@
-//go:build !windows
-
 // Package daemon provides background service functionality for auto-downloading completed jobs.
 package daemon
 
@@ -12,8 +10,8 @@ import (
 	"github.com/rescale/rescale-int/internal/version"
 )
 
-// IPCHandler implements ipc.ServiceHandler for the Unix daemon.
-// It provides the bridge between IPC requests and daemon operations.
+// IPCHandler implements ipc.ServiceHandler for the daemon, which serves one
+// user, so it ignores every userID.
 type IPCHandler struct {
 	daemon    *Daemon
 	startTime time.Time
@@ -40,11 +38,6 @@ func (h *IPCHandler) SetLogBuffer(buf *LogBuffer) {
 
 // GetStatus returns the current daemon status.
 func (h *IPCHandler) GetStatus() *ipc.StatusData {
-	state := "running"
-	if h.daemon.IsPaused() {
-		state = "paused"
-	}
-
 	lastPoll := h.daemon.GetLastPollTime()
 	var lastPollPtr *time.Time
 	if !lastPoll.IsZero() {
@@ -54,11 +47,9 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 	uptime := time.Since(h.startTime).Round(time.Second).String()
 
 	status := &ipc.StatusData{
-		ServiceState:    state,
 		Version:         version.Version,
 		LastScanTime:    lastPollPtr,
 		ActiveDownloads: h.daemon.GetActiveDownloads(),
-		ActiveUsers:     1, // Single-user mode on Unix
 		Uptime:          uptime,
 	}
 
@@ -76,8 +67,8 @@ func (h *IPCHandler) GetStatus() *ipc.StatusData {
 	return status
 }
 
-// GetUserList returns the list of user daemon statuses.
-// On Unix single-user mode, returns a single user (the current user).
+// GetUserList returns the daemon's one user entry, with the user's SID on
+// Windows, which the app and the tray match their own against.
 func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 	state := "running"
 	if h.daemon.IsPaused() {
@@ -96,10 +87,12 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 		lastPollPtr = &lastPoll
 	}
 
+	sid, _ := ipc.CurrentUserSID()
 	folders, outsideLookback, unchecked := h.daemon.state.GetLeftOut()
 	return []ipc.UserStatus{
 		{
 			Username:                username,
+			SID:                     sid,
 			State:                   state,
 			DownloadFolder:          h.daemon.cfg.DownloadDir,
 			LastScanTime:            lastPollPtr,
@@ -113,14 +106,12 @@ func (h *IPCHandler) GetUserList() []ipc.UserStatus {
 }
 
 // PauseUser pauses auto-download.
-// On Unix single-user mode, userID is ignored.
 func (h *IPCHandler) PauseUser(userID string) error {
 	h.daemon.SetPaused(true)
 	return nil
 }
 
 // ResumeUser resumes auto-download.
-// On Unix single-user mode, userID is ignored.
 func (h *IPCHandler) ResumeUser(userID string) error {
 	h.daemon.SetPaused(false)
 	return nil
@@ -143,17 +134,8 @@ func (h *IPCHandler) TriggerScan(userID string) error {
 	return nil
 }
 
-// OpenLogs opens the log viewer.
-// On Unix, this is a no-op (logs go to stdout or log file).
-func (h *IPCHandler) OpenLogs(userID string) error {
-	h.daemon.logger.Debug().Msg("OpenLogs called (no-op on Unix)")
-	return nil
-}
-
 // GetRecentLogs returns recent log entries from the buffer.
-// In subprocess mode, userID is ignored (only one user).
 func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData {
-	// userID ignored in subprocess mode - only one user
 	if h.logBuffer == nil {
 		return nil
 	}
@@ -161,11 +143,6 @@ func (h *IPCHandler) GetRecentLogs(userID string, count int) []ipc.LogEntryData 
 		count = 100 // Default to 100 entries
 	}
 	return h.logBuffer.GetRecent(count)
-}
-
-// GetLogBuffer returns the log buffer for subscription.
-func (h *IPCHandler) GetLogBuffer() *LogBuffer {
-	return h.logBuffer
 }
 
 // Shutdown gracefully stops the daemon.
@@ -177,8 +154,8 @@ func (h *IPCHandler) Shutdown() error {
 	return nil
 }
 
-// ReloadConfig handles config reload for subprocess mode.
-// Returns active download count so GUI can decide whether to restart now or defer.
+// ReloadConfig returns the active download count so the GUI can decide
+// whether to restart the daemon now or defer.
 // The actual restart is managed by the GUI (stop + start) -- simpler and avoids in-process mutation.
 func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 	activeDownloads := h.daemon.GetActiveDownloads()
@@ -198,45 +175,23 @@ func (h *IPCHandler) ReloadConfig(userID string) *ipc.ReloadConfigData {
 }
 
 // GetTransferStatus returns a snapshot of the daemon's transfer queue
-// filtered to SourceLabel=Daemon. In subprocess mode, userID is ignored.
+// filtered to SourceLabel=Daemon.
 func (h *IPCHandler) GetTransferStatus(userID string) (*ipc.DaemonTransferSnapshot, error) {
 	return h.daemon.DaemonTransferSnapshot(), nil
 }
 
 // CancelDaemonBatch cancels all non-terminal tasks in a specific daemon
-// batch. userID is ignored in subprocess mode.
+// batch.
 func (h *IPCHandler) CancelDaemonBatch(userID, batchID string) error {
-	if h.daemon == nil || h.daemon.TransferService() == nil {
-		return fmt.Errorf("daemon transfer service unavailable")
-	}
 	return h.daemon.TransferService().CancelBatch(batchID)
 }
 
-// CancelDaemonTransfer cancels a single in-flight daemon task. userID is
-// ignored in subprocess mode.
+// CancelDaemonTransfer cancels a single in-flight daemon task.
 func (h *IPCHandler) CancelDaemonTransfer(userID, taskID string) error {
-	if h.daemon == nil || h.daemon.TransferService() == nil {
-		return fmt.Errorf("daemon transfer service unavailable")
-	}
 	return h.daemon.TransferService().CancelTransfer(taskID)
 }
 
 // RetryFailedInDaemonBatch retries all failed tasks in a daemon batch.
-// userID is ignored in subprocess mode.
 func (h *IPCHandler) RetryFailedInDaemonBatch(userID, batchID string) error {
-	if h.daemon == nil || h.daemon.TransferService() == nil {
-		return fmt.Errorf("daemon transfer service unavailable")
-	}
 	return h.daemon.TransferService().RetryFailedInBatch(batchID)
-}
-
-// IsPaused returns whether the daemon is currently paused.
-func (h *IPCHandler) IsPaused() bool {
-	return h.daemon.IsPaused()
-}
-
-// ShouldPoll returns whether the daemon should perform polling.
-// Returns false if paused.
-func (h *IPCHandler) ShouldPoll() bool {
-	return !h.IsPaused()
 }

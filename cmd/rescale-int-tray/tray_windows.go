@@ -4,27 +4,22 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"fyne.io/systray"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/daemon"
 	"github.com/rescale/rescale-int/internal/ipc"
-	"github.com/rescale/rescale-int/internal/pathutil"
 	"github.com/rescale/rescale-int/internal/service"
 	"github.com/rescale/rescale-int/internal/version"
 )
-
-// Windows process creation flag to hide console window.
-// Required for subprocess mode to not show a blank console.
-const createNoWindow = 0x08000000
 
 const (
 	// Status refresh interval
@@ -177,7 +172,7 @@ func onExit() {
 	}
 }
 
-// refreshLoop periodically refreshes the service status.
+// refreshLoop periodically refreshes the daemon status.
 func (a *trayApp) refreshLoop() {
 	// Initial refresh
 	a.refreshStatus()
@@ -339,8 +334,9 @@ func (a *trayApp) handleMenuClicks() {
 	}
 }
 
-// startService starts the auto-download daemon if not already running.
-// Only blocks subprocess launch when a Windows Service is already running.
+// startService starts the auto-download daemon, unless shouldBlockSubprocess
+// says a daemon of this user, a pipe of its name or a service from an earlier
+// version is running.
 func (a *trayApp) startService() {
 	if blocked, reason := shouldBlockSubprocess(); blocked {
 		a.fail(reason)
@@ -351,134 +347,17 @@ func (a *trayApp) startService() {
 		a.fail("Configuration error. Open Interlink to configure.")
 		return
 	}
-	// The detached daemon would refuse them where no one sees why.
-	if err := config.CheckDownloadFolder(daemonCfg.Daemon.DownloadFolder); err != nil {
-		a.fail(err.Error())
-		return
-	}
-	if err := daemon.CheckMaxConcurrent(daemonCfg.Daemon.MaxConcurrent, "max_concurrent in daemon.conf"); err != nil {
-		a.fail(err.Error())
-		return
-	}
-
-	downloadDir := daemonCfg.Daemon.DownloadFolder
-	if downloadDir == "" {
-		downloadDir = config.DefaultDownloadFolder()
-	}
-
-	// Create download folder if it doesn't exist.
-	// The daemon also does MkdirAll, but pre-creating here gives better error messages.
-	if err := os.MkdirAll(downloadDir, 0755); err != nil {
-		a.fail(fmt.Sprintf("Cannot create download folder: %s", err))
-		return
-	}
-
-	// As the app's Start refuses: a daemon without a key could only fail.
-	if config.ResolveAPIKeyForCurrentUser("") == "" {
-		a.fail(ipc.CanonicalText[ipc.CodeNoAPIKey] + ". " + ipc.HintFor(ipc.CodeNoAPIKey))
-		return
-	}
-
-	// Find rescale-int.exe in the same directory as the tray app
-	exePath, err := os.Executable()
-	if err != nil {
-		a.fail(translateError(fmt.Errorf("executable path: %w", err)))
-		return
-	}
-
-	dir := filepath.Dir(exePath)
-	cliPath := filepath.Join(dir, "rescale-int.exe")
-
-	// Check if CLI exists
-	if _, err := os.Stat(cliPath); os.IsNotExist(err) {
-		a.fail(translateError(fmt.Errorf("CLI not found: rescale-int.exe")))
-		return
-	}
-
-	// Resolve junctions/symlinks for consistent behavior.
-	// When Downloads is a junction to a network drive (e.g., Z:\Downloads on Rescale VMs),
-	// the subprocess may not have the same drive mappings as the tray app's session.
-	if resolved, err := pathutil.ResolveAbsolutePath(downloadDir); err == nil {
-		downloadDir = resolved
-	}
-
-	pollInterval := fmt.Sprintf("%dm", daemonCfg.Daemon.PollIntervalMinutes)
-
-	daemonLogPath := filepath.Join(config.LogDirectory(), config.DaemonLogName)
-
-	// Build command arguments
-	args := []string{"daemon", "run", "--ipc",
-		"--download-dir", downloadDir,
-		"--poll-interval", pollInterval,
-		"--log-file", daemonLogPath,
-	}
-
-	// Add filter flags if configured
-	if daemonCfg.Filters.NamePrefix != "" {
-		args = append(args, "--name-prefix", daemonCfg.Filters.NamePrefix)
-	}
-	if daemonCfg.Filters.NameContains != "" {
-		args = append(args, "--name-contains", daemonCfg.Filters.NameContains)
-	}
-	for _, ex := range daemonCfg.GetExcludePatterns() {
-		args = append(args, "--exclude", ex)
-	}
-	if daemonCfg.Daemon.MaxConcurrent > 0 {
-		args = append(args, "--max-concurrent", fmt.Sprintf("%d", daemonCfg.Daemon.MaxConcurrent))
-	}
-
-	daemon.WriteStartupLog("=== TRAY STARTUP ATTEMPT ===")
-	daemon.WriteStartupLog("CLI path: %s", cliPath)
-	daemon.WriteStartupLog("Arguments: %v", args)
-
-	// Create stderr capture file for subprocess diagnostics.
-	// Uses 0700 permissions to restrict log access to owner only.
-	logsDir := config.LogDirectory()
-	if err := os.MkdirAll(logsDir, 0700); err != nil {
-		daemon.WriteStartupLog("WARNING: Could not create logs directory: %v", err)
-	}
-	stderrPath := filepath.Join(logsDir, config.DaemonStderrLogName)
-	stderrFile, stderrErr := os.Create(stderrPath)
-	if stderrErr != nil {
-		daemon.WriteStartupLog("WARNING: Could not create stderr capture file: %v", stderrErr)
-	}
-
-	// Start daemon with IPC enabled
-	cmd := exec.Command(cliPath, args...)
-
-	// Windows process flags for proper subprocess detachment + hidden console
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP | createNoWindow,
-	}
-
-	// Detach stdin/stdout, but capture stderr for debugging
-	cmd.Stdin = nil
-	cmd.Stdout = nil
-	if stderrFile != nil {
-		cmd.Stderr = stderrFile
-	}
-
-	daemon.WriteStartupLog("Calling cmd.Start()...")
-
-	if err := cmd.Start(); err != nil {
-		daemon.WriteStartupLog("ERROR: Failed to start service: %v", err)
-		if stderrFile != nil {
-			stderrFile.Close()
+	if err := daemon.Start(daemonCfg); err != nil {
+		// A refusal of the settings says what to change; a process that would
+		// not start is worded as the IPC failures are.
+		if errors.Is(err, daemon.ErrLaunch) {
+			a.fail(translateError(err))
+		} else {
+			a.fail(err.Error())
 		}
-		a.fail(translateError(err))
 		return
 	}
-
-	daemon.WriteStartupLog("SUCCESS: Started daemon subprocess with PID %d", cmd.Process.Pid)
 	a.fail("")
-
-	// Close stderr file after a delay to capture any immediate errors
-	if stderrFile != nil {
-		go func() {
-			time.Sleep(3 * time.Second)
-			stderrFile.Close()
-		}()
-	}
 
 	// Wait for IPC to come up, then refresh status
 	go func() {
@@ -523,8 +402,7 @@ func (a *trayApp) triggerScan() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	username := getCurrentUsername()
-	err := a.client.TriggerScan(ctx, username)
+	err := a.client.TriggerScan(ctx, "")
 	if err != nil {
 		a.fail(translateError(err))
 	}
@@ -539,8 +417,7 @@ func (a *trayApp) pauseAutoDownload() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	username := getCurrentUsername()
-	err := a.client.PauseUser(ctx, username)
+	err := a.client.PauseUser(ctx, "")
 	if err != nil {
 		a.fail(translateError(err))
 	}
@@ -555,8 +432,7 @@ func (a *trayApp) resumeAutoDownload() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	username := getCurrentUsername()
-	err := a.client.ResumeUser(ctx, username)
+	err := a.client.ResumeUser(ctx, "")
 	if err != nil {
 		a.fail(translateError(err))
 	}
@@ -567,7 +443,6 @@ func (a *trayApp) resumeAutoDownload() {
 }
 
 // viewLogs opens the logs directory in Explorer.
-// Runs locally in user context (not via IPC to service).
 func (a *trayApp) viewLogs() {
 	logsDir := config.LogDirectory()
 
@@ -582,8 +457,8 @@ func (a *trayApp) viewLogs() {
 	}
 }
 
-// translateError maps a raw error from an action (elevation, subprocess
-// launch, IPC call) to canonical user-facing text. Uses ipc.ErrorCode so
+// translateError maps a raw error from an action (subprocess launch, IPC
+// call) to canonical user-facing text. Uses ipc.ErrorCode so
 // the tray and the GUI agree on wording, and appends the actionable hint
 // when one is defined.
 func translateError(err error) string {
@@ -623,24 +498,4 @@ func translateError(err error) string {
 		return errStr[:57] + "..."
 	}
 	return errStr
-}
-
-// getCurrentUsername returns the current Windows username for IPC calls.
-// Resolves the username on the client side (tray app) before sending to the service.
-// This is critical because when the service runs as SYSTEM,
-// os.Getenv("USERNAME") returns "SYSTEM" instead of the actual user.
-// The tray app always runs in user context, so we can reliably get the username here.
-func getCurrentUsername() string {
-	// Try USERNAME environment variable first (most common on Windows)
-	if username := os.Getenv("USERNAME"); username != "" {
-		return username
-	}
-
-	// Fallback: extract from user's home directory
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Base(home)
-	}
-
-	// Last resort: return "current" and let the service try to resolve
-	return "current"
 }

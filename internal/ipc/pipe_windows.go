@@ -14,15 +14,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Windows error codes for named pipes
-const (
-	ERROR_FILE_NOT_FOUND = syscall.Errno(2)
-	ERROR_PIPE_BUSY      = syscall.Errno(231)
-	ERROR_ACCESS_DENIED  = syscall.Errno(5)
-)
-
 // currentUserSID is a variable so a test can stand in another SID, or none.
-var currentUserSID = getCurrentUserSID
+var currentUserSID = CurrentUserSID
 
 // pipeOwnerSID returns the owner of the pipe conn is connected to. A variable
 // so a test can stand in a pipe another user created.
@@ -125,7 +118,7 @@ func PipeOwnedByAnotherUser() bool {
 	if err == nil {
 		conn.Close()
 	}
-	return errors.Is(err, errNotOurPipe) || errors.Is(err, ERROR_ACCESS_DENIED)
+	return errors.Is(err, errNotOurPipe) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
 }
 
 // pipeInUse checks if the named pipe exists (another daemon may own it).
@@ -147,7 +140,7 @@ func pipeInUse(name string) bool {
 
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
-		if errno == ERROR_FILE_NOT_FOUND {
+		if errno == windows.ERROR_FILE_NOT_FOUND {
 			return false // Pipe definitively does not exist
 		}
 		// ERROR_PIPE_BUSY, ERROR_ACCESS_DENIED -> pipe exists

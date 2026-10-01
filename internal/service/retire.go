@@ -11,6 +11,13 @@ const RemovedMessage = "Multi-user service mode is not available in this version
 // version no longer uses, so nothing here can reach it.
 const OldServiceRunning = "A Windows service from an earlier version is running; restart Windows, or run 'rescale-int service uninstall' as administrator"
 
+// OldServiceIsRunning reports whether a service installed by an earlier version
+// is running. A service that is not installed is stopped.
+func OldServiceIsRunning() bool {
+	st, err := QueryStatus()
+	return err == nil && st == StatusRunning
+}
+
 // EarlierDaemonRunning says how to end a daemon that is already running,
 // whether or not it answers on this user's pipe. One an earlier version started
 // listens on that shared pipe, where the app cannot reach it. 'daemon stop

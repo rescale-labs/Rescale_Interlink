@@ -1,5 +1,3 @@
-//go:build windows
-
 package ipc
 
 import (
@@ -7,43 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"time"
 )
-
-// Client connects to the IPC server to send requests.
-type Client struct {
-	timeout time.Duration
-}
-
-// NewClient creates a new IPC client.
-func NewClient() *Client {
-	return &Client{
-		timeout: 5 * time.Second,
-	}
-}
 
 // SetTimeout sets the connection timeout.
 func (c *Client) SetTimeout(timeout time.Duration) {
 	c.timeout = timeout
-}
-
-// connect establishes a connection to the named pipe.
-func (c *Client) connect(ctx context.Context) (net.Conn, error) {
-	name, err := UserPipeName(pipeBase)
-	if err != nil {
-		return nil, err
-	}
-	// Use context with timeout
-	dialCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
-
-	conn, err := DialUserPipe(dialCtx, name)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to IPC server: %w", err)
-	}
-
-	return conn, nil
 }
 
 // sendRequest sends a request and receives a response.
@@ -85,7 +52,7 @@ func (c *Client) sendRequest(ctx context.Context, req *Request) (*Response, erro
 	return resp, nil
 }
 
-// GetStatus retrieves the current service status.
+// GetStatus retrieves the current daemon status.
 func (c *Client) GetStatus(ctx context.Context) (*StatusData, error) {
 	req := NewRequest(MsgGetStatus)
 	resp, err := c.sendRequest(ctx, req)
@@ -100,7 +67,7 @@ func (c *Client) GetStatus(ctx context.Context) (*StatusData, error) {
 	return resp.GetStatusData(), nil
 }
 
-// GetUserList retrieves the list of user daemon statuses.
+// GetUserList retrieves the daemon's user entry: a daemon serves one user.
 func (c *Client) GetUserList(ctx context.Context) ([]UserStatus, error) {
 	req := NewRequest(MsgGetUserList)
 	resp, err := c.sendRequest(ctx, req)
@@ -119,7 +86,7 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserStatus, error) {
 	return data.Users, nil
 }
 
-// PauseUser pauses auto-download for a specific user.
+// PauseUser pauses auto-download. The daemon ignores userID.
 func (c *Client) PauseUser(ctx context.Context, userID string) error {
 	req := NewRequestWithUser(MsgPauseUser, userID)
 	resp, err := c.sendRequest(ctx, req)
@@ -133,7 +100,7 @@ func (c *Client) PauseUser(ctx context.Context, userID string) error {
 	return nil
 }
 
-// ResumeUser resumes auto-download for a specific user.
+// ResumeUser resumes auto-download. The daemon ignores userID.
 func (c *Client) ResumeUser(ctx context.Context, userID string) error {
 	req := NewRequestWithUser(MsgResumeUser, userID)
 	resp, err := c.sendRequest(ctx, req)
@@ -147,8 +114,7 @@ func (c *Client) ResumeUser(ctx context.Context, userID string) error {
 	return nil
 }
 
-// TriggerScan triggers an immediate job scan.
-// Pass "all" for userID to scan all users, or a specific user ID.
+// TriggerScan triggers an immediate job scan. The daemon ignores userID.
 func (c *Client) TriggerScan(ctx context.Context, userID string) error {
 	req := NewRequestWithUser(MsgTriggerScan, userID)
 	resp, err := c.sendRequest(ctx, req)
@@ -162,22 +128,7 @@ func (c *Client) TriggerScan(ctx context.Context, userID string) error {
 	return nil
 }
 
-// OpenLogs opens the log viewer.
-// Pass "service" for service logs, or a user ID for user logs.
-func (c *Client) OpenLogs(ctx context.Context, userID string) error {
-	req := NewRequestWithUser(MsgOpenLogs, userID)
-	resp, err := c.sendRequest(ctx, req)
-	if err != nil {
-		return err
-	}
-
-	if !resp.Success {
-		return fmt.Errorf("server error: %s", resp.Error)
-	}
-	return nil
-}
-
-// IsServiceRunning checks if the IPC server (and thus the service) is running.
+// IsServiceRunning checks if the IPC server (and thus the daemon) is running.
 func (c *Client) IsServiceRunning(ctx context.Context) bool {
 	_, err := c.GetStatus(ctx)
 	return err == nil
@@ -190,8 +141,6 @@ func (c *Client) Ping(ctx context.Context) error {
 }
 
 // Shutdown sends a shutdown command to the daemon.
-// Note: On Windows, service shutdown is typically handled via SCM,
-// but this method is provided for API parity with Unix.
 func (c *Client) Shutdown(ctx context.Context) error {
 	req := NewRequest(MsgShutdown)
 	resp, err := c.sendRequest(ctx, req)
@@ -263,8 +212,7 @@ func (c *Client) GetTransferStatus(ctx context.Context) (*DaemonTransferSnapshot
 }
 
 // CancelDaemonBatch asks the daemon to cancel all non-terminal tasks in a
-// specific batch. userID routes to the correct per-user daemon in service
-// mode; subprocess mode ignores it.
+// specific batch. The daemon ignores userID.
 func (c *Client) CancelDaemonBatch(ctx context.Context, userID, batchID string) error {
 	req := NewRequestWithUser(MsgCancelDaemonBatch, userID)
 	req.BatchID = batchID

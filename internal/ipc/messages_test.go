@@ -7,7 +7,7 @@ import (
 )
 
 func TestMessageConstructors(t *testing.T) {
-	status := &StatusData{ServiceState: "running"}
+	status := &StatusData{Version: "4.0.0"}
 	for _, tc := range []struct {
 		name      string
 		got, want any
@@ -50,11 +50,9 @@ func TestRequestEncodeDecode(t *testing.T) {
 func TestResponseEncodeDecode(t *testing.T) {
 	now := time.Now()
 	original := NewStatusResponse(&StatusData{
-		ServiceState:    "running",
 		Version:         "4.0.0",
 		LastScanTime:    &now,
 		ActiveDownloads: 1,
-		ActiveUsers:     2,
 	})
 
 	// Encode
@@ -79,9 +77,8 @@ func TestResponseEncodeDecode(t *testing.T) {
 
 func TestGetStatusData(t *testing.T) {
 	status := &StatusData{
-		ServiceState: "running",
-		Version:      "4.0.0",
-		ActiveUsers:  5,
+		Version:         "4.0.0",
+		ActiveDownloads: 5,
 	}
 	resp := NewStatusResponse(status)
 
@@ -95,14 +92,11 @@ func TestGetStatusData(t *testing.T) {
 		t.Fatal("GetStatusData() returned nil")
 	}
 
-	if extracted.ServiceState != "running" {
-		t.Errorf("ServiceState mismatch: got %q", extracted.ServiceState)
-	}
 	if extracted.Version != "4.0.0" {
 		t.Errorf("Version mismatch: got %q", extracted.Version)
 	}
-	if extracted.ActiveUsers != 5 {
-		t.Errorf("ActiveUsers mismatch: got %d", extracted.ActiveUsers)
+	if extracted.ActiveDownloads != 5 {
+		t.Errorf("ActiveDownloads mismatch: got %d", extracted.ActiveDownloads)
 	}
 }
 
@@ -142,8 +136,6 @@ func TestMessageTypes(t *testing.T) {
 		MsgPauseUser:        true,
 		MsgResumeUser:       true,
 		MsgTriggerScan:      true,
-		MsgOpenLogs:         true,
-		MsgOpenGUI:          true,
 		MsgGetUserList:      true,
 		MsgShutdown:         true,
 		MsgStatusResponse:   true,
@@ -152,8 +144,8 @@ func TestMessageTypes(t *testing.T) {
 		MsgError:            true,
 	}
 
-	if len(types) != 12 {
-		t.Errorf("expected 12 unique message types, got %d", len(types))
+	if len(types) != 10 {
+		t.Errorf("expected 10 unique message types, got %d", len(types))
 	}
 }
 

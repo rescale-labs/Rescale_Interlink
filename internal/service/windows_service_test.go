@@ -31,7 +31,9 @@ func TestRetiredServiceReportsRunningThenStops(t *testing.T) {
 }
 
 // With no service to remove, 'service uninstall' succeeds, so the installer
-// can run it on any machine.
+// can run it on any machine. Run as administrator, it also deletes the
+// ServiceInstalled value an earlier version's install left under
+// HKLM\SOFTWARE\Rescale\Interlink, as the installer's run does.
 func TestUninstallWithoutTheServiceSucceeds(t *testing.T) {
 	if IsInstalled() {
 		t.Skip("a Rescale Interlink service is installed on this machine")

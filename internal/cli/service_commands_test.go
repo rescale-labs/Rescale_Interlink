@@ -21,7 +21,9 @@ func TestServiceUninstallIsHiddenAndWindowsOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the command reaches the Service Control Manager on Windows")
 	}
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home) // where a report would go on Linux
 	_, err := runDaemonCommand(t, newServiceCmd(), "uninstall")
 	if err == nil || !strings.Contains(err.Error(), "only supported on Windows") {
 		t.Fatalf("service uninstall: %v, want it refused as Windows-only", err)

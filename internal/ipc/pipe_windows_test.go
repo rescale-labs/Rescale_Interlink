@@ -3,7 +3,6 @@
 package ipc
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"net"
 	"os"
 	"reflect"
-	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -19,44 +17,6 @@ import (
 	"github.com/Microsoft/go-winio"
 	"golang.org/x/sys/windows"
 )
-
-func TestIsPipeInUse_NoPipe(t *testing.T) {
-	// Ensure no daemon is running by checking if pipe exists
-	// If another test left a daemon running, skip this test
-	if IsPipeInUse() {
-		t.Skip("Pipe is in use (daemon may be running), cannot test absent pipe scenario")
-	}
-
-	// Test should return false for absent pipe
-	if IsPipeInUse() {
-		t.Error("IsPipeInUse should return false when no pipe exists")
-	}
-}
-
-func TestWindowsErrorCodes(t *testing.T) {
-	// Verify our constants match Windows error codes
-	if ERROR_FILE_NOT_FOUND != syscall.Errno(2) {
-		t.Errorf("ERROR_FILE_NOT_FOUND mismatch: got %d, want 2", ERROR_FILE_NOT_FOUND)
-	}
-	if ERROR_PIPE_BUSY != syscall.Errno(231) {
-		t.Errorf("ERROR_PIPE_BUSY mismatch: got %d, want 231", ERROR_PIPE_BUSY)
-	}
-	if ERROR_ACCESS_DENIED != syscall.Errno(5) {
-		t.Errorf("ERROR_ACCESS_DENIED mismatch: got %d, want 5", ERROR_ACCESS_DENIED)
-	}
-}
-
-func TestIsPipeInUse_ConsistentResults(t *testing.T) {
-	// Call IsPipeInUse multiple times and verify consistent results
-	// This helps catch any state-dependent bugs
-	result1 := IsPipeInUse()
-	result2 := IsPipeInUse()
-	result3 := IsPipeInUse()
-
-	if result1 != result2 || result2 != result3 {
-		t.Errorf("IsPipeInUse returned inconsistent results: %v, %v, %v", result1, result2, result3)
-	}
-}
 
 // withSID stands sid in for this process's SID until the test ends.
 func withSID(t *testing.T, sid func() (string, error)) {
@@ -79,7 +39,8 @@ func testPipe(t *testing.T) string {
 }
 
 // The daemon listens on its user's pipe with the real DACL, and the same
-// user's client reaches it there; a second daemon of that user is refused.
+// user's client reaches it there and may change it; a second daemon of that
+// user is refused.
 func TestServer_ListensOnThisUsersPipe(t *testing.T) {
 	// A base of the test's own: other packages' tests, run at the same time,
 	// take this user's real daemon pipe for a sign that a daemon runs.
@@ -91,6 +52,9 @@ func TestServer_ListensOnThisUsersPipe(t *testing.T) {
 		t.Fatalf("currentUserSID: %v", err)
 	}
 	name, _ := pipeNameFor(pipeBase, sid)
+	if IsPipeInUse() {
+		t.Fatalf("%s is in use before the test listens on it", name)
+	}
 	srv := newSubprocessModeServerForTest(&capturingHandler{})
 	if err := srv.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -106,6 +70,11 @@ func TestServer_ListensOnThisUsersPipe(t *testing.T) {
 	if _, err := NewClient().GetStatus(context.Background()); err != nil {
 		t.Errorf("the same user's client cannot reach the daemon: %v", err)
 	}
+	// A modify request is served only once the server has found the caller's
+	// SID through the pipe, and the caller is the owner.
+	if err := NewClient().PauseUser(context.Background(), ""); err != nil {
+		t.Errorf("the daemon's owner cannot pause it over its pipe: %v", err)
+	}
 	if err := newSubprocessModeServerForTest(&capturingHandler{}).Start(); err == nil {
 		t.Error("a second daemon of the same user started")
 	}
@@ -115,11 +84,11 @@ func TestServer_ListensOnThisUsersPipe(t *testing.T) {
 		t.Fatalf("dial %s: %v", name, err)
 	}
 	defer conn.Close()
-	handle, ok := findHandleRecursive(reflect.ValueOf(conn), 0)
+	f, ok := conn.(interface{ Fd() uintptr })
 	if !ok {
 		t.Fatal("no handle on the pipe connection")
 	}
-	sd, err := windows.GetSecurityInfo(handle, windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetSecurityInfo(windows.Handle(f.Fd()), windows.SE_KERNEL_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatalf("GetSecurityInfo: %v", err)
 	}
@@ -143,47 +112,6 @@ func TestServer_ListensOnThisUsersPipe(t *testing.T) {
 	}
 	if want := []string{sid, "S-1-5-18"}; !reflect.DeepEqual(trustees, want) {
 		t.Errorf("pipe DACL admits %v, want %v (its user and LocalSystem)", trustees, want)
-	}
-}
-
-// Every caller finds the daemon by the pipe named for its user's SID.
-func TestEveryPath_UsesThePipeNamedForTheUser(t *testing.T) {
-	withSID(t, func() (string, error) { return testSID, nil })
-	withPipeOwner(t, testSID)
-	name, _ := pipeNameFor(pipeBase, testSID)
-	if IsPipeInUse() {
-		t.Fatalf("%s is in use before the test listens on it", name)
-	}
-	l, err := winio.ListenPipe(name, nil)
-	if err != nil {
-		t.Fatalf("listen on %s: %v", name, err)
-	}
-	defer l.Close()
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				defer conn.Close()
-				if _, err := bufio.NewReader(conn).ReadBytes('\n'); err != nil {
-					return
-				}
-				data, _ := NewStatusResponse(&StatusData{Version: "test"}).Encode()
-				conn.Write(append(data, '\n'))
-			}()
-		}
-	}()
-
-	if _, err := NewClient().GetStatus(context.Background()); err != nil {
-		t.Errorf("the client did not reach %s: %v", name, err)
-	}
-	if !IsPipeInUse() {
-		t.Errorf("IsPipeInUse does not look at %s", name)
-	}
-	if err := newSubprocessModeServerForTest(&capturingHandler{}).Start(); err == nil {
-		t.Errorf("Start went ahead while %s was in use", name)
 	}
 }
 

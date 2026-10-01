@@ -24,10 +24,8 @@ type mockHandler struct {
 
 func (h *mockHandler) GetStatus() *StatusData {
 	return &StatusData{
-		ServiceState:    "running",
 		Version:         "test",
 		ActiveDownloads: 2,
-		ActiveUsers:     1,
 	}
 }
 
@@ -49,10 +47,6 @@ func (h *mockHandler) ResumeUser(userID string) error {
 
 func (h *mockHandler) TriggerScan(userID string) error {
 	h.scanCalled = true
-	return nil
-}
-
-func (h *mockHandler) OpenLogs(userID string) error {
 	return nil
 }
 
@@ -117,8 +111,8 @@ func TestUnixIPCClientServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetStatus failed: %v", err)
 		}
-		if status.ServiceState != "running" {
-			t.Errorf("Expected state 'running', got '%s'", status.ServiceState)
+		if status.Version != "test" {
+			t.Errorf("Expected version 'test', got '%s'", status.Version)
 		}
 		if status.ActiveDownloads != 2 {
 			t.Errorf("Expected 2 active downloads, got %d", status.ActiveDownloads)
