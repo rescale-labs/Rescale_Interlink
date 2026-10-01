@@ -736,7 +736,7 @@ func ValidateWorkerCounts(cfg *config.Config) error {
 func ValidateSubmitModes(jobs []models.JobSpec) error {
 	for i, job := range jobs {
 		if _, err := pipeline.NormalizeSubmitMode(job.SubmitMode); err != nil {
-			return fmt.Errorf("job %d (%s): Invalid submit mode: %w", i+1, job.JobName, err)
+			return reporting.UsageError(fmt.Errorf("job %d (%s): Invalid submit mode: %w", i+1, job.JobName, err))
 		}
 	}
 	return nil
@@ -789,7 +789,7 @@ func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []mod
 	}
 	for i, job := range jobs {
 		if err := validation.ValidateLicensePair(job.LicenseFeatureName, job.LicensesPerJob); err != nil {
-			return nil, nil, fmt.Errorf("job %d (%s): %w", i+1, job.JobName, err)
+			return nil, nil, reporting.UsageError(fmt.Errorf("job %d (%s): %w", i+1, job.JobName, err))
 		}
 	}
 

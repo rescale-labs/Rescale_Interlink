@@ -12,6 +12,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/parser/testsupport"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // fakeLookup answers the two listings ToJobRequest asks for, failing with err
@@ -298,6 +299,11 @@ func TestSGEMetadata_ToJobRequestLooksUpNames(t *testing.T) {
 		_, err = m.ToJobRequest(context.Background(), &fakeLookup{err: tt.err})
 		if err == nil || !strings.Contains(err.Error(), "at line 2") || !strings.Contains(err.Error(), tt.reason) {
 			t.Errorf("%q: error %v, want a refusal naming line 2 and saying %q", tt.line, err, tt.reason)
+		}
+		// The script's mistake is the user's to put right; a failed listing is
+		// passed on, for its error report.
+		if got, want := reporting.IsUsageError(err), tt.err == nil; got != want {
+			t.Errorf("%q: IsUsageError(%v) = %v, want %v", tt.line, err, got, want)
 		}
 	}
 }

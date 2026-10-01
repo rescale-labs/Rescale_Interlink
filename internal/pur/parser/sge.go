@@ -17,6 +17,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/validation"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // SGEMetadata represents parsed metadata from an SGE script
@@ -161,7 +162,7 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 			err = setDirective(metadata, first, d[1], d[2] == "=", strings.TrimSpace(d[3]), lineNum)
 		}
 		if err != nil {
-			return nil, err
+			return nil, reporting.UsageError(err) // the script's own mistake
 		}
 	}
 
@@ -197,7 +198,7 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 
 	// Validate required fields
 	if err := p.validate(metadata); err != nil {
-		return nil, err
+		return nil, reporting.UsageError(err)
 	}
 
 	return metadata, nil
@@ -551,7 +552,8 @@ type Lookup interface {
 // validation to report.
 func (m *SGEMetadata) ToJobRequest(ctx context.Context, lookup Lookup) (*models.JobRequest, error) {
 	if err := m.checkLicenseFeatures(); err != nil {
-		return nil, fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w", m.licenseSettingsLine, err)
+		return nil, reporting.UsageError(fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w",
+			m.licenseSettingsLine, err))
 	}
 	projectID, found, err := m.lookUpNames(ctx, lookup)
 	if err != nil {
@@ -640,8 +642,8 @@ func (m *SGEMetadata) lookUpNames(ctx context.Context, lookup Lookup) (string, *
 		}
 		i := slices.IndexFunc(projects, func(p api.Project) bool { return p.Name == m.projectName })
 		if i < 0 {
-			return "", nil, fmt.Errorf("RESCALE_PROJECT_ID at line %d: you have no project named %q "+
-				"(#RESCALE_PROJECT_ID= takes a project's name, #RESCALE_PROJECT_ID <id> its ID)", m.projectLine, m.projectName)
+			return "", nil, reporting.UsageError(fmt.Errorf("RESCALE_PROJECT_ID at line %d: you have no project named %q "+
+				"(#RESCALE_PROJECT_ID= takes a project's name, #RESCALE_PROJECT_ID <id> its ID)", m.projectLine, m.projectName))
 		}
 		projectID = projects[i].ID
 	}
