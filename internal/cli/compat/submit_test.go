@@ -16,6 +16,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
+	"github.com/rescale/rescale-int/internal/pur/parser/testsupport"
 )
 
 func TestCompatStageSubmitFiles(t *testing.T) {
@@ -386,65 +387,86 @@ func TestCompatE2EDownload_AppliesFilters(t *testing.T) {
 	}
 }
 
-// TestCompatSubmitLicenseDirective runs submit against a fake API, with the
-// upload of its two staged files stood in for and counted. rescale-cli writes
-// the license directive with "=" and Interlink with a space; either way the
-// create request carries the userDefinedLicenseSettings object, or null when
-// there is none. One that cannot be sent as written is refused, naming its
-// line, before anything is uploaded or created.
-func TestCompatSubmitLicenseDirective(t *testing.T) {
-	const settings = `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`
-	var mu sync.Mutex
-	var creates [][]byte
+// fakeSubmitAPI answers what submit asks the API for, with the user's projects
+// and the core types for a script that names them, and keeps each job
+// create's body. The upload of submit's two staged files is stood in for and
+// counted: they go to the storage the platform names.
+type fakeSubmitAPI struct {
+	client  *api.Client
+	mu      sync.Mutex
+	creates [][]byte
+	uploads int
+}
+
+func newFakeSubmitAPI(t *testing.T) *fakeSubmitAPI {
+	t.Helper()
+	f := &fakeSubmitAPI{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		switch r.Method + " " + r.URL.Path {
 		case "POST /api/v3/jobs/":
-			mu.Lock()
-			creates = append(creates, body)
-			mu.Unlock()
+			f.mu.Lock()
+			f.creates = append(f.creates, body)
+			f.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":"JOB1"}`)
 		case "POST /api/v2/jobs/JOB1/submit/":
+		case "GET /api/v2/users/me/projects/":
+			fmt.Fprint(w, `{"results":[{"id":"PROJ0","name":"Other"},{"id":"PROJ1","name":"CFD Program"}]}`)
+		case "GET /api/v3/coretypes/":
+			fmt.Fprint(w, `{"results":[{"code":"emerald","name":"Emerald","cores":[1,2,4,8]}]}`)
 		default:
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(server.Close)
-	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+	f.client = api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
 
-	uploads := 0
 	orig := compatSubmitUploadFn
 	t.Cleanup(func() { compatSubmitUploadFn = orig })
 	compatSubmitUploadFn = func(context.Context, []string, string, *api.Client, *CompatContext) ([]string, error) {
-		uploads++
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.uploads++
 		return []string{"RUNSH", "INPUTZIP"}, nil
 	}
+	return f
+}
 
+// submit runs submit on a script holding content, and returns the uploads made,
+// the bodies of the jobs created and submit's error.
+func (f *fakeSubmitAPI) submit(t *testing.T, content string) (int, [][]byte, error) {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "job.sge")
+	if err := os.WriteFile(script, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newSubmitCmd()
+	cmd.SetContext(context.Background())
+	SetCompatContext(cmd, &CompatContext{Quiet: true, apiClient: f.client})
+	err := cmd.RunE(cmd, []string{script})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.uploads, append([][]byte(nil), f.creates...), err
+}
+
+// TestCompatSubmitLicenseDirective: rescale-cli writes the license directive
+// with "=" and Interlink with a space; either way the create request carries
+// the userDefinedLicenseSettings object, or null when there is none, as for
+// rescale-cli's "=" with nothing after it. One that cannot be sent as written
+// is refused, naming its line, before anything is uploaded or created.
+func TestCompatSubmitLicenseDirective(t *testing.T) {
+	const settings = `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`
 	for _, tt := range []struct{ directive, want string }{
 		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=" + settings, settings},
 		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS " + settings, settings},
 		{"", "null"},
-		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=", ""},
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=", "null"},
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS ", ""},
 		{`#RESCALE_USER_DEFINED_LICENSE_SETTINGS={"featureSets":[{"name":"USER_SPECIFIED_0",` +
 			`"features":[{"name":"ansys_hpc"}]}]}`, ""},
 	} {
-		mu.Lock()
-		creates = nil
-		mu.Unlock()
-		uploads = 0
-		script := filepath.Join(t.TempDir(), "job.sge")
-		if err := os.WriteFile(script, []byte("#!/bin/bash\n"+tt.directive+"\n./solve.sh\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		cmd := newSubmitCmd()
-		cmd.SetContext(context.Background())
-		SetCompatContext(cmd, &CompatContext{Quiet: true, apiClient: client})
-		err := cmd.RunE(cmd, []string{script})
-
-		mu.Lock()
-		sent := append([][]byte(nil), creates...)
-		mu.Unlock()
+		uploads, sent, err := newFakeSubmitAPI(t).submit(t, "#!/bin/bash\n"+tt.directive+"\n./solve.sh\n")
 		if tt.want == "" {
 			if err == nil || !strings.Contains(err.Error(), "at line 2") || uploads != 0 || len(sent) != 0 {
 				t.Errorf("%q: error %v after %d upload(s) and %d create(s), want a refusal naming line 2 before either",
@@ -465,4 +487,18 @@ func TestCompatSubmitLicenseDirective(t *testing.T) {
 			t.Errorf("%q: userDefinedLicenseSettings = %s\nwant %s", tt.directive, got, tt.want)
 		}
 	}
+}
+
+// TestCompatSubmitSendsWhatRescaleCLIWould: submit takes a script written for
+// rescale-cli and creates the job rescale-cli would, checked field by field:
+// what each directive sets, the project and core type looked up by name, and
+// the existing file ahead of the two staged files, with ./run.sh as the
+// command, as rescale-cli sends them.
+func TestCompatSubmitSendsWhatRescaleCLIWould(t *testing.T) {
+	_, sent, err := newFakeSubmitAPI(t).submit(t, testsupport.RescaleCLIScript)
+	if err != nil || len(sent) != 1 {
+		t.Fatalf("submit: %v, %d create(s)", err, len(sent))
+	}
+	testsupport.CheckRequest(t, sent[0], testsupport.RescaleCLIRequest("./run.sh",
+		`[{"id": "FILE1", "decompress": true}, {"id": "RUNSH", "decompress": true}, {"id": "INPUTZIP", "decompress": true}]`))
 }

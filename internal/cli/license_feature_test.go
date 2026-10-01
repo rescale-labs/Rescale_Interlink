@@ -17,8 +17,9 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 )
 
-// fakeJobsAPI answers job creates and submits and records every request, with
-// the body of each create.
+// fakeJobsAPI answers job creates and submits, and the user's projects and the
+// core types for a script that names them, and records every request, with the
+// body of each create.
 type fakeJobsAPI struct {
 	mu       sync.Mutex
 	requests []string
@@ -39,6 +40,10 @@ func (f *fakeJobsAPI) client(t *testing.T) *api.Client {
 			_, _ = w.Write([]byte(`{"id":"JOB1","name":"lic-job"}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/jobs/JOB1/submit/":
 			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/users/me/projects/":
+			_, _ = w.Write([]byte(`{"results":[{"id":"PROJ0","name":"Other"},{"id":"PROJ1","name":"CFD Program"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/coretypes/":
+			_, _ = w.Write([]byte(`{"results":[{"code":"emerald","name":"Emerald","cores":[1,2,4,8]}]}`))
 		default:
 			http.Error(w, `{"detail": "not faked"}`, http.StatusBadRequest)
 		}
@@ -78,8 +83,9 @@ const sgeScriptHead = "#!/bin/bash\n#RESCALE_NAME lic-job\n#RESCALE_COMMAND ./ru
 
 // jobs submit --script reads the license directive in either spelling, and the
 // create request carries it as the userDefinedLicenseSettings object, or null
-// when there is none. One that cannot be sent as written is refused, naming its
-// line, before --files are uploaded or the job is created.
+// when there is none, as for rescale-cli's "=" with nothing after it. One that
+// cannot be sent as written is refused, naming its line, before --files are
+// uploaded or the job is created.
 func TestJobsSubmitScriptLicenseDirective(t *testing.T) {
 	const settings = `{"featureSets":[{"name":"USER_SPECIFIED_0","features":[{"name":"ansys_hpc","count":8}]}]}`
 	var fake *fakeJobsAPI
@@ -92,7 +98,8 @@ func TestJobsSubmitScriptLicenseDirective(t *testing.T) {
 		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS " + settings, settings},
 		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=" + settings, settings},
 		{"", "null"},
-		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=", ""},
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS=", "null"},
+		{"#RESCALE_USER_DEFINED_LICENSE_SETTINGS ", ""},
 		{`#RESCALE_USER_DEFINED_LICENSE_SETTINGS={"featureSets":[{"name":"USER_SPECIFIED_0",` +
 			`"features":[{"name":"ansys_hpc"}]}]}`, ""},
 	} {

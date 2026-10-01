@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -433,7 +434,7 @@ func TestSGEParser_UserDefinedLicenseSettings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req, err := m.ToJobRequest()
+			req, err := m.ToJobRequest(context.Background(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -462,13 +463,17 @@ func TestSGEParser_UserDefinedLicenseSettings(t *testing.T) {
 		})
 	}
 
-	// With no value at all, after either separator or none, and with either
-	// line ending.
-	for _, directive := range []string{d + "=", d + " ", d + "\t", d} {
-		for _, eol := range []string{"\n", "\r\n"} {
+	// With no value in Interlink's spelling, after a space, a tab or nothing,
+	// with either line ending. rescale-cli reads "=" with nothing after it as
+	// no setting, so that sets none.
+	for _, eol := range []string{"\n", "\r\n"} {
+		for _, directive := range []string{d + " ", d + "\t", d} {
 			if _, err := parse(t, directive, eol); err == nil || !strings.Contains(err.Error(), d[1:]+" at line 8") {
 				t.Errorf("%q with line ending %q: error %v, want a refusal naming line 8", directive, eol, err)
 			}
+		}
+		if m, err := parse(t, d+"=", eol); err != nil || m.UserDefinedLicenseSettings != nil {
+			t.Errorf("%q with line ending %q: error %v, want no setting", d+"=", eol, err)
 		}
 	}
 
@@ -487,7 +492,7 @@ func TestSGEParser_UserDefinedLicenseSettings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := m.ToJobRequest(); err == nil || !strings.Contains(err.Error(), d[1:]+" at line 8") {
+			if _, err := m.ToJobRequest(context.Background(), nil); err == nil || !strings.Contains(err.Error(), d[1:]+" at line 8") {
 				t.Errorf("error %v, want a refusal naming line 8", err)
 			}
 		})
@@ -514,7 +519,7 @@ func TestSGEMetadata_ToJobRequest(t *testing.T) {
 		PublicKey:       "ssh-rsa AAAAB3NzaC1yc2E",
 	}
 
-	jobReq, err := metadata.ToJobRequest()
+	jobReq, err := metadata.ToJobRequest(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +556,7 @@ func TestSGEMetadata_ToJobRequest_DefaultSlots(t *testing.T) {
 		Walltime:     3,
 	}
 
-	jobReq, err := metadata.ToJobRequest()
+	jobReq, err := metadata.ToJobRequest(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

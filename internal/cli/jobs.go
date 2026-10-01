@@ -467,6 +467,9 @@ Examples:
 				if err != nil {
 					return fmt.Errorf("failed to parse SGE script: %w", err)
 				}
+				for _, w := range metadata.Warnings {
+					logger.Warn().Msg(w)
+				}
 
 				// Display parsed metadata
 				fmt.Println("Parsed SGE script metadata:")
@@ -475,7 +478,7 @@ Examples:
 				fmt.Println(strings.Repeat("-", 60))
 
 				// Convert to job request
-				if jobReq, err = metadata.ToJobRequest(); err != nil {
+				if jobReq, err = metadata.ToJobRequest(ctx, apiClient); err != nil {
 					return fmt.Errorf("failed to parse SGE script: %w", err)
 				}
 			} else {
@@ -1036,7 +1039,7 @@ func uploadAndCreateJob(
 	var uploadedFileIDs []string
 	if len(inputFiles) > 0 {
 		logger.Info().Int("count", len(inputFiles)).Msg("Uploading input files")
-		fileIDs, err := UploadFilesWithIDs(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
+		fileIDs, err := uploadFilesWithIDsFn(ctx, inputFiles, "", maxConcurrent, false, nil, apiClient, logger, false)
 		if err != nil {
 			return nil, fmt.Errorf("file upload failed: %w", err)
 		}
@@ -1048,7 +1051,7 @@ func uploadAndCreateJob(
 			for i, fileID := range uploadedFileIDs {
 				inputFileRequests[i] = models.InputFileRequest{ID: fileID}
 			}
-			jobReq.JobAnalyses[0].InputFiles = inputFileRequests
+			jobReq.JobAnalyses[0].InputFiles = append(jobReq.JobAnalyses[0].InputFiles, inputFileRequests...)
 			logger.Info().Int("count", len(uploadedFileIDs)).Msg("Associated files with job")
 		}
 		fmt.Printf("\n✓ Uploaded %d file(s)\n\n", len(uploadedFileIDs))
@@ -1151,7 +1154,7 @@ func runEndToEndJobWorkflow(
 			for i, fileID := range uploadedFileIDs {
 				inputFileRequests[i] = models.InputFileRequest{ID: fileID}
 			}
-			jobReq.JobAnalyses[0].InputFiles = inputFileRequests
+			jobReq.JobAnalyses[0].InputFiles = append(jobReq.JobAnalyses[0].InputFiles, inputFileRequests...)
 			logger.Info().Int("count", len(uploadedFileIDs)).Msg("Associated files with job")
 		}
 	} else {

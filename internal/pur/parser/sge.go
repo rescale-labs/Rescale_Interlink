@@ -3,15 +3,18 @@ package parser
 import (
 	"bufio"
 	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/validation"
 )
@@ -27,6 +30,7 @@ type SGEMetadata struct {
 	CoresPerSlot    int
 	Slots           int
 	Walltime        int
+	IsLowPriority   bool
 
 	// Metadata
 	Tags      []string
@@ -45,8 +49,22 @@ type SGEMetadata struct {
 	// from, for SGEMetadataToJobSpec to name.
 	licenseSettingsLine int
 
-	// Input files referenced in script
+	// A rescale-cli script names its project, and may name its core type, where
+	// the job request carries the project's ID and the core type's code, which
+	// ToJobRequest looks up. The lines are where the script gave them.
+	projectName               string
+	projectLine, coreTypeLine int
+
+	// coresDefaulted says compat's default filled CoresPerSlot.
+	coresDefaulted bool
+
+	// InputFiles are the IDs of files already on Rescale that the job takes as
+	// inputs, from #RESCALE_EXISTING_FILES.
 	InputFiles []string
+
+	// Warnings are about lines the script gives that are accepted but not
+	// sent, for the caller to show.
+	Warnings []string
 }
 
 // ParseOptions controls optional behavior during SGE script parsing.
@@ -55,33 +73,25 @@ type ParseOptions struct {
 }
 
 // SGEParser parses SGE-style scripts with #RESCALE_* metadata comments
-type SGEParser struct {
-	patterns map[string]*regexp.Regexp
-}
+type SGEParser struct{}
 
 // NewSGEParser creates a new SGE script parser
 func NewSGEParser() *SGEParser {
-	return &SGEParser{
-		patterns: map[string]*regexp.Regexp{
-			"name":                  regexp.MustCompile(`^#RESCALE_NAME\s+(.+)`),
-			"command":               regexp.MustCompile(`^#RESCALE_COMMAND\s+(.+)`),
-			"analysis":              regexp.MustCompile(`^#RESCALE_ANALYSIS\s+(.+)`),
-			"version":               regexp.MustCompile(`^#RESCALE_ANALYSIS_VERSION\s+(.+)`),
-			"cores":                 regexp.MustCompile(`^#RESCALE_CORES\s+(.+)`),
-			"cores_per_slot":        regexp.MustCompile(`^#RESCALE_CORES_PER_SLOT\s+(\d+)`),
-			"slots":                 regexp.MustCompile(`^#RESCALE_SLOTS\s+(\d+)`),
-			"walltime":              regexp.MustCompile(`^#RESCALE_WALLTIME\s+(\d+)`),
-			"tags":                  regexp.MustCompile(`^#RESCALE_TAGS\s+(.+)`),
-			"project":               regexp.MustCompile(`^#RESCALE_PROJECT_ID\s+(.+)`),
-			"ssh_cidr":              regexp.MustCompile(`^#RESCALE_INBOUND_SSH_CIDR\s+(.+)`),
-			"public_key":            regexp.MustCompile(`^#RESCALE_PUBLIC_KEY\s+(.+)`),
-			"license":               regexp.MustCompile(`^#USE_RESCALE_LICENSE\s+(true|false)`),
-			"env":                   regexp.MustCompile(`^#RESCALE_ENV_(\w+)\s+(.+)`),
-			"user_license_settings": regexp.MustCompile(`^#RESCALE_USER_DEFINED_LICENSE_SETTINGS(?:=|\s+|$)(.*)`),
-			"automation":            regexp.MustCompile(`^#RESCALE_AUTOMATION\s+(\S+)`),
-		},
-	}
+	return &SGEParser{}
 }
+
+// directiveLine splits a directive line into its name, its separator and its
+// value: Interlink writes "#RESCALE_NAME job1", rescale-cli
+// "#RESCALE_NAME=job1", and #USE_RESCALE_LICENSE may stand alone. rescale-cli
+// also reads an indented directive.
+var directiveLine = regexp.MustCompile(`^\s*#(\w+)(=|\s+|$)(.*)`)
+
+// qsubCores finds the core count on a "#$ -pe" line, the way rescale-cli does.
+var qsubCores = regexp.MustCompile(`^#\$ -pe .* ([1-9]\d*)`)
+
+// rescaleCLIEnv is rescale-cli's "#RESCALE_ENV_NAME=value", whose name runs to
+// the line's last "=".
+var rescaleCLIEnv = regexp.MustCompile(`^\s*#RESCALE_ENV_(.*)=(.*)`)
 
 // Parse reads an SGE script and extracts metadata.
 func (p *SGEParser) Parse(scriptPath string) (*SGEMetadata, error) {
@@ -104,6 +114,7 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 	}
 
 	var scriptBodyLines []string
+	first := map[string]int{} // the line of each directive's first "=" form
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
 	for scanner.Scan() {
@@ -119,18 +130,17 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 
 		// #$ -N NAME: SGE job name directive (only sets if not already set by #RESCALE_NAME)
 		if strings.HasPrefix(line, "#$ -N ") {
-			if name := strings.TrimSpace(line[6:]); name != "" && metadata.Name == "" {
+			if name := unquote(strings.TrimSpace(line[6:])); name != "" && metadata.Name == "" {
 				metadata.Name = name
 			}
 			continue
 		}
 
-		// #$ -pe smp N: SGE parallel environment cores per slot (only sets if not already set)
-		if strings.HasPrefix(line, "#$ -pe smp ") {
-			if val := strings.TrimSpace(line[11:]); val != "" && metadata.CoresPerSlot == 0 {
-				if v, err := strconv.Atoi(val); err == nil && v > 0 {
-					metadata.CoresPerSlot = v
-				}
+		// #$ -pe ENV N: cores per slot, for any parallel environment, as
+		// rescale-cli reads it (only sets if not already set)
+		if strings.HasPrefix(line, "#$ -pe ") {
+			if c := qsubCores.FindStringSubmatch(line); c != nil && metadata.CoresPerSlot == 0 {
+				metadata.CoresPerSlot, _ = strconv.Atoi(c[1])
 			}
 			continue
 		}
@@ -141,71 +151,17 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 			scriptBodyLines = append(scriptBodyLines, trimmed)
 		}
 
-		// Parse each metadata field
-		if matches := p.patterns["name"].FindStringSubmatch(line); matches != nil {
-			metadata.Name = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["command"].FindStringSubmatch(line); matches != nil {
-			metadata.Command = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["analysis"].FindStringSubmatch(line); matches != nil {
-			metadata.Analysis = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["version"].FindStringSubmatch(line); matches != nil {
-			metadata.AnalysisVersion = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["cores"].FindStringSubmatch(line); matches != nil {
-			metadata.CoreType = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["cores_per_slot"].FindStringSubmatch(line); matches != nil {
-			val, err := strconv.Atoi(matches[1])
-			if err != nil {
-				return nil, fmt.Errorf("invalid RESCALE_CORES_PER_SLOT at line %d: %w", lineNum, err)
-			}
-			metadata.CoresPerSlot = val
-		} else if matches := p.patterns["slots"].FindStringSubmatch(line); matches != nil {
-			val, err := strconv.Atoi(matches[1])
-			if err != nil {
-				return nil, fmt.Errorf("invalid RESCALE_SLOTS at line %d: %w", lineNum, err)
-			}
-			metadata.Slots = val
-		} else if matches := p.patterns["walltime"].FindStringSubmatch(line); matches != nil {
-			val, err := strconv.Atoi(matches[1])
-			if err != nil {
-				return nil, fmt.Errorf("invalid RESCALE_WALLTIME at line %d: %w", lineNum, err)
-			}
-			metadata.Walltime = val
-		} else if matches := p.patterns["tags"].FindStringSubmatch(line); matches != nil {
-			tags := strings.Split(matches[1], ",")
-			for _, tag := range tags {
-				trimmed := strings.TrimSpace(tag)
-				if trimmed != "" {
-					metadata.Tags = append(metadata.Tags, trimmed)
-				}
-			}
-		} else if matches := p.patterns["project"].FindStringSubmatch(line); matches != nil {
-			metadata.ProjectID = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["ssh_cidr"].FindStringSubmatch(line); matches != nil {
-			metadata.InboundSSHCIDR = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["public_key"].FindStringSubmatch(line); matches != nil {
-			metadata.PublicKey = strings.TrimSpace(matches[1])
-		} else if matches := p.patterns["license"].FindStringSubmatch(line); matches != nil {
-			metadata.UseLicense = matches[1] == "true"
-		} else if matches := p.patterns["env"].FindStringSubmatch(line); matches != nil {
-			envName := matches[1]
-			envValue := strings.TrimSpace(matches[2])
-			metadata.EnvVariables[envName] = envValue
-		} else if matches := p.patterns["user_license_settings"].FindStringSubmatch(line); matches != nil {
-			// The API's userDefinedLicenseSettings object as JSON, after "="
-			// (rescale-cli's spelling), a space, or nothing at all. Refused unless
-			// it decodes into feature sets: sent on as text, or dropped, it would
-			// leave the job without the license queuing the script asks for.
-			settings, err := decodeLicenseSettings(strings.TrimSpace(matches[1]))
-			if err != nil {
-				return nil, fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w; write it as %s",
-					lineNum, err, licenseSettingsExample)
-			}
-			metadata.UserDefinedLicenseSettings, metadata.licenseSettingsLine = settings, lineNum
-		} else if matches := p.patterns["automation"].FindStringSubmatch(line); matches != nil {
-			automationID := strings.TrimSpace(matches[1])
-			if automationID != "" {
-				metadata.Automations = append(metadata.Automations, automationID)
-			}
+		// An environment line in Interlink's form, a name and a space, keeps
+		// Interlink's reading, "=" in its value and all.
+		var err error
+		d := directiveLine.FindStringSubmatch(line)
+		if e := rescaleCLIEnv.FindStringSubmatch(line); e != nil && (d == nil || d[2] == "=") {
+			err = setEnv(metadata, first, e[1], strings.TrimSpace(e[2]), lineNum)
+		} else if d != nil {
+			err = setDirective(metadata, first, d[1], d[2] == "=", strings.TrimSpace(d[3]), lineNum)
+		}
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -229,7 +185,7 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 			metadata.CoreType = "emerald"
 		}
 		if metadata.CoresPerSlot == 0 {
-			metadata.CoresPerSlot = 1
+			metadata.CoresPerSlot, metadata.coresDefaulted = 1, true
 		}
 		if metadata.Walltime == 0 {
 			metadata.Walltime = 48
@@ -245,6 +201,229 @@ func (p *SGEParser) ParseWithOptions(scriptPath string, opts ParseOptions) (*SGE
 	}
 
 	return metadata, nil
+}
+
+// setDirective applies one directive line to m. eq says it is in rescale-cli's
+// "#NAME=value" form, which reads as rescale-cli reads it; first holds the
+// line of each directive's first line in that form. A directive Interlink
+// cannot carry, or a known one whose value does not fit, is refused naming
+// its line, where leaving it out would run the job without it.
+func setDirective(m *SGEMetadata, first map[string]int, name string, eq bool, value string, line int) error {
+	prev, again := first[name]
+	if eq {
+		// rescale-cli drops one double quote from each end of a value.
+		value = unquote(value)
+	}
+	// blank is rescale-cli's test for a blank value, which some directives
+	// read as no setting: spaces in quotes are blank too.
+	blank := strings.TrimSpace(value) == ""
+	// Of a directive given twice, rescale-cli reads the first line, but of
+	// #RESCALE_CORES= the first that holds a count.
+	if eq && !again && !(name == "RESCALE_CORES" && blank) {
+		first[name] = line
+	}
+	env, isEnv := strings.CutPrefix(name, "RESCALE_ENV_")
+	switch {
+	case eq && again && (name == "RESCALE_ANALYSIS" || name == "RESCALE_ANALYSIS_VERSION"):
+		return fmt.Errorf("%s at line %d: given before, at line %d, and Interlink's job runs one analysis",
+			name, line, prev)
+	case isEnv && env != "" && value != "": // Interlink's form; setEnv reads rescale-cli's
+		m.EnvVariables[env] = value
+	case eq && again && name != "RESCALE_TAGS" && name != "RESCALE_AUTOMATION":
+		// rescale-cli reads a directive given twice from its first line.
+	case name == "RESCALE_NAME":
+		if !blank {
+			m.Name = value
+		}
+	case name == "RESCALE_COMMAND":
+		m.Command = cmp.Or(value, m.Command)
+	case name == "RESCALE_ANALYSIS":
+		if eq && value == "" {
+			// rescale-cli would ask for an analysis with no code.
+			return fmt.Errorf("invalid RESCALE_ANALYSIS at line %d: it has no value", line)
+		}
+		m.Analysis = cmp.Or(value, m.Analysis)
+	case name == "RESCALE_ANALYSIS_VERSION":
+		m.AnalysisVersion = cmp.Or(value, m.AnalysisVersion) // none: the latest version
+	case name == "RESCALE_CORES" && !eq:
+		// Interlink's #RESCALE_CORES names the core type, while rescale-cli's
+		// #RESCALE_CORES= counts the cores and names the core type with
+		// #RESCALE_CORE_TYPE=. Each spelling keeps its own tool's meaning, so
+		// scripts written for either run unchanged.
+		m.CoreType = cmp.Or(value, m.CoreType)
+	case blank && (name == "RESCALE_CORES" || name == "RESCALE_WALLTIME"):
+		// rescale-cli reads only digits from these, so spaces in quotes set
+		// nothing.
+	case name == "RESCALE_CORES", name == "RESCALE_CORES_PER_SLOT":
+		return setCount(&m.CoresPerSlot, name, value, line)
+	case name == "RESCALE_SLOTS":
+		return setCount(&m.Slots, name, value, line)
+	case name == "RESCALE_WALLTIME":
+		return setCount(&m.Walltime, name, value, line)
+	case name == "RESCALE_CORE_TYPE":
+		if !blank { // a code or a name, as rescale-cli takes it
+			m.CoreType, m.coreTypeLine = value, line
+		}
+	case name == "RESCALE_TAGS":
+		for _, tag := range strings.Split(value, ",") {
+			if tag = strings.TrimSpace(tag); tag != "" {
+				m.Tags = append(m.Tags, tag)
+			}
+		}
+	case name == "RESCALE_PROJECT_ID" && !eq:
+		if value != "" { // an ID, which takes over from a name given before
+			m.ProjectID, m.projectName, m.projectLine = value, "", 0
+		}
+	case name == "RESCALE_PROJECT_ID":
+		// rescale-cli's #RESCALE_PROJECT_ID= gives the project's name, where
+		// Interlink's gives its ID.
+		if value != "" {
+			m.projectName, m.projectLine = value, line
+		}
+	case name == "RESCALE_INBOUND_SSH_CIDR":
+		if eq && value == "" {
+			// rescale-cli sends the blank as the job's rule, which a request can
+			// only leave out, and the platform does not always read an omitted
+			// rule the same way as an empty one.
+			return fmt.Errorf("RESCALE_INBOUND_SSH_CIDR at line %d: it has no value, which rescale-cli sends as an "+
+				"empty setting and Interlink cannot; delete the line to use your profile's setting", line)
+		}
+		m.InboundSSHCIDR = cmp.Or(value, m.InboundSSHCIDR)
+	case name == "RESCALE_PUBLIC_KEY":
+		// A blank key sets nothing: the job's cluster takes the profile's key
+		// either way.
+		m.PublicKey = cmp.Or(value, m.PublicKey)
+	case name == "USE_RESCALE_LICENSE":
+		return setUseLicense(m, eq, value, line)
+	case name == "RESCALE_USER_DEFINED_LICENSE_SETTINGS":
+		// The API's userDefinedLicenseSettings object as JSON, refused unless it
+		// decodes into feature sets: sent on as text, or dropped, it would leave
+		// the job without the license queuing the script asks for. rescale-cli
+		// reads a blank value after "=" as no setting.
+		if eq && blank {
+			return nil
+		}
+		settings, err := decodeLicenseSettings(value)
+		if err != nil {
+			return fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w; write it as %s",
+				line, err, licenseSettingsExample)
+		}
+		m.UserDefinedLicenseSettings, m.licenseSettingsLine = settings, line
+	case name == "RESCALE_AUTOMATION":
+		if f := strings.Fields(value); len(f) > 0 {
+			m.Automations = append(m.Automations, f[0])
+		}
+	case name == "RESCALE_EXISTING_FILES":
+		for _, id := range strings.Split(value, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				m.InputFiles = append(m.InputFiles, id)
+			}
+		}
+	case name == "RESCALE_PRIORITY":
+		// rescale-cli's billing priority, where the job request says only
+		// whether the job is low priority (ON_DEMAND) or not (INSTANT).
+		if value != "ON_DEMAND" && value != "INSTANT" {
+			return fmt.Errorf("invalid RESCALE_PRIORITY at line %d: Interlink can set ON_DEMAND or INSTANT, not %q",
+				line, value)
+		}
+		m.IsLowPriority = value == "ON_DEMAND"
+	case name == "RESCALE_LOW_PRIORITY":
+		// #RESCALE_PRIORITY= decides when both are given, as in rescale-cli.
+		if _, decided := first["RESCALE_PRIORITY"]; !decided && value != "" {
+			m.IsLowPriority = isTrue(value)
+		}
+	case name == "RESCALE_AUTO_TERMINATE_CLUSTER":
+		// The platform no longer reads this setting, so the line is accepted,
+		// whatever it says, and nothing is sent.
+		if !blank {
+			m.Warnings = append(m.Warnings, fmt.Sprintf("RESCALE_AUTO_TERMINATE_CLUSTER at line %d is ignored: "+
+				"the platform no longer reads this setting", line))
+		}
+	case !blank && unsupported[name] != "":
+		return fmt.Errorf("%s at line %d: %s", name, line, unsupported[name])
+	}
+	return nil
+}
+
+// unsupported are rescale-cli's directives for settings Interlink's job request
+// does not carry, with what to do instead. A blank value sets nothing, as
+// rescale-cli reads it.
+var unsupported = map[string]string{
+	"RESCALE_CORE_TYPE_SET":     "Interlink cannot submit to a core type set; give one core type with #RESCALE_CORE_TYPE=",
+	"RESCALE_ONDEMAND_LICENSE":  "Interlink cannot send an on-demand license seller; delete the line",
+	"RESCALE_START_JOB_ON_HOUR": "Interlink cannot set when the job starts; delete the line to use your profile's setting",
+}
+
+// setCount reads a whole number above zero into n; an empty value sets nothing.
+// It reads the leading digits ("24 # hours" is 24), as rescale-cli does and
+// this parser always has, and refuses a value without any rather than leave
+// the job to a default.
+func setCount(n *int, name, value string, line int) error {
+	if value == "" {
+		return nil
+	}
+	v, err := strconv.Atoi(value[:len(value)-len(strings.TrimLeft(value, "0123456789"))])
+	if err != nil || v <= 0 {
+		return fmt.Errorf("invalid %s at line %d: %q is not a whole number above zero", name, line, value)
+	}
+	*n = v
+	return nil
+}
+
+// setEnv applies rescale-cli's #RESCALE_ENV_NAME=value. A variable given twice
+// gets both values, joined as for PATH. A name no environment variable can
+// have is refused, where leaving it out, or reading it another way, would run
+// the job without the variable the script sets.
+func setEnv(m *SGEMetadata, first map[string]int, name, value string, line int) error {
+	switch {
+	case name == "":
+		return fmt.Errorf("invalid RESCALE_ENV_ at line %d: the variable has no name", line)
+	case strings.Contains(name, "="):
+		return fmt.Errorf("invalid RESCALE_ENV_ at line %d: rescale-cli reads the variable's name as %q, up to the "+
+			"last \"=\", and a variable's name cannot hold \"=\"", line, name)
+	}
+	value = unquote(value)
+	if _, again := first["RESCALE_ENV_"+name]; again {
+		m.EnvVariables[name] += ":" + value
+	} else {
+		first["RESCALE_ENV_"+name] = line
+		m.EnvVariables[name] = value
+	}
+	return nil
+}
+
+// setUseLicense reads #USE_RESCALE_LICENSE. rescale-cli turns the license on
+// wherever the directive appears, whatever follows it; Interlink's own form
+// says true or false, and may be followed by a comment.
+func setUseLicense(m *SGEMetadata, eq bool, value string, line int) error {
+	switch {
+	case value == "" || eq && isTrue(value):
+		m.UseLicense = true
+	case eq:
+		return fmt.Errorf("invalid USE_RESCALE_LICENSE at line %d: rescale-cli turns the license on whatever "+
+			"follows \"=\"; delete the line to leave it off", line)
+	case strings.EqualFold(strings.Fields(value)[0], "true"):
+		m.UseLicense = true
+	case strings.EqualFold(strings.Fields(value)[0], "false"):
+		m.UseLicense = false
+	default:
+		return fmt.Errorf("invalid USE_RESCALE_LICENSE at line %d: want true or false, not %q", line, value)
+	}
+	return nil
+}
+
+// isTrue reads a yes-or-no value the way rescale-cli does.
+func isTrue(value string) bool {
+	switch strings.ToLower(value) {
+	case "t", "true", "y", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// unquote drops one double quote from each end of value, as rescale-cli does.
+func unquote(value string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(value, `"`), `"`)
 }
 
 // licenseSettingsExample is the shape #RESCALE_USER_DEFINED_LICENSE_SETTINGS
@@ -332,10 +511,10 @@ func (p *SGEParser) validate(m *SGEMetadata) error {
 		return fmt.Errorf("missing required field: RESCALE_ANALYSIS")
 	}
 	if m.CoreType == "" {
-		return fmt.Errorf("missing required field: RESCALE_CORES")
+		return fmt.Errorf("missing required field: RESCALE_CORES, the core type (rescale-cli's RESCALE_CORE_TYPE=)")
 	}
 	if m.CoresPerSlot <= 0 {
-		return fmt.Errorf("missing or invalid field: RESCALE_CORES_PER_SLOT must be > 0")
+		return fmt.Errorf("missing or invalid field: RESCALE_CORES_PER_SLOT must be > 0 (rescale-cli's RESCALE_CORES=)")
 	}
 	if m.Walltime <= 0 {
 		return fmt.Errorf("missing or invalid field: RESCALE_WALLTIME must be > 0")
@@ -358,13 +537,34 @@ func (p *SGEParser) validate(m *SGEMetadata) error {
 // seconds-based input (3600, 7200, 86400, ...).
 const maxWalltimeHours = 336
 
-// ToJobRequest converts SGE metadata to a Rescale API JobRequest. It refuses a
-// license feature the platform would take but no job can use, naming its line;
-// loading the script into the job template keeps such a feature, for the
-// template's validation to report.
-func (m *SGEMetadata) ToJobRequest() (*models.JobRequest, error) {
+// Lookup is what ToJobRequest asks the API for when a script gives its project,
+// or its core type, by name. *api.Client provides it.
+type Lookup interface {
+	ListProjects(ctx context.Context) ([]api.Project, error)
+	GetCoreTypes(ctx context.Context, includeInactive bool) ([]models.CoreType, error)
+}
+
+// ToJobRequest converts SGE metadata to a Rescale API JobRequest, looking up a
+// project or core type the script gives by name. It refuses a license feature
+// the platform would take but no job can use, naming its line; loading the
+// script into the job template keeps such a feature, for the template's
+// validation to report.
+func (m *SGEMetadata) ToJobRequest(ctx context.Context, lookup Lookup) (*models.JobRequest, error) {
 	if err := m.checkLicenseFeatures(); err != nil {
 		return nil, fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w", m.licenseSettingsLine, err)
+	}
+	projectID, found, err := m.lookUpNames(ctx, lookup)
+	if err != nil {
+		return nil, err
+	}
+	coreType, cores := m.CoreType, m.CoresPerSlot
+	if found != nil {
+		// With no count in the script, rescale-cli asks for the core type's
+		// smallest.
+		coreType = found.Code
+		if m.coresDefaulted && len(found.Cores) > 0 {
+			cores = found.Cores[0]
+		}
 	}
 
 	// Set default slots if not specified
@@ -384,9 +584,9 @@ func (m *SGEMetadata) ToJobRequest() (*models.JobRequest, error) {
 				},
 				Hardware: models.HardwareRequest{
 					CoreType: models.CoreTypeRequest{
-						Code: m.CoreType,
+						Code: coreType,
 					},
-					CoresPerSlot: m.CoresPerSlot,
+					CoresPerSlot: cores,
 					Slots:        slots,
 					Walltime:     m.Walltime,
 				},
@@ -394,8 +594,9 @@ func (m *SGEMetadata) ToJobRequest() (*models.JobRequest, error) {
 				UseRescaleLicense: m.UseLicense,
 			},
 		},
-		Tags:      m.Tags,
-		ProjectID: m.ProjectID,
+		IsLowPriority: m.IsLowPriority,
+		Tags:          m.Tags,
+		ProjectID:     projectID,
 		// From #RESCALE_INBOUND_SSH_CIDR and #RESCALE_PUBLIC_KEY. Both are
 		// required for the job to accept an SSH connection, so a script that
 		// declares them has to reach the create call with them.
@@ -405,6 +606,11 @@ func (m *SGEMetadata) ToJobRequest() (*models.JobRequest, error) {
 
 	if m.UserDefinedLicenseSettings != nil {
 		jobReq.JobAnalyses[0].UserDefinedLicenseSettings = m.UserDefinedLicenseSettings
+	}
+	for _, id := range m.InputFiles {
+		// Decompressed, as rescale-cli asks for them.
+		jobReq.JobAnalyses[0].InputFiles = append(jobReq.JobAnalyses[0].InputFiles,
+			models.InputFileRequest{ID: id, Decompress: true})
 	}
 
 	// Add automations if specified
@@ -419,6 +625,39 @@ func (m *SGEMetadata) ToJobRequest() (*models.JobRequest, error) {
 	}
 
 	return jobReq, nil
+}
+
+// lookUpNames returns the project ID the request carries, and the core type a
+// #RESCALE_CORE_TYPE= line names, if the API has it. rescale-cli takes the
+// first as the name of one of the user's projects and the second as a core
+// type's code or name, sending a value that is neither as written.
+func (m *SGEMetadata) lookUpNames(ctx context.Context, lookup Lookup) (string, *models.CoreType, error) {
+	projectID := m.ProjectID
+	if m.projectLine != 0 {
+		projects, err := lookup.ListProjects(ctx)
+		if err != nil {
+			return "", nil, fmt.Errorf("RESCALE_PROJECT_ID at line %d: could not list your projects: %w", m.projectLine, err)
+		}
+		i := slices.IndexFunc(projects, func(p api.Project) bool { return p.Name == m.projectName })
+		if i < 0 {
+			return "", nil, fmt.Errorf("RESCALE_PROJECT_ID at line %d: you have no project named %q "+
+				"(#RESCALE_PROJECT_ID= takes a project's name, #RESCALE_PROJECT_ID <id> its ID)", m.projectLine, m.projectName)
+		}
+		projectID = projects[i].ID
+	}
+	if m.coreTypeLine == 0 {
+		return projectID, nil, nil
+	}
+	coreTypes, err := lookup.GetCoreTypes(ctx, true)
+	if err != nil {
+		return "", nil, fmt.Errorf("RESCALE_CORE_TYPE at line %d: could not list the core types: %w", m.coreTypeLine, err)
+	}
+	if i := slices.IndexFunc(coreTypes, func(c models.CoreType) bool {
+		return c.Code == m.CoreType || c.Name == m.CoreType
+	}); i >= 0 {
+		return projectID, &coreTypes[i], nil
+	}
+	return projectID, nil, nil
 }
 
 // checkLicenseFeatures holds every feature to the job template's rule, a name
@@ -609,13 +848,21 @@ func SGEMetadataToJobSpec(m *SGEMetadata) (models.JobSpec, error) {
 		CoresPerSlot:    m.CoresPerSlot,
 		Slots:           slots,
 		WalltimeHours:   walltimeHours,
+		IsLowPriority:   m.IsLowPriority,
 		Tags:            m.Tags,
 		ProjectID:       m.ProjectID,
 		Automations:     m.Automations,
 		CIDRRule:        m.InboundSSHCIDR,
 		PublicKey:       m.PublicKey,
-		// Note: InputFiles from script are stored in SGEMetadata.InputFiles
-		// and should be handled separately by the caller
+		// Every run of the template attaches these, where each run sets
+		// InputFiles from its own inputs.
+		ExtraInputFileIDs: strings.Join(m.InputFiles, ","),
+	}
+	// The template takes a project by ID, and loading has no way to look one up
+	// by name.
+	if m.projectLine != 0 {
+		return models.JobSpec{}, fmt.Errorf("RESCALE_PROJECT_ID at line %d names a project, which the job template "+
+			"cannot look up; delete the line and choose the project in the template", m.projectLine)
 	}
 	// The template holds one license feature. Any other shape would load with
 	// part of it dropped, so it is refused instead.

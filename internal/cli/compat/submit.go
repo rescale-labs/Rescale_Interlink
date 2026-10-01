@@ -69,14 +69,17 @@ func newSubmitCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("failed to parse script: %w", err)
 			}
+			for _, w := range metadata.Warnings {
+				cc.Printf("%s - Warning: %s\n", FormatSLF4JTimestamp(compatNow()), w)
+			}
 
-			jobReq, err := metadata.ToJobRequest()
+			jobReq, err := metadata.ToJobRequest(ctx, client)
 			if err != nil {
 				return fmt.Errorf("failed to parse script: %w", err)
 			}
 
-			// Apply compat flags
-			jobReq.IsLowPriority = waiveSLA
+			// Apply compat flags, keeping a low priority the script asks for
+			jobReq.IsLowPriority = jobReq.IsLowPriority || waiveSLA
 			if pCluster != "" {
 				jobReq.ClusterID = pCluster
 			}
@@ -133,13 +136,14 @@ func newSubmitCmd() *cobra.Command {
 				return fmt.Errorf("failed to upload files: %w", err)
 			}
 
-			// Override command and input files to match CLI behavior
+			// Override the command and add the staged files after the script's
+			// existing ones, to match CLI behavior
 			if len(jobReq.JobAnalyses) > 0 {
 				jobReq.JobAnalyses[0].Command = "./run.sh"
-				jobReq.JobAnalyses[0].InputFiles = []models.InputFileRequest{
-					{ID: fileIDs[0], Decompress: true}, // run.sh
-					{ID: fileIDs[1], Decompress: true}, // input.zip
-				}
+				jobReq.JobAnalyses[0].InputFiles = append(jobReq.JobAnalyses[0].InputFiles,
+					models.InputFileRequest{ID: fileIDs[0], Decompress: true}, // run.sh
+					models.InputFileRequest{ID: fileIDs[1], Decompress: true}, // input.zip
+				)
 			}
 
 			// Create job
