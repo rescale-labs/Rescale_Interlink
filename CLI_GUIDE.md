@@ -480,7 +480,8 @@ failure:
   poll that listed no jobs, failed against the API, or failed a download is
   visible in the log and in `daemon status`, not in the exit code.
 - `daemon stop` exits `1` when the daemon is still running 10 seconds after the
-  shutdown request.
+  shutdown request, and when a daemon found by its PID file does not answer over IPC
+  and `--force` is not given.
 - Choosing **Abort** at a conflict or error prompt stops the batch and exits non-zero.
   Remaining files are not uploaded.
 - A prompt that cannot run — no terminal, so the read fails immediately — is
@@ -592,7 +593,9 @@ say so. `daemon run` re-points them at its own logger — every invocation, not 
 rather than on stderr: the in-memory IPC log buffer always, the console when the
 daemon runs in the foreground, and a file only when `--log-file` names one.
 `--log-file` is empty by default, so a daemon started without it writes no log
-file at all.
+file at all. Auto-download started from the Interlink app or the tray is given
+`--log-file` with `daemon.log` in the log folder (`~/.config/rescale/logs`, or
+`%LOCALAPPDATA%\Rescale\Interlink\logs` on Windows).
 
 ## Quick Start
 
@@ -1026,16 +1029,21 @@ such metadata at all.
 Either way decryption starts from the beginning. In the current format it happens
 inline as parts arrive. The legacy path is the one with a visible pause: it writes
 the whole ciphertext to `<file>.encrypted` first, then decrypts to the final file
-as a separate step, with the progress bars showing no movement in between. There
-is no announcement of that step — the `Decrypting ...` line the transfer layer can
-emit is printed only for callers that supply an output writer, which none of the
-CLI's download commands do.
+as a separate step, with the progress bars showing no movement in between. That
+step is announced only with `--timing` (or `RESCALE_TIMING=1`), which prints the
+transfer layer's `Decrypting ...` line, along with the format detected and the
+download method chosen for each file.
 
 Two edges are worth knowing before answering "continue" on a legacy download. The
-prompt's resume branch looks for a resume record beside the *final* file, while
-the legacy chunk driver keeps its record beside `<file>.encrypted`; when it finds
-neither that record nor a complete-looking `<file>.encrypted`, it announces a
-fresh start and deletes the ciphertext already on disk. And a destination whose
+prompt's resume branch reads the record the legacy chunk driver keeps beside
+`<file>.encrypted`. With a valid record it prints `↻ Resuming download for <name>
+from <p>% (<n>/<m> bytes)...` and the download continues from it; with one that is
+too old or no longer matches, it prints `Resume state invalid for <name> (reason:
+<why>). Starting fresh download...` and discards that record. It also removes the
+partial `<file>.encrypted` when the record identifies that same file. A download that
+fails and keeps its record says so: `💡 Resume state saved for <name>. To resume this
+download, run the same command again.`, or for `folders download-dir`, `To resume,
+run the download again with --merge.` And a destination whose
 name collides with an existing *directory* is not prompted about for that reason:
 the file is redirected to `<name>.file`, with `⚠️  File '<name>' conflicts with
 directory, downloading as '<name>.file'`. Redirection is not an exemption from
@@ -1278,6 +1286,9 @@ rescale-int folders download-dir <folder-id> [flags]
 
 **Features:**
 - Recursive folder structure download
+- The remote tree is listed up to eight folders at a time, with a running
+  `Scanning: N folders, M files (X MB)...` count, and its files are queued in path
+  order
 - Concurrent file downloads for improved performance
 - Conflict handling for existing local files/folders
 - Dry-run mode for previewing downloads
@@ -1305,7 +1316,8 @@ rescale-int folders download-dir <folder-id> [flags]
 `--overwrite` replaces an existing file even when its size already matches. A
 file conflict that cannot be resolved counts as a failed file and prints its
 cause, and a name from the platform that is not safe on this computer is refused
-for that file (see [jobs download](#jobs-download)). Without `--continue-on-error`
+for that file, or for that folder and everything in it (see
+[jobs download](#jobs-download)). Without `--continue-on-error`
 the first failure stops the download, and Abort at a prompt always does. Once the
 download has stopped no file is removed, and files that never started are counted
 as such. The command exits `1` when any file failed or the download was cancelled.
@@ -1757,16 +1769,13 @@ The daemon automatically loads settings from the config file. CLI flags override
 - `--state-file string` - Path to daemon state file (default `~/.config/rescale/daemon-state.json` on macOS/Linux, `%LOCALAPPDATA%\Rescale\Interlink\state\daemon-state.json` on Windows)
 - `--use-job-id` - Name output directories `job_<id>` instead of the (sanitized) job name. When using the job name (the default), the job ID is written to a `.jobid` file inside each job folder; if a same-named folder already exists for a different job, the job ID is appended (`<name>_<id>`), and a folder an earlier version named `<name>_<first six characters of the ID>` is reused
 - `--once` - Run once and exit (useful for cron jobs)
-- `--log-file string` - Path to log file (empty = stdout)
+- `--log-file string` - Path to log file (empty = stdout). Each line of the file is the time, the level, the stage and the message, followed by the entry's fields, sorted, as `key=value` (for example `job_id=…`)
 - `--background` - Run in background mode (macOS/Linux only; on Windows it fails and says to start auto-download from the Interlink app, or to run `daemon run` without `--background`)
 - `--ipc` - Enable IPC server for GUI/CLI control
 
-`--background` re-launches the process with a rebuilt argument list that carries
-the daemon's own flags — download directory, poll interval, filters, max
-concurrent, state file, `--use-job-id`, log file, `--ipc` — and nothing else. Global credential
-and configuration flags (`--api-key`, `--token-file`, `--config`, `--api-url`)
-and `--once` are not passed on to the child, so a backgrounded daemon has to get
-its credentials from the environment or the default token file.
+`--background` re-launches the process with the same arguments, less `--background`,
+so global flags such as `--api-key`, `--token-file`, `--config` and `--api-url`, and
+`--once`, reach the background daemon, which reads `daemon.conf` for itself.
 
 Only one daemon per user runs at a time. Every mode, foreground and `--once` included,
 first claims the PID file (`~/.config/rescale/daemon.pid`, or
@@ -1774,8 +1783,10 @@ first claims the PID file (`~/.config/rescale/daemon.pid`, or
 operating-system lock on `daemon.pid.lock` beside it, before any other startup
 work. A second launch refuses with `daemon is already running (PID N)` (on Windows,
 `cannot start daemon: Auto-download is already running (PID N)`, followed by how to
-end a daemon an earlier version started), changes nothing and writes no error report. The PID file is removed on every exit, so
-`daemon status` sees a foreground daemon too. Saves of the state file take the
+end a daemon an earlier version started), changes nothing and writes no error report. Because every mode writes the PID file,
+`daemon status` sees a foreground daemon too. The file is removed when the daemon
+exits on its own, and a PID file whose process has exited is ignored. Saves of the
+state file take the
 same kind of lock, on `daemon-state.json.lock`.
 
 **Examples:**
@@ -1818,8 +1829,11 @@ with 'rescale-int daemon status'`, and writes no error report. When no PID file
 names the process it prints that the exit cannot be confirmed and exits `0`. If
 no daemon is running it prints
 "No running daemon detected." and exits `0`. If a daemon process exists but IPC is not
-responding, it says so and how to end it: `daemon stop --force`, or `kill <PID>` on
-macOS and Linux. On Windows it names `daemon stop --force` and ending the `rescale-int`
+responding and `--force` is not given, it is not stopped: the command prints `Daemon
+process found (PID N) but IPC not responding.` and `The daemon may not have been
+started with --ipc flag.`, and exits `1` with `daemon (PID N) was not stopped. Use
+'rescale-int daemon stop --force' or 'kill N' to terminate it`, and writes no error
+report. On Windows the error names `daemon stop --force` and ending the `rescale-int`
 process in Task Manager, which also ends a daemon an earlier version of Interlink
 started. While a service from an earlier version is running, `daemon stop` and `daemon
 status` print `A Windows service from an earlier version is running; restart Windows, or
@@ -1940,7 +1954,11 @@ rescale-int daemon config set <key> <value>
 - `show_download_complete` - Notify on successful download (true/false)
 - `show_download_failed` - Notify on failed download (true/false)
 
-Booleans accept `true`, `1`, or `yes`; anything else reads as false. `correctness_tag`
+A true/false setting takes `true`/`false`, `yes`/`no`, `on`/`off` or `1`/`0`, in any
+case; anything else is refused with `<key> must be true or false, got "<value>"`. The
+confirmation shows the value as stored: `Set include_workspace_folders = true` for
+`True`, the resolved absolute path for `download_folder`, and the number read for a
+numeric setting. `correctness_tag`
 is accepted as a deprecated alias for `auto_download_tag`. `mode`,
 `auto_download_value` and `downloaded_tag` are not settable: each prints a note
 saying that the mode lives on the per-job custom field instead. Any other key is
@@ -2031,7 +2049,10 @@ seventh another client's claim:
 2. Its name is excluded by `name_prefix`, `name_contains` or `exclude`.
 3. It completed longer ago than `lookback_days` (7 by default). This window is
    measured on completion time. A job whose completion time cannot be read is
-   *kept* rather than dropped, since it already passed the creation pre-filter.
+   *kept* rather than dropped, since it already passed the creation pre-filter. A
+   job whose completion-time lookup runs out of scan time is deferred. The daemon
+   caches that result for one hour, then retries the lookup when a later poll
+   reaches the job.
 4. The job already carries the `autodownload:done` tag, or `autoDownloaded:true`,
    which earlier versions applied. This is authoritative
    over the daemon's own record, so removing it on the platform lets the daemon
@@ -2067,7 +2088,7 @@ download directory. The per-job subdirectory (job name, or job ID with
 
 #### Auto-Start on Login
 
-On **Windows with the MSI installer**, the installer registers the system tray app (`rescale-int-tray.exe`) under `HKCU\...\Run`, and when you sign in the tray starts auto-download if it is enabled in `daemon.conf`, waiting up to a minute for a download folder on a mapped drive to appear. The daemon runs as you, so it can reach your mapped network drives. You can also start and stop it from the Setup tab or the tray.
+On **Windows with the MSI installer**, the installer registers the system tray app (`rescale-int-tray.exe`) under `HKCU\...\Run`, and when you sign in the tray starts auto-download if it is enabled in `daemon.conf`, waiting up to a minute for a download folder on a mapped drive to appear. The daemon runs as you, so it can reach your mapped network drives. You can also start and stop it from the Setup tab; the tray can start, pause and resume it and trigger a scan.
 
 On **Mac and Linux**, configure auto-start using the system's init system. Interlink does not ship a built-in provisioning flow for launchd or systemd-user; the instructions below are for users who want to wire this up themselves:
 
@@ -2267,6 +2288,11 @@ rescale-int daemon retry --all
 # Retry specific job
 rescale-int daemon retry --job-id XxYyZz
 ```
+
+It prints `Marked for retry: <name> (<id>)` for each job it marked, and
+`Not a failed download: <id>` for each ID given that is not a failed download,
+then how many jobs it marked; when it marked none, `No failed downloads to retry.`
+Without `--all` or `--job-id` it is refused, and writes no error report.
 
 `daemon retry` works whether or not a daemon is running. It rewrites the state
 file under the state file's lock, and a running daemon takes the release in the

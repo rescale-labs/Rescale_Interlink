@@ -54,8 +54,9 @@ GOFIPS140=certified go test -tags fips -race ./...
 ```
 
 On Windows without administrator rights, `build\windows_local_build\check.ps1 -Test`
-builds and runs the Go suite in FIPS mode with the portable toolchain that
-`install-deps.ps1` sets up (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+vets and runs the Go suite (the packages CI tests: all but the root package) in FIPS
+mode with the portable toolchain that `install-deps.ps1` sets up (see
+[CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Package-Specific Tests
 
@@ -85,7 +86,7 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-257 Go test files (255 under `internal/`, one each under `installer/` and `cmd/rescale-int-tray/`) across 55 packages,
+262 Go test files (259 under `internal/`, two under `installer/` and one under `cmd/rescale-int-tray/`) across 57 packages,
 plus 14 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
@@ -172,6 +173,7 @@ plus 14 frontend vitest files. Grouped by functional area:
 |---------|--------------|
 | `internal/diskspace` | Cross-platform disk space checking, margin-vs-message accuracy |
 | `internal/localfs` | Directory browser, WalkStream |
+| `internal/mesainit` | The CLI-or-GUI choice from the command line |
 | `internal/logging` | TeeWriter (log → EventBus), colour only on a terminal |
 | `internal/platform` | Sleep prevention |
 | `internal/progress` | Bar-safe log sink |
@@ -179,6 +181,7 @@ plus 14 frontend vitest files. Grouped by functional area:
 | `internal/watch` | Job watch engine |
 | `internal/util/analysis` | Analysis utilities |
 | `internal/util/buffers` | Buffer pooling |
+| `internal/util/filter` | Path patterns for `--path-filter` and PUR file scans, matched part by part |
 | `internal/util/glob` | Glob pattern matching |
 | `internal/util/multipart` | Multipart scan: absolute and resolved run folders, skipped directories |
 | `internal/util/paths` | Path collision detection |
@@ -190,8 +193,8 @@ plus 14 frontend vitest files. Grouped by functional area:
 
 | Package | Key Coverage |
 |---------|--------------|
-| `installer` | What the MSI source must and must not contain |
-| `cmd/rescale-int-tray` | Windows only: failed actions return, Start refusals are shown, start at login only when enabled and after the download folder appears |
+| `installer` | What the MSI source must and must not contain; the toolchain pins agree across workflows and scripts |
+| `cmd/rescale-int-tray` | Windows only: Start refusals are shown, start at login only when enabled and after the download folder appears |
 
 #### Frontend (vitest)
 
@@ -510,8 +513,8 @@ it by hand from any branch (Actions → Release Rescale Interlink → Run workfl
 `vX.Y.Z` or `vX.Y.Z-rc.N` version). Either way it makes a draft release; a manual run's
 draft has no Linux tarball, and its tag is created when the draft is published. A
 `check` job runs first and never replaces a release: a manual run stops if its version
-already has a tag or a release, draft or published, and a second run for one version
-waits for the first and then stops; a tag push whose release was already published from
+already has a tag or a release, draft or published, so a second manual run for one
+version waits for the first and then stops; a tag push whose release was already published from
 the same commit builds nothing, and from another commit it stops. The release job checks
 again just before it creates the draft. Then comes a `verify` gate; the platform builds
 declare `needs: [verify]`, so a failing check blocks the release instead of shipping
@@ -538,9 +541,11 @@ needs them both):
 - macOS build (Apple Silicon, Developer ID signed + notarized)
 
 The Linux build runs in `.github/workflows/release-linux.yml`, in an `almalinux:8`
-container, through `build/linux/build-release.sh`; it runs no test suite. Every download
-is checked against a pinned SHA-256, `ldd -r` resolves every shipped binary, and the
-build fails if one needs a GLIBC newer than 2.28. Its AppImage carries its own gate:
+container, through `build/linux/build-release.sh`; it runs no test suite. Go, Node.js
+and the AppImage tools it downloads are checked against pinned SHA-256 sums, the Wails
+CLI comes through `go install`, and the system packages from the AlmaLinux and EPEL
+repositories through `dnf`; `ldd -r` resolves the GUI and its WebKit helper executables, and the build fails if any shipped binary
+needs a GLIBC newer than 2.28. Its AppImage carries its own gate:
 `build/linux/bundle-webkit.sh` copies the host's WebKit helper executables into the
 AppDir with `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then
 extracts the **finished AppImage** — deliberately the image rather than the AppDir — and
@@ -550,13 +555,16 @@ or resolve their WebKit/GTK dependencies from outside the bundle.
 **`.github/workflows/test.yml`** runs on pull requests and on pushes to `release/**`: the
 Go suite (without the root package, which embeds `frontend/dist`) natively on
 `windows-latest` and, with `-race`, on `ubuntu-latest`, with Go 1.26.7 checked against
-its published SHA-256. A step in each job fails it unless the platform-only upload-lock
-tests ran and passed. The Windows job has a second such step for the Windows-only
-tests of the retired service, the per-user pipes, the tray and drive-relative scan
-roots: each must run and pass, so a skip or a missing test fails the job.
+its published SHA-256. One step in each job lists the platform-only tests by package
+and fails the job unless each ran and passed: on Linux the upload-lock tests; on Windows
+those and the Windows-only tests of the retired service, the per-user pipes, the tray,
+drive-relative scan roots, the app's Start and Stop, and `daemon stop --force`'s process
+checks. A skip or a
+missing test fails the job. A third job, on macos-14, runs the `verify` job's frontend
+install, tests, lint and build and then `go vet -tags fips ./...`, with Node.js 24.21.0.
 
-**Not automated**: the frontend suite, `go vet` and a macOS Go run on pull requests
-(the `verify` job runs them only for releases), and performance regression detection.
+**Not automated**: a macOS Go test run on pull requests (the `verify` job runs it only
+for releases), and performance regression detection.
 
 ---
 
@@ -577,19 +585,19 @@ roots: each must run and pass, so a skip or a missing test fails the job.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 257 test files across 55 packages — roughly 1,450 top-level test
+- **Go suite**: 262 test files across 57 packages — roughly 1,450 top-level test
   functions, plus subtests. Don't treat any of the reported case totals as a
   checksum: some tests branch on `runtime.GOOS`, so what `make test` counts, and what it
-  skips, depends on the platform you measure on. 10 of the project's own packages have no test files.
+  skips, depends on the platform you measure on. 8 of the project's own packages have no test files.
 - **Frontend suite**: 14 vitest files.
 - **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
   `go vet -tags fips` and the frontend lint and build, on every release run. The
   platform builds are gated on it. `.github/workflows/test.yml` runs the Go suite
-  natively on Windows and Linux for pull requests and pushes to `release/**`.
+  natively on Windows and Linux for pull requests and pushes to `release/**`, where a
+  macOS job also runs the frontend tests, lint and build and `go vet`.
 - v4.9.8 adds:
   - `TestShouldProbeResolvedDirectory` — predicate gating the walker's defensive Stat to non-regular entries (covers regular file, directory, irregular file, named pipe).
   - `TestWalkStream_SkippedChannelDrainsCleanly` — regression guard for the new `skippedChan` ensuring it closes cleanly when no entries are emitted.
-  - `TestWalkCollect_SymlinkSliceContainsBrokenSymlinks` — documents the `Symlinks` slice contract for `WalkCollect` after the junction-skip refactor.
 - v4.9.9 adds coverage for the behavior changes in this release, including: CLI exit
   codes on partial batch failure and on an aborted prompt; the retry elapsed-time
   budget and the notice threshold; the bar-safe log sink; disk-space margin-versus-

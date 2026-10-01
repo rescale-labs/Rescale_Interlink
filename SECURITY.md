@@ -73,8 +73,9 @@ a maintainer's manual run from any branch, with the following controls:
   Linux tarball) is published with a `.sha256` that `shasum -a 256 -c` accepts, and
   every binary is built with `-trimpath`, so it records no build-machine paths.
 - **Linux AppImage self-check.** The Linux build runs in
-  `.github/workflows/release-linux.yml`, in an `almalinux:8` container, with every
-  download checked against a pinned SHA-256. Its packaging step bundles WebKit's helper
+  `.github/workflows/release-linux.yml`, in an `almalinux:8` container. Go, Node.js and
+  the AppImage tools it downloads are checked against pinned SHA-256 sums, and its system
+  packages come from the AlmaLinux and EPEL repositories through `dnf`. Its packaging step bundles WebKit's helper
   executables into the AppDir with `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then inspects the
   finished AppImage — deliberately the built image rather than the AppDir, so a missing
   RPATH cannot hide behind a matching host WebKit — and fails the release before the
@@ -273,7 +274,7 @@ These require the caller's SID to match the SID of the user who started the daem
 
 If the daemon cannot capture the owner SID at startup, the IPC server does not start, so
 `daemon run --ipc` stops with an error. A modify request whose caller SID cannot be
-captured at the pipe layer is denied (`authorizeModifyRequest` in `internal/ipc/server.go`).
+captured at the pipe layer is denied (`authorizeModifyRequest` in `internal/ipc/server_windows.go`).
 
 ---
 
@@ -296,13 +297,23 @@ All API communication uses TLS 1.2+ with FIPS-approved cipher suites when FIPS m
 
 Rescale Interlink resolves API credentials through a priority chain that differs between native and compat modes.
 
-### Native CLI / GUI
+### Native CLI
 
 1. `--api-key` command-line flag (highest priority)
-2. Per-user token file in the resolved user-profile directory
-3. `apiconfig` INI file in the resolved user-profile directory (legacy)
-4. Default token file (Unix: `~/.config/rescale/token`; Windows: `%LOCALAPPDATA%\Rescale\Interlink\token`, then the legacy `%APPDATA%\Rescale\Interlink\token`)
-5. `RESCALE_API_KEY` environment variable (lowest priority)
+2. `RESCALE_API_KEY` environment variable
+3. `--token-file`
+4. Default token file (lowest priority)
+
+**Source:** `internal/config/csv_config.go` (`MergeWithFlagsAndTokenFile`)
+
+### Auto-download Start check and pre-flight (GUI and tray)
+
+1. Default token file (Unix: `~/.config/rescale/token`, then an earlier version's `~/.config/rescale-int/token`; Windows: `%LOCALAPPDATA%\Rescale\Interlink\token`, then the legacy `%APPDATA%\Rescale\Interlink\token`)
+2. `api_key` in an older version's `apiconfig` INI file (legacy; `%APPDATA%\Rescale\Interlink\apiconfig` on Windows, `~/.config/rescale/apiconfig` elsewhere)
+3. `RESCALE_API_KEY` environment variable (lowest priority)
+
+This decides only whether a key is there before Start; the daemon itself then reads its
+key as the native CLI does.
 
 **Source:** `internal/config/apikey.go`
 
@@ -352,9 +363,11 @@ Two further filters run ahead of `IsReportable()` on the CLI and daemon path, in
 
 - **Usage errors** — a missing required flag, an unknown flag, conflicting flags, a
   refusal to prompt without a terminal, a user abort, an output file that already
-  exists, a refused `daemon run` or a `daemon stop` that timed out, or a pre-flight
-  validation failure ("no valid files to upload"). These are user mistakes or local
-  conditions, not system failures.
+  exists, a refused `daemon run`, a `daemon stop` that timed out or could not reach
+  the daemon, or a pre-flight validation failure ("no valid files to upload"). These
+  are user mistakes or local conditions, not system failures. An error marked as a
+  usage error is also refused by `IsReportable()` itself, so the GUI does not offer a
+  report for one either (for example "No files found in the selected paths").
 - **Aggregate roll-ups** — the batch summary a command returns after it has already
   reported each failure item by item (`N file(s) failed to upload`,
   `N of M job(s) failed`, and similar). Reporting the roll-up as well would duplicate

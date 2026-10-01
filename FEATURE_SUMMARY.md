@@ -71,9 +71,9 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 - Single or multiple file download
 - Automatic decryption after download
 - Chunked/concurrent download for files larger than 100MB
-- Byte-offset resume via HTTP Range requests (`<file>.download.resume` sidecar) — legacy-format objects only. The current v2 CBC format decrypts sequentially into the output file, so an interrupted download restarts from zero
+- Byte-offset resume via HTTP Range requests (`<file>.encrypted.download.resume` sidecar, beside the downloaded ciphertext) — legacy-format objects only. The current v2 CBC format decrypts sequentially into the output file, so an interrupted download restarts from zero
 - Progress bars during download and decryption
-- Names from the platform are checked before they become local paths: an empty or dot-only name, a reserved Windows device name, or one with a colon, a Windows-forbidden or control character, or a trailing dot or space is refused for that file only, and the command exits non-zero. A download never writes through a symbolic link or special file at its destination
+- Names from the platform are checked before they become local paths: an empty or dot-only name, a reserved Windows device name, or one with a colon, a Windows-forbidden or control character, or a trailing dot or space is refused for that file, or for that folder and everything in it, and the command exits non-zero. A download never writes through a symbolic link or special file at its destination
 - SHA-512 verification, with the algorithm name matched in any spelling; a file whose listed checksums include no SHA-512 is reported as not verified
 - Pre-flight disk space check that reports the requirement it actually enforced, measured on the filesystem holding the output directory — on the legacy path, which stages an encrypted temp file, and on the Azure v1 path. The v2 CBC format writes plaintext straight out and has no pre-flight check
 - No file size limit
@@ -224,7 +224,7 @@ Background service for automatically downloading completed jobs.
 
 ### Subcommands
 - `run` — Start the daemon (foreground or `--background`, optional `--ipc`). Only one runs at a time: every mode claims the PID file under an OS lock (`daemon.pid.lock`) first, and a second launch refuses
-- `stop` — Send a clean shutdown request to a running daemon, wait up to 10 seconds for it to exit, and exit 1 if it has not
+- `stop` — Send a clean shutdown request to a running daemon, wait up to 10 seconds for it to exit, and exit 1 if it has not, or if it does not answer and `--force` is not given
 - `status` — Show daemon state and statistics
 - `list [--failed]` — List downloaded or failed jobs; `--failed` shows when each will be tried next
 - `retry [--all | -j ID...]` — Release failed jobs for another attempt, also while a daemon is running. A failed job is otherwise retried after 5, 10, 20 and then 30 minutes and held after five failed attempts
@@ -473,7 +473,7 @@ See [SECURITY.md](SECURITY.md) for complete security documentation.
 ## Performance
 
 ### Rate Limiting
-Token bucket algorithm with a cross-process coordinator per user (Unix socket / named pipe). Three scopes, each 85% of the platform's hard limit: `user` (1.7 req/sec), `job-submission` (0.236 req/sec), `jobs-usage` (21.25 req/sec). 429 feedback loop propagates cooldowns across all processes. When the coordinator is unreachable, each scope falls back to an emergency cap of one-eighth its hard rate and announces the transition.
+Token bucket algorithm with a cross-process coordinator per user (Unix socket / named pipe). Four scopes, each 85% of the platform's hard limit: `user` (1.7 req/sec), `job-submission` (0.236 req/sec), `jobs-usage` (21.25 req/sec) and `credential-access` (21.25 req/sec, storage credential requests). 429 feedback loop propagates cooldowns across all processes. When the coordinator is unreachable, each scope falls back to an emergency cap of one-eighth its hard rate and announces the transition.
 
 ### Adaptive Concurrency
 Dynamic scaling based on file size distribution: <100MB → up to 20 workers, 100MB–1GB → up to 10, >1GB → up to 5. Bounded by the command's `--max-concurrent` cap, and validated against thread pool and memory constraints.

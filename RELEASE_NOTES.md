@@ -44,9 +44,11 @@ Most of this release is fixes, but some of them change what a script or a routin
   - `folders download-dir` when a file conflict could not be resolved, and any download
     that refused a file name (see [Downloads](#download-integrity-and-safe-file-names));
   - `jobs watch` when a job's last download pass failed or was cancelled;
-  - compat mode's `submit -E` when the job ends Stopped or Force Stopped (it used to keep
-    polling);
-  - `daemon stop` when the daemon is still running 10 seconds after the request.
+  - `daemon stop` when the daemon is still running 10 seconds after the request, and when
+    a daemon it finds does not answer and `--force` is not given.
+
+  Compat mode's `submit -E` now exits 33, rescale-cli's error code, when the job ends
+  Stopped or Force Stopped; it used to keep polling.
 - **Commands that now refuse instead of guessing:**
   - destructive confirmations without a terminal fail and name `--confirm` (they printed
     "Cancelled" and exited 0), and `config init` refuses to run without a terminal;
@@ -58,8 +60,9 @@ Most of this release is fixes, but some of them change what a script or a routin
   - a foreground or `--once` `daemon run` refuses while another daemon is running;
   - `daemon run`, and Start in the GUI and the tray, refuse a `daemon.conf` whose
     `download_folder` is not an absolute path or whose `max_concurrent` is outside 1–20,
-    0 included, and `daemon config set` refuses a relative folder and a `max_concurrent`
-    outside 1–20.
+    0 included, and `daemon config set` refuses a relative folder, a `max_concurrent`
+    outside 1–20, and a true/false setting given anything but true/false, yes/no, on/off
+    or 1/0, in any case (`True` and `on` used to store false).
 - **Transfer diagnostics are hidden by default.** They could corrupt the progress bars.
   Add `--verbose` (or `--debug`, or set `RESCALE_DEBUG`) to see them; rate-limit and
   retry notices are always shown. Please include `--verbose` output when you report a
@@ -258,7 +261,9 @@ The non-functional Shared Jobs tab was removed.
 - Cancelled batches show **Cancelled** end to end — including batches cancelled before
   their folder scan registered any files, which previously showed Completed.
 - Local filesystem errors, user cancellations and uploads refused by another transfer's
-  lock no longer raise the error-report modal.
+  lock no longer raise the error-report modal. Neither does a Single Job whose selected
+  paths hold no files, nor a file a folder download refuses, for its name or because two
+  files would land on the same local file.
 - A newly queued transfer appears in the Transfers tab promptly. The tab's poll no longer
   stacks requests when one runs long, and paging a large batch's rows no longer copies
   the whole batch while holding up progress updates.
@@ -280,10 +285,24 @@ The non-functional Shared Jobs tab was removed.
   the pickers cannot show the previous account's entries.
 - A job whose creation is rejected counts as failed at once, in the header and the stats
   bar.
-- Single Job accepts a jobs-list JSON file, loads its first job and says so.
+- Single Job accepts a jobs-list JSON or CSV file, loads its first job and says so. An
+  SGE script that cannot be loaded says why, in Single Job and in PUR, and in PUR the
+  settings an SGE script leaves empty take the template's defaults, as for a CSV or JSON
+  file.
+- In PUR's results, a job that completed after an earlier error counts as succeeded, not
+  failed.
+- The Setup tab has one **Auto-Download Control** panel; the second set of controls under
+  **My Downloads** is gone. Stopped, it offers **Start Auto-Download**. Running, it shows
+  the state, the jobs downloaded and the daemon's details, with **Pause Auto-Download**
+  or **Resume Auto-Download**, **Scan Now**, **Stop Auto-Download** and **Show Logs**,
+  and shows an error once.
 - **Save logs to file** also records transfer and engine messages, the same entries the
   Activity tab shows, each once.
 - An empty folder in the File Browser's remote pane says "This folder is empty".
+- File Browser error messages follow the status the platform returned, when it returned
+  one, rather than words in a file or folder name: a folder named `timeout_study` no
+  longer turns an error into "Request timed out". A status other than 401, 403, 404, 429
+  or 500 shows the platform's own message.
 
 ### CLI: visible retries, intact progress bars, truthful exit codes (#22, #23)
 
@@ -299,10 +318,13 @@ The non-functional Shared Jobs tab was removed.
 - Mistakes on the command line, such as conflicting flags or an output file that already
   exists, print the error only: no "share this report with Rescale support" block and no
   error report. The same goes for an upload refused by another transfer's lock, which is
-  a local condition; a refused `daemon run` or a `daemon stop` that timed out; a missing
-  conflict mode; a download refused because its destination is a symbolic link; an API
-  key that `config test` or `daemon config validate` rejects; and a workspace without the
-  "Auto Download" field.
+  a local condition; a refused `daemon run`, `daemon retry` with neither `--all` nor
+  `--job-id`, `daemon config edit` with no editor, and a `daemon stop` that timed out or
+  found a daemon it could not reach; `jobs submit` given both `--job-file` and
+  `--script`, or a job specification and `--job-id`; a PUR template that cannot be
+  loaded; a missing conflict mode; a download refused because its destination is a
+  symbolic link; an API key that `config test` or `daemon config validate` rejects; and a
+  workspace without the "Auto Download" field.
 - A failure whose file or folder name contains digits such as `503` or `404` is no longer
   mistaken for a server error: it is not retried as one and does not produce an error
   report.
@@ -321,7 +343,12 @@ The non-functional Shared Jobs tab was removed.
   real; every mode now prints the destination and each file that would be uploaded, and
   uploads nothing.
 - `--timing` is a flag on every native command, equivalent to `RESCALE_TIMING=1`; it used
-  to be rejected as unknown. Compat mode does not accept it.
+  to be rejected as unknown. Compat mode does not accept it. With it, a download's
+  `[TIMING]` lines print above the progress bars instead of across them, together with
+  the format detected and the download method chosen for each file.
+- `folders download-dir` lists the remote folder tree up to eight folders at a time
+  instead of one at a time, and its `Scanning:` line shows cumulative counts across the
+  scan instead of restarting for each folder.
 - `jobs tail` refuses an interval below one second instead of crashing, and Ctrl+C now
   ends it.
 - The hint printed after an interrupted upload now says truthfully that a rerun can
@@ -421,9 +448,26 @@ row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-l
 - Only one daemon per user runs at a time. Every `daemon run` mode, foreground and
   `--once` included, claims the PID file under an operating-system lock before it does
   anything else, so a second launch refuses without changing anything. `daemon status` sees a
-  foreground daemon, and the PID file is removed on every exit.
+  foreground daemon, and the PID file is removed when the daemon exits on its own; a PID
+  file whose process has exited is ignored.
 - `daemon stop` waits up to 10 seconds for the daemon to exit and exits 1 with a clear
-  message if it does not.
+  message if it does not. A daemon that does not answer is not stopped without
+  `--force`: the command exits 1 and says how to end it.
+- `daemon retry --job-id` lists only the jobs it marked for retry, and names each ID
+  that is not a failed download (`Not a failed download: <id>`); it used to report every
+  ID as marked.
+- `daemon run --background` passes its other arguments on to the background daemon, so
+  `--api-key`, `--token-file`, `--config`, `--api-url` and `--once` reach it; they used to
+  be dropped.
+- The daemon's log file ends each line with the entry's details, such as the job ID, the
+  path or the error, as `key=value`; it used to keep the message alone. Auto-download
+  started from the app or the tray logs to `daemon.log` in Interlink's log folder on
+  every platform (`~/.config/rescale/logs`, or `%LOCALAPPDATA%\Rescale\Interlink\logs`
+  on Windows), where on macOS and Linux it used to keep no log file, and it reads its
+  settings from `daemon.conf` itself.
+- A job's custom fields are read once per download, for the eligibility check and the
+  job's own download path together, which leaves more of the API rate limit for
+  everything else.
 - `max_concurrent` is 1–20 everywhere: `daemon run --max-concurrent`, `daemon.conf`,
   `daemon config set` and the GUI's Save and Start (`daemon config set` and Save used to
   allow only 1–10). A value outside that range, including 0 or a negative number in
@@ -442,9 +486,11 @@ row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-l
   on every poll, and a completed job with no output files is tagged like any other
   finished job.
 - **Scan now** reports why a scan did not start (stopped, paused, or one already
-  running), **Save all settings** asks the running daemon to reload and reports what
-  happened, and the Setup tab's status check write-probes the download folder, as saving
-  already did, so a read-only folder is reported before the first download fails.
+  running). **Save all settings**, turning auto-download on and **Retry** ask the running
+  daemon to reload and report what happened, or say that auto-download needs starting.
+  The Setup tab's status check and its **Test Connection** write-probe the download
+  folder, creating it if need be, as saving already did, so a read-only folder is
+  reported before the first download fails.
 - The daemon's persistent state is now bounded. As part of this, the lifetime
   `JobsDownloaded` counter becomes a trailing count covering `lookback_days` plus 30 days
   (37 days at the default); jobs still waiting for their tag are kept at any age. Error
@@ -533,11 +579,13 @@ disk-full.
 - Every file and folder name the platform supplies is checked before it becomes a local
   path. A name that is empty or only dots, a reserved Windows device name, or a name with a
   colon, a character Windows forbids, a control character, or a trailing dot or space is
-  refused for that file only, quoting the name and the reason; the rest of the download
-  continues and the command exits 1.
+  refused, quoting the name and the reason: a file's name for that file, and a folder's
+  name for that folder and everything in it. The rest of the download continues and the
+  command exits 1; auto-download fails that job with the reason.
 - A download refuses a destination that is a symbolic link or special file, and leaves
-  that entry alone. GUI folder downloads show each refused entry as a failed
-  transfer, and merge mode downloads a truncated local file again instead of skipping it.
+  that entry alone. GUI folder downloads show each refused entry as a failed transfer.
+  In merge mode, an existing local file is downloaded again when its size differs from
+  the known remote size; when the remote size is unknown, it is kept.
 - Every download verifies the byte count it received before it is reported complete, and
   the S3 and Azure download paths now share one implementation. Legacy-format S3
   downloads no longer hold the whole file in memory.
@@ -593,12 +641,22 @@ disk-full.
 - Cancelling a download is reported as a cancellation, never as a completed file. A
   download that did not receive every part fails and keeps its resume state, and a
   resume record that claims more bytes than the partial file holds is discarded.
+  When a failed download has kept its resume state, the CLI says so and how to go on
+  (run the same command again; for `folders download-dir`, run it again with `--merge`),
+  and `--resume` says how far the download had got; these messages never appeared before.
 - Concurrent downloads bound how far they fetch ahead of a slow part, so a stalled part
   no longer holds the rest of the file in memory.
 - Rejected storage credentials are refreshed once for the whole transfer instead of
   never, and upload progress no longer double-counts a retried part. S3 resume checks
   and aborts are retried like Azure's, so one transient error no longer fails a whole
   upload.
+- Downloads from your own storage folders do not ask for a credential per file. After
+  the first reply names your storage folder, downloads from it share one credential for
+  ten minutes; downloads that start at the same moment, before that reply, may each make
+  one request. Credential requests also have a rate limit of their own (21.25 requests/s,
+  as the platform counts them separately) instead of sharing the 1.7 requests/s of other
+  API calls, so downloading many files from colleagues' workspace folders, which takes a
+  credential per file, is not held near 1.7 files/s.
 - A file registration whose response was lost is looked up on the platform instead of
   repeated, and adopts only the record of its own stored object. A job creation whose
   response was lost is reported as possibly created rather than sent again; check the
@@ -621,6 +679,7 @@ disk-full.
   Auto-download that an earlier version started must be ended before this version can
   start it: run `rescale-int daemon stop --force`, or end the `rescale-int` process in
   Task Manager. Until then, Start says so.
+- Each start of auto-download adds to `daemon-stderr.log` instead of replacing it.
 - The token-file permission warning no longer appears on every run.
 - Error messages quote file patterns without doubling Windows backslashes.
 - `jobs download --path-filter` matches as documented: `*` and `?` no longer run across a
@@ -636,7 +695,8 @@ rights. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescal
   tray starts auto-download if it is enabled, waiting up to a minute for a download
   folder on a mapped drive. The app starts the tray when you open it. You can also use
   **Start Auto-Download** and **Stop Auto-Download** in the Setup tab, under
-  **Auto-Download Control**, or the tray.
+  **Auto-Download Control**. The tray can start, pause and resume auto-download and
+  trigger a scan; stopping it is done in the Setup tab.
 - **If you used the service:** open Interlink in each Windows account that needs
   auto-download, check its settings in the Setup tab and start it there.
 - **A service installed by an earlier version removes itself** the next time Windows
@@ -653,15 +713,18 @@ rights. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescal
 
 Go toolchain 1.26.7 with refreshed dependencies. Six advisories in the frontend's build
 and test tools were cleared; none of them affected the shipped application. Release
-builds use pinned, checksum-verified toolchains: Node.js 24.21.0 (Node 20 is end of life)
-and a pinned WebView2 runtime for the Windows installer, whose build now stops if the
-runtime could not be bundled completely. Every macOS and Windows release build runs the
+builds use pinned toolchains: Go, checked against its published SHA-256; Node.js 24.21.0
+(Node 20 is end of life), checksum-verified in the Linux build; and, for the Windows
+installer, a WebView2 runtime pinned by version and SHA-256, whose build now stops if
+the runtime could not be bundled completely. Every macOS and Windows release build runs the
 Go and frontend test suites before packaging, and pushes to release branches and pull
-requests also run the Go tests natively on Windows and Linux. The release workflow
-refuses a tag that does not match the version in the source. The Linux release can now
-be built in GitHub Actions on AlmaLinux 8, with every download checked against a pinned
-SHA-256. Every release asset, including the Windows zip, now has a `.sha256` file that
-`shasum -a 256 -c` accepts. On Windows, a failure to re-launch the GUI's helper process
+requests also run the Go tests natively on Windows and Linux, and the frontend tests,
+lint and build and `go vet` on macOS. The release workflow refuses a tag that does not
+match the version in the source. The Linux release can now be built in GitHub Actions on
+AlmaLinux 8, with Go, Node.js and the AppImage tools it downloads checked against
+pinned SHA-256 sums, and its system packages installed from the AlmaLinux and EPEL
+repositories. Every release asset, including the Windows zip, now has a `.sha256` file
+that `shasum -a 256 -c` accepts. On Windows, a failure to re-launch the GUI's helper process
 exits with an error instead of panicking.
 
 ### License feature sets on a job (#67)

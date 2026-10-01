@@ -63,14 +63,17 @@ dependencies and produce a lockfile diff you did not intend.
 
 `build/windows_local_build/` keeps a portable toolchain in one folder and changes nothing
 system-wide. `install-deps.ps1` downloads the pinned Go, Node.js and .NET SDK versions,
-checking each against its SHA-256, plus the Wails CLI and WiX; `check.ps1` builds, and
-with `-Test` tests, in FIPS mode as CI does; `dev.ps1` runs `wails dev`; `dist.ps1`
-builds the unsigned distribution; and `installer.ps1` builds the MSI.
+checking each against its SHA-256, plus the Wails CLI and WiX. Re-running it skips a tool
+already at its pinned version and reinstalls one at another version; `-Force` reinstalls
+them all. `check.ps1` vets, and with `-Test` tests, the packages CI tests (all but the
+root package, so no frontend build is needed first), in FIPS mode as CI does; `dev.ps1`
+runs `wails dev`; `dist.ps1` builds the unsigned distribution; and `installer.ps1`
+builds the MSI.
 
 ### Line Endings
 
 `.gitattributes` stores text files with LF line endings and checks them out that way,
-whatever your `core.autocrlf` says. `.bat` and `.cmd` files keep CRLF.
+whatever your `core.autocrlf` says.
 
 ## Build Requirements (CRITICAL)
 
@@ -150,8 +153,8 @@ Go tests must not read from a checked-in fixture directory: `testdata/` is gitig
 and blocked by the pre-commit hook. Inline fixture content in the test file and write it
 to `t.TempDir()`, which is what the config tests do. Keep tests hermetic: an isolated
 home directory, cleared credential variables such as `RESCALE_API_KEY`, and local test
-servers instead of the live platform. Pull requests run the Go suite on Windows and Linux
-(`.github/workflows/test.yml`).
+servers instead of the live platform. Pull requests run the Go suite on Windows and Linux,
+and the frontend tests, lint and build and `go vet` on macOS (`.github/workflows/test.yml`).
 
 See [TESTING.md](TESTING.md) for the full test guide.
 
@@ -289,7 +292,8 @@ rescale-int/
 ├── installer/                 # Windows MSI installer sources
 ├── packaging/                 # Desktop entry, icon, macOS install helper
 └── .github/workflows/         # release.yml and release-linux.yml (releases; see TESTING.md),
-                               # test.yml (Go tests on Windows and Linux for PRs)
+                               # test.yml (PRs: Go tests on Windows and Linux;
+                               # frontend checks and go vet on macOS)
 ```
 
 ## Key Patterns
