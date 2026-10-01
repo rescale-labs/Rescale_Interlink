@@ -93,7 +93,7 @@ func (p *Provider) getOrCreateS3Client(ctx context.Context) (*S3Client, error) {
 
 	// When fileInfo is set (via SetFileInfo), create client with file-specific credentials.
 	// Otherwise, use nil for user's default storage (uploads, personal files).
-	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, p.fileInfo, p.retryObserver)
+	client, err := NewS3Client(p.storageInfo, p.apiClient, p.fileInfo, p.retryObserver)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
@@ -116,7 +116,7 @@ func (p *Provider) getOrCreateS3ClientForFile(ctx context.Context, fileInfo *mod
 	obs := p.retryObserver
 	p.s3ClientMu.Unlock()
 
-	client, err := NewS3Client(ctx, p.storageInfo, p.apiClient, fileInfo, obs)
+	client, err := NewS3Client(p.storageInfo, p.apiClient, fileInfo, obs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client for file: %w", err)
 	}

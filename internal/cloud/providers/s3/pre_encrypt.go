@@ -82,7 +82,6 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 		StoragePath:   objectKey,
 		EncryptionKey: params.EncryptionKey,
 		IV:            params.IV,
-		FormatVersion: 0, // Legacy pre-encrypt format
 	}, nil
 }
 
@@ -147,7 +146,7 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	partSize := plan.PartSize
 	totalParts := transfer.CalculateTotalParts(encryptedSize, partSize)
 
-	existingState, _ := resumeStateFor(params)
+	existingState, _ := params.LoadResumeState()
 	var uploadID string
 	var completedParts []types.CompletedPart
 	var alreadyOnS3 map[int32]string
@@ -233,26 +232,9 @@ func (p *Provider) uploadEncryptedMultipart(ctx context.Context, s3Client *S3Cli
 	}
 
 	checkpoints := transfer.NewCheckpointThrottle(func() {
-		state.SaveUploadState(&state.UploadResumeState{
-			LocalPath:      params.LocalPath,
-			EncryptedPath:  params.EncryptedPath,
-			ObjectKey:      objectKey,
-			UploadID:       uploadID,
-			TotalSize:      encryptedSize,
-			OriginalSize:   params.OriginalSize,
-			SourceModTime:  params.SourceModTime,
-			UploadedBytes:  uploadedBytes,
-			CompletedParts: convertFromCompletedParts(completedParts),
-			PartSize:       partSize,
-			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
-			IV:             encryption.EncodeBase64(params.IV),
-			RandomSuffix:   params.RandomSuffix,
-			CreatedAt:      createdAt,
-			LastUpdate:     time.Now(),
-			StorageType:    "S3Storage",
-			StorageID:      p.storageID(),
-			Container:      p.storageContainer(),
-		}, params.LocalPath)
+		saved := params.ResumeState("S3Storage", p.storageInfo, objectKey, encryptedSize, partSize, createdAt)
+		saved.UploadID, saved.UploadedBytes, saved.CompletedParts = uploadID, uploadedBytes, convertFromCompletedParts(completedParts)
+		state.SaveUploadState(saved, params.LocalPath)
 	})
 	// A failed or cancelled attempt returns from inside the loop.
 	defer checkpoints.Flush()
@@ -388,7 +370,7 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 	defer params.TransferHandle.Complete()
 
 	// Keyed by ORIGINAL file path, not encrypted path.
-	existingState, loadErr := resumeStateFor(params)
+	existingState, loadErr := params.LoadResumeState()
 	if loadErr != nil {
 		log.Printf("Warning: Failed to load resume state: %v", loadErr)
 	}
@@ -483,26 +465,8 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 		createdAt = time.Now()
 
 		// Save initial state (keyed by original file path)
-		initialState := &state.UploadResumeState{
-			LocalPath:      params.LocalPath,
-			EncryptedPath:  params.EncryptedPath,
-			ObjectKey:      objectKey,
-			UploadID:       uploadID,
-			TotalSize:      totalSize,
-			OriginalSize:   params.OriginalSize,
-			SourceModTime:  params.SourceModTime,
-			UploadedBytes:  0,
-			CompletedParts: []state.CompletedPart{},
-			PartSize:       partSize,
-			EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
-			IV:             encryption.EncodeBase64(params.IV),
-			RandomSuffix:   params.RandomSuffix,
-			CreatedAt:      createdAt,
-			LastUpdate:     time.Now(),
-			StorageType:    "S3Storage",
-			StorageID:      p.storageID(),
-			Container:      p.storageContainer(),
-		}
+		initialState := params.ResumeState("S3Storage", p.storageInfo, objectKey, totalSize, partSize, createdAt)
+		initialState.UploadID, initialState.CompletedParts = uploadID, []state.CompletedPart{}
 		if !params.Stateless {
 			state.SaveUploadState(initialState, params.LocalPath)
 		}
@@ -586,26 +550,8 @@ func (p *Provider) uploadEncryptedMultipartConcurrent(ctx context.Context, s3Cli
 			if params.Stateless {
 				return
 			}
-			currentState := &state.UploadResumeState{
-				LocalPath:      params.LocalPath,
-				EncryptedPath:  params.EncryptedPath,
-				ObjectKey:      objectKey,
-				UploadID:       uploadID,
-				TotalSize:      totalSize,
-				OriginalSize:   params.OriginalSize,
-				SourceModTime:  params.SourceModTime,
-				UploadedBytes:  uploaded,
-				CompletedParts: convertFromCompletedParts(completedParts),
-				PartSize:       partSize,
-				EncryptionKey:  encryption.EncodeBase64(params.EncryptionKey),
-				IV:             encryption.EncodeBase64(params.IV),
-				RandomSuffix:   params.RandomSuffix,
-				CreatedAt:      createdAt,
-				LastUpdate:     time.Now(),
-				StorageType:    "S3Storage",
-				StorageID:      p.storageID(),
-				Container:      p.storageContainer(),
-			}
+			currentState := params.ResumeState("S3Storage", p.storageInfo, objectKey, totalSize, partSize, createdAt)
+			currentState.UploadID, currentState.UploadedBytes, currentState.CompletedParts = uploadID, uploaded, convertFromCompletedParts(completedParts)
 			state.SaveUploadState(currentState, params.LocalPath)
 		},
 	})
@@ -766,20 +712,7 @@ func startFreshAfterVanishedUpload(params transfer.EncryptedFileUploadParams, ob
 		fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: S3 no longer holds the interrupted upload\n",
 			filepath.Base(params.LocalPath))
 	}
-	retireCheckpoint(params, objectKey)
-}
-
-// resumeStateFor loads the checkpoint beside a source, or nothing at all when
-// this attempt must not read it. A stateless attempt holds no lock on that
-// sidecar, so what it describes may be an upload still being filled; one the
-// caller has already judged and could not delete must treat it as absent, since
-// adopting it continues what the caller refused and retiring it discards an
-// upload identity this destination may not own.
-func resumeStateFor(params transfer.EncryptedFileUploadParams) (*state.UploadResumeState, error) {
-	if params.Stateless || params.IgnoreResumeState {
-		return nil, nil
-	}
-	return state.LoadUploadState(params.LocalPath)
+	params.RetireCheckpoint(objectKey)
 }
 
 // checkpointBelongsHere reports whether a resume state was going to the
@@ -794,7 +727,7 @@ func resumeStateFor(params transfer.EncryptedFileUploadParams) (*state.UploadRes
 // its object key is the only evidence — and evidence only where this destination
 // gives keys a prefix of its own.
 func (p *Provider) checkpointBelongsHere(saved *state.UploadResumeState, pathBase string) bool {
-	storageID, container := p.storageID(), p.storageContainer()
+	storageID, container := transfer.StorageDestination(p.storageInfo)
 	if storageID == "" && container == "" {
 		// Nothing to compare against: this provider was not told where it is.
 		return true
@@ -822,18 +755,6 @@ func discardStatelessUpload(ctx context.Context, s3Client *S3Client, params tran
 	abortS3Upload(abortCtx, s3Client, objectKey, uploadID)
 }
 
-// retireCheckpoint deletes the resume state beside a source. A stateless attempt
-// has none of its own: that sidecar belongs to whoever holds the upload lock it
-// could not take.
-func retireCheckpoint(params transfer.EncryptedFileUploadParams, objectKey string) {
-	if params.Stateless {
-		return
-	}
-	if err := state.DeleteUploadState(params.LocalPath); err != nil {
-		log.Printf("Warning: failed to delete the resume state of %s: %v", objectKey, err)
-	}
-}
-
 // completionFailure reports a rejected completion, retiring the checkpoint when
 // the rejection says the upload is gone.
 //
@@ -844,7 +765,7 @@ func retireCheckpoint(params transfer.EncryptedFileUploadParams, objectKey strin
 // this one for as long as the checkpoint names that upload.
 func completionFailure(params transfer.EncryptedFileUploadParams, objectKey string, err error) error {
 	if isNoSuchUpload(err) {
-		retireCheckpoint(params, objectKey)
+		params.RetireCheckpoint(objectKey)
 		return fmt.Errorf("S3 no longer holds the upload of %s to complete: %w", objectKey, err)
 	}
 	return err
@@ -903,23 +824,4 @@ func convertFromCompletedParts(parts []types.CompletedPart) []state.CompletedPar
 		}
 	}
 	return result
-}
-
-// storageID and storageContainer name the destination this provider uploads to.
-// A resume state records them so that an upload of the same source to another
-// destination — the sidecar keys on the local path alone — is not continued as
-// this one. A provider built without its storage info records neither, which
-// reads as "not recorded" rather than as a different destination.
-func (p *Provider) storageID() string {
-	if p.storageInfo == nil {
-		return ""
-	}
-	return p.storageInfo.ID
-}
-
-func (p *Provider) storageContainer() string {
-	if p.storageInfo == nil {
-		return ""
-	}
-	return p.storageInfo.ConnectionSettings.Container
 }

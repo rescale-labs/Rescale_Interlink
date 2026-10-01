@@ -543,43 +543,13 @@ func TestPreEncryptSequentialUploadsEveryPart(t *testing.T) {
 	}
 }
 
-// TestPreEncryptSequentialCheckpointWritesAreBounded: the checkpoint, which
-// carries every completed part, was rewritten after each part. The progress
-// callback runs between a part and its checkpoint, so it sees each rewrite.
-func TestPreEncryptSequentialCheckpointWritesAreBounded(t *testing.T) {
-	_, server := newFakeS3Backend(t)
-	s3Client := newTestS3Client(t, server)
-	dir := t.TempDir()
-	localPath, encryptedPath := filepath.Join(dir, "source.dat"), filepath.Join(dir, "source.dat.enc")
-	testsupport.WriteTestFile(t, encryptedPath, 8*64)
-	testsupport.WriteTestFile(t, localPath, 8*64)
-
-	params := testUploadParams(t, localPath, encryptedPath, &resources.UploadPlan{PartSize: 64})
-	versions := map[int]bool{}
-	params.ProgressCallback = func(float64) {
-		recorded := -1
-		if saved, _ := state.LoadUploadState(localPath); saved != nil {
-			recorded = len(saved.CompletedParts)
-		}
-		versions[recorded] = true
-	}
-	objectKey := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
-	if err := (&Provider{}).uploadEncryptedMultipart(context.Background(), s3Client, params, objectKey, 8*64); err != nil {
-		t.Fatalf("sequential upload failed: %v", err)
-	}
-
-	if len(versions) > 2 {
-		t.Errorf("an 8-part upload rewrote its checkpoint %d times", len(versions)-1)
-	}
-	if saved, _ := state.LoadUploadState(localPath); saved == nil || len(saved.CompletedParts) != 8 {
-		t.Errorf("the checkpoint written on the way out does not hold all 8 parts: %+v", saved)
-	}
-}
-
-// TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit: the throttle holds
-// checkpoints back while the upload runs, and the flush after the loop writes
-// the one it owes. A refused part or a cancel returned from inside the loop,
-// past that flush, so the next attempt sent parts S3 already held again.
+// TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit: the checkpoint,
+// which carries every completed part, was rewritten after each part; and a
+// refused part or a cancel returned from inside the loop, past the flush after
+// it, so the next attempt sent parts S3 already held again. The throttle now
+// holds checkpoints back while the upload runs, which the progress callback,
+// running between a part and its checkpoint, sees as at most one rewrite, and
+// every exit writes the one it owes.
 func TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit(t *testing.T) {
 	// Every checkpoint after the first is held back, however slowly the parts
 	// land, so the ones owed when the upload stops are left to its exit.
@@ -594,15 +564,23 @@ func TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit(t *testing.T) {
 			defer cancel()
 			if stop == "refused" {
 				backend.refusePartsFrom = 5
-			} else {
-				fixture.params.ProgressCallback = func(done float64) {
-					if done >= 0.5 { // part 4 has landed; part 5 goes out cancelled
-						cancel()
-					}
+			}
+			versions := map[int]bool{}
+			fixture.params.ProgressCallback = func(done float64) {
+				recorded := -1
+				if saved, _ := state.LoadUploadState(fixture.localPath); saved != nil {
+					recorded = len(saved.CompletedParts)
+				}
+				versions[recorded] = true
+				if stop == "cancelled" && done >= 0.5 { // part 4 has landed; part 5 goes out cancelled
+					cancel()
 				}
 			}
 			if err := (&Provider{}).uploadEncryptedMultipart(ctx, newTestS3Client(t, server), fixture.params, fixture.objectKey, 8*64); err == nil {
 				t.Fatal("the interrupted attempt reported success")
+			}
+			if len(versions) > 2 {
+				t.Errorf("the checkpoint was rewritten %d times while the upload ran", len(versions)-1)
 			}
 			saved, _ := state.LoadUploadState(fixture.localPath)
 			if saved == nil {
@@ -621,6 +599,9 @@ func TestPreEncryptSequentialCheckpointsWhatLandedOnEveryExit(t *testing.T) {
 			}
 			if got := resumed.stagedPartNumbers(); !slices.Equal(got, []int32{5, 6, 7, 8}) {
 				t.Errorf("the resumed attempt sent parts %v, want 5 to 8", got)
+			}
+			if saved, _ := state.LoadUploadState(fixture.localPath); saved == nil || len(saved.CompletedParts) != 8 {
+				t.Errorf("the checkpoint written on the way out does not hold all 8 parts: %+v", saved)
 			}
 			resumed.mu.Lock()
 			defer resumed.mu.Unlock()
@@ -925,10 +906,11 @@ func TestPreEncryptConcurrentHonorsPlanWorkerCap(t *testing.T) {
 	}
 }
 
-// TestPreEncryptConcurrentResumesMatchingUpload is the other half of F10: once
-// the orchestrator hands the provider back the identity of the interrupted
-// attempt, the parts already accepted must not be sent again. Only the missing
-// ones go over the wire, and the completion still assembles the whole object.
+// TestPreEncryptConcurrentResumesMatchingUpload is the provider half of the
+// resume: once the orchestrator hands the provider back the identity of the
+// interrupted attempt, the parts already accepted must not be sent again. Only
+// the missing ones go over the wire, and the completion still assembles the
+// whole object.
 func TestPreEncryptConcurrentResumesMatchingUpload(t *testing.T) {
 	backend, server := newFakeS3Backend(t)
 	backend.listPartsLive = true // the interrupted upload is still open on S3

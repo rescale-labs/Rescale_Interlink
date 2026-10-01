@@ -68,9 +68,9 @@ type PartPipelineConfig struct {
 	// part. Backends that report progress elsewhere leave it nil.
 	OnProgress func(uploadedBytes int64)
 
-	// SaveState persists resume state periodically. staged is the number of
-	// parts this run has staged so far. Called under the same lock as
-	// RecordPart.
+	// SaveState persists resume state, through a CheckpointThrottle and once
+	// more as the pipeline returns. staged is the number of parts this run has
+	// staged so far. Called under the same lock as RecordPart.
 	SaveState func(uploadedBytes int64, staged int)
 }
 
@@ -234,7 +234,14 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 	var resultsMu sync.Mutex
 	var atomicUploadedBytes int64 = cfg.UploadedBytes
 	resultCount := 0
-	expectedResults := int(cfg.TotalParts - cfg.StartPart)
+	// Whatever is owed is written on the way out, a failure included: every
+	// part recorded is one the backend accepted.
+	checkpoints := NewCheckpointThrottle(func() {
+		resultsMu.Lock()
+		cfg.SaveState(atomic.LoadInt64(&atomicUploadedBytes), resultCount)
+		resultsMu.Unlock()
+	})
+	defer checkpoints.Flush()
 
 	// Wait for results in a separate goroutine
 	go func() {
@@ -258,17 +265,7 @@ func RunPartPipeline(ctx context.Context, cfg PartPipelineConfig) (int64, error)
 		}
 
 		resultCount++
-
-		// Periodically save resume state
-		saveInterval := 5
-		if expectedResults > 20 {
-			saveInterval = expectedResults / 4
-		}
-		if resultCount%saveInterval == 0 {
-			resultsMu.Lock()
-			cfg.SaveState(atomic.LoadInt64(&atomicUploadedBytes), resultCount)
-			resultsMu.Unlock()
-		}
+		checkpoints.Offer()
 	}
 
 	// Check for errors

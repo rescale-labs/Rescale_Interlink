@@ -406,7 +406,6 @@ type encryptedPart struct {
 	partIndex  int64
 	ciphertext []byte
 	plainSize  int64 // Original plaintext size for accurate tracking
-	err        error
 }
 
 // uploadResult holds the result of an upload worker (used for parallel uploads).

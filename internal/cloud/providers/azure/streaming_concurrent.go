@@ -93,7 +93,7 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 	// Create streaming encryption state (CBC chaining)
 	encryptState, err := encryption.NewCBCStreamingEncryptor()
 	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption state: failed to create CBC streaming encryptor: %w", err)
+		return nil, fmt.Errorf("failed to create encryption state: %w", err)
 	}
 
 	// Calculate total parts
@@ -108,7 +108,6 @@ func (p *Provider) InitStreamingUpload(ctx context.Context, params transfer.Stre
 		MasterKey:    encryptState.GetKey(),
 		InitialIV:    encryptState.GetInitialIV(),
 		EncryptState: encryptState,
-		FileID:       nil, // Not used in CBC format
 		PartSize:     partSize,
 		LocalPath:    params.LocalPath,
 		TotalSize:    params.FileSize,
@@ -243,9 +242,6 @@ func (p *Provider) CompleteStreamingUpload(ctx context.Context, uploadState *tra
 		StoragePath:   uploadState.StoragePath,
 		EncryptionKey: uploadState.MasterKey,
 		IV:            uploadState.InitialIV, // IV for Rescale compatibility
-		FormatVersion: 0,                     // Legacy format (uses IV in metadata)
-		FileID:        "",                    // Not used in CBC format
-		PartSize:      uploadState.PartSize,
 	}, nil
 }
 
@@ -280,17 +276,9 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 	}
 
 	// Create encryption state from existing keys using CBC chaining with InitialIV and CurrentIV
-	var encryptState *encryption.CBCStreamingEncryptor
-	if params.InitialIV != nil && params.CurrentIV != nil {
-		// CBC format resume
-		encryptState, err = encryption.NewCBCStreamingEncryptorWithKey(
-			params.MasterKey, params.InitialIV, params.CurrentIV)
-	} else {
-		// Cannot resume legacy HKDF format with new code - start fresh
-		return nil, fmt.Errorf("cannot resume legacy HKDF upload with v3.2.0; please restart upload")
-	}
+	encryptState, err := encryption.NewCBCStreamingEncryptorWithKey(params.MasterKey, params.InitialIV, params.CurrentIV)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption state from resume: failed to create CBC streaming encryptor with key: %w", err)
+		return nil, fmt.Errorf("failed to create encryption state from resume: %w", err)
 	}
 
 	// Calculate total parts
@@ -323,7 +311,6 @@ func (p *Provider) InitStreamingUploadFromState(ctx context.Context, params tran
 		MasterKey:    params.MasterKey,
 		InitialIV:    params.InitialIV,
 		EncryptState: encryptState,
-		FileID:       nil, // Not used in CBC format
 		PartSize:     params.PartSize,
 		LocalPath:    params.LocalPath,
 		TotalSize:    params.FileSize,

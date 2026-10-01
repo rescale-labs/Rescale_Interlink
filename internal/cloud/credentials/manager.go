@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,8 +22,8 @@ import (
 //   - Second check: Avoid redundant refreshes if another goroutine already refreshed
 //
 // Cached data:
-//   - Storage credentials: Refreshed every 10 minutes (5-minute safety margin before 15-min expiry)
-//   - Storage-specific credentials: Same refresh interval, keyed by storage ID and file path (for cross-storage downloads)
+//   - Storage credentials: Refreshed every GlobalCredentialRefreshInterval
+//   - Credentials for the storage a file is in: see storageCredsFor
 //   - User profile: Refreshed every 5 minutes (rarely changes, but refresh to catch updates)
 //   - Root folders: Refreshed every 5 minutes (rarely changes)
 type Manager struct {
@@ -36,11 +37,45 @@ type Manager struct {
 	lastFoldersRefresh time.Time
 	mu                 sync.RWMutex
 
-	// Storage-specific credential caches (for cross-storage/job file downloads)
-	// Keyed by storage ID to share credentials across files from the same storage
-	storageS3Creds      map[string]*models.S3Credentials
-	storageAzureCreds   map[string]*models.AzureCredentials
-	storageCredsRefresh map[string]time.Time
+	// Credentials for the storage a file is in, for cross-storage and job file
+	// downloads. Behind a lock of their own, because mu is held across the
+	// requests that refresh everything above, and a download's lookup must not
+	// wait for those.
+	storageMu    sync.RWMutex
+	storageCreds map[string]*storageCreds // by storage, or by storage and path
+	storageDirs  map[string]string        // the requester's own folder, by storage
+	fetches      map[string]*credFetch    // requests in flight, by the key they answer
+}
+
+// storageCreds is one credentials response.
+type storageCreds struct {
+	s3      *models.S3Credentials
+	azure   *models.AzureCredentials
+	fetched time.Time
+}
+
+func (e *storageCreds) fresh() bool {
+	return e != nil && time.Since(e.fetched) <= constants.GlobalCredentialRefreshInterval
+}
+
+// storageDir is the requester's own folder the response names, if it names one.
+func (e *storageCreds) storageDir() string {
+	switch {
+	case e.s3 != nil:
+		return e.s3.StorageDir
+	case e.azure != nil:
+		return e.azure.StorageDir
+	}
+	return ""
+}
+
+// credFetch is a credentials request in flight, which lookups of the same key
+// wait for rather than send their own.
+type credFetch struct {
+	done      chan struct{}
+	entry     *storageCreds
+	err       error
+	abandoned bool // the requester's context ended, so the platform never answered
 }
 
 // Global singleton instance shared across all upload/download operations
@@ -62,10 +97,10 @@ func GetManager(apiClient *api.Client) *Manager {
 	// (in case API client changes between sessions)
 	if globalManager == nil || globalManager.apiClient != apiClient {
 		globalManager = &Manager{
-			apiClient:           apiClient,
-			storageS3Creds:      make(map[string]*models.S3Credentials),
-			storageAzureCreds:   make(map[string]*models.AzureCredentials),
-			storageCredsRefresh: make(map[string]time.Time),
+			apiClient:    apiClient,
+			storageCreds: make(map[string]*storageCreds),
+			storageDirs:  make(map[string]string),
+			fetches:      make(map[string]*credFetch),
 		}
 	}
 
@@ -173,19 +208,12 @@ func (m *Manager) InvalidateS3Credentials(rejected *models.S3Credentials) bool {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.s3Credentials == rejected {
+	dropped := m.s3Credentials == rejected
+	if dropped {
 		m.s3Credentials = nil
-		return true
 	}
-	for key, creds := range m.storageS3Creds {
-		if creds == rejected {
-			m.dropStorageCredsLocked(key)
-			return true
-		}
-	}
-	return false
+	m.mu.Unlock()
+	return dropped || m.dropStorageCreds(func(e *storageCreds) bool { return e.s3 == rejected })
 }
 
 // InvalidateAzureCredentials is InvalidateS3Credentials for Azure: a rejected
@@ -196,29 +224,25 @@ func (m *Manager) InvalidateAzureCredentials(rejected *models.AzureCredentials) 
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.azureCredentials == rejected {
+	dropped := m.azureCredentials == rejected
+	if dropped {
 		m.azureCredentials = nil
-		return true
 	}
-	for key, creds := range m.storageAzureCreds {
-		if creds == rejected {
-			m.dropStorageCredsLocked(key)
+	m.mu.Unlock()
+	return dropped || m.dropStorageCreds(func(e *storageCreds) bool { return e.azure == rejected })
+}
+
+// dropStorageCreds forgets the storage credential that matches.
+func (m *Manager) dropStorageCreds(match func(*storageCreds) bool) bool {
+	m.storageMu.Lock()
+	defer m.storageMu.Unlock()
+	for key, e := range m.storageCreds {
+		if match(e) {
+			delete(m.storageCreds, key)
 			return true
 		}
 	}
 	return false
-}
-
-// dropStorageCredsLocked forgets one storage's cache entry. Both provider maps
-// and the timestamp are filled by the same API response, so they are dropped
-// together; leaving the timestamp would let the entry look fresh again as soon
-// as anything refilled one of the maps. Caller must hold m.mu.
-func (m *Manager) dropStorageCredsLocked(key string) {
-	delete(m.storageS3Creds, key)
-	delete(m.storageAzureCreds, key)
-	delete(m.storageCredsRefresh, key)
 }
 
 // ForceRefresh forces an immediate credential refresh, bypassing the cache
@@ -299,136 +323,132 @@ func (m *Manager) WarmAll(ctx context.Context) {
 	_, _ = m.GetRootFolders(ctx)
 }
 
-// GetS3CredentialsForStorage returns cached S3 credentials for a specific storage, refreshing if needed.
-// This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
-// The cache is keyed by storage ID and file path, since the credentials are scoped to the path.
-// Thread-safe with same double-checked locking pattern as GetS3Credentials.
-//
-// If fileInfo is nil or has no storage info, falls back to GetS3Credentials for user's default storage.
+// GetS3CredentialsForStorage returns S3 credentials that cover fileInfo's path in
+// the storage it is in, for downloads from a storage other than the default one
+// (e.g. job output files). Without a storage or a path it returns the default
+// storage's credentials, which is what the request would ask for.
 func (m *Manager) GetS3CredentialsForStorage(ctx context.Context, fileInfo *models.CloudFile) (*models.S3Credentials, error) {
-	// If no file info or storage info, fall back to default credentials
-	if fileInfo == nil || fileInfo.Storage == nil {
+	if !inStorage(fileInfo) {
 		return m.GetS3Credentials(ctx)
 	}
-
-	storageID := fileInfo.Storage.ID
-	if storageID == "" {
-		return m.GetS3Credentials(ctx)
-	}
-
-	// The API returns per-file S3 STS credentials whose policy is scoped to the
-	// requested path prefix (GetStorageCredentials sends fileInfo.PathParts).
-	// Include the file path in the cache key so each path gets credentials
-	// scoped to it, rather than sharing a cached response whose policy only
-	// grants access to a different file's prefix — which would surface as a
-	// 403 on HeadObject/GetObject. Mirrors GetAzureCredentialsForStorage.
-	cacheKey := storageID
-	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
-		cacheKey = storageID + ":" + fileInfo.PathParts.Path
-	}
-
-	// Fast path: check if refresh is needed (read lock only)
-	m.mu.RLock()
-	lastRefresh := m.storageCredsRefresh[cacheKey]
-	creds := m.storageS3Creds[cacheKey]
-	needsRefresh := time.Since(lastRefresh) > constants.GlobalCredentialRefreshInterval || creds == nil
-	if !needsRefresh {
-		m.mu.RUnlock()
-		return creds, nil
-	}
-	m.mu.RUnlock()
-
-	// Warm proxy before credential refresh API call
-	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
-
-	// Slow path: refresh needed (write lock)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Double-check: another goroutine might have refreshed while we waited
-	lastRefresh = m.storageCredsRefresh[cacheKey]
-	creds = m.storageS3Creds[cacheKey]
-	if time.Since(lastRefresh) <= constants.GlobalCredentialRefreshInterval && creds != nil {
-		return creds, nil
-	}
-
-	// Fetch new credentials for this specific storage
-	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
+	e, err := m.storageCredsFor(ctx, fileInfo, fileInfo.PathParts.Path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
+		return nil, err
 	}
-
-	// Update cached credentials for this storage+path
-	m.storageS3Creds[cacheKey] = s3Creds
-	m.storageAzureCreds[cacheKey] = azureCreds
-	m.storageCredsRefresh[cacheKey] = time.Now()
-
-	return s3Creds, nil
+	return e.s3, nil
 }
 
-// GetAzureCredentialsForStorage returns cached Azure credentials for a specific storage, refreshing if needed.
-// This is used for cross-storage downloads (e.g., downloading job output files from a different storage).
-// The cache is keyed by storage ID and file path, since the SAS token is scoped to the path.
-// Thread-safe with same double-checked locking pattern as GetAzureCredentials.
-//
-// If fileInfo is nil or has no storage info, falls back to GetAzureCredentials for user's default storage.
+// GetAzureCredentialsForStorage is GetS3CredentialsForStorage for Azure, where
+// the platform names a path by its container and blob.
 func (m *Manager) GetAzureCredentialsForStorage(ctx context.Context, fileInfo *models.CloudFile) (*models.AzureCredentials, error) {
-	// If no file info or storage info, fall back to default credentials
-	if fileInfo == nil || fileInfo.Storage == nil {
+	if !inStorage(fileInfo) {
 		return m.GetAzureCredentials(ctx)
 	}
-
-	storageID := fileInfo.Storage.ID
-	if storageID == "" {
-		return m.GetAzureCredentials(ctx)
-	}
-
-	// For shared-file credential requests, the API returns per-file SAS tokens
-	// scoped to a specific blob path. Include the file path in the cache key so that
-	// each file gets credentials with its own per-file SAS token, rather than sharing
-	// a cached response whose per-file token only matches a different file.
-	cacheKey := storageID
-	if fileInfo.PathParts != nil && fileInfo.PathParts.Path != "" {
-		cacheKey = storageID + ":" + fileInfo.PathParts.Path
-	}
-
-	// Fast path: check if refresh is needed (read lock only)
-	m.mu.RLock()
-	lastRefresh := m.storageCredsRefresh[cacheKey]
-	creds := m.storageAzureCreds[cacheKey]
-	needsRefresh := time.Since(lastRefresh) > constants.GlobalCredentialRefreshInterval || creds == nil
-	if !needsRefresh {
-		m.mu.RUnlock()
-		return creds, nil
-	}
-	m.mu.RUnlock()
-
-	// Warm proxy before credential refresh API call
-	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
-
-	// Slow path: refresh needed (write lock)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Double-check: another goroutine might have refreshed while we waited
-	lastRefresh = m.storageCredsRefresh[cacheKey]
-	creds = m.storageAzureCreds[cacheKey]
-	if time.Since(lastRefresh) <= constants.GlobalCredentialRefreshInterval && creds != nil {
-		return creds, nil
-	}
-
-	// Fetch new credentials for this specific storage
-	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
+	e, err := m.storageCredsFor(ctx, fileInfo, fileInfo.PathParts.Container+"/"+fileInfo.PathParts.Path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
+		return nil, err
+	}
+	return e.azure, nil
+}
+
+// inStorage reports whether fileInfo names a storage and a path in it.
+func inStorage(fileInfo *models.CloudFile) bool {
+	return fileInfo != nil && fileInfo.Storage != nil && fileInfo.Storage.ID != "" &&
+		fileInfo.PathParts != nil && fileInfo.PathParts.Path != ""
+}
+
+// storageCredsFor returns a response that covers path in fileInfo's storage,
+// fetching one if none is cached.
+//
+// The platform's credential for a storage always covers the requester's own
+// folder there, which every response names as storageDir, and grants a path
+// anywhere else on its own. So one response serves every path in that folder,
+// and any other path is fetched for itself. Until the first response for a
+// storage has named the folder, every path is fetched for itself.
+//
+// One request is in flight per key: lookups of the same key wait for it, and
+// lookups of other keys go ahead, paced by the rate limiter.
+func (m *Manager) storageCredsFor(ctx context.Context, fileInfo *models.CloudFile, path string) (*storageCreds, error) {
+	storage := fileInfo.Storage.StorageType + ":" + fileInfo.Storage.ID
+
+	m.storageMu.RLock()
+	e := m.storageCreds[m.credKeyLocked(storage, path)]
+	m.storageMu.RUnlock()
+	if e.fresh() {
+		return e, nil
 	}
 
-	// Update cached credentials for this storage+file
-	m.storageS3Creds[cacheKey] = s3Creds
-	m.storageAzureCreds[cacheKey] = azureCreds
-	m.storageCredsRefresh[cacheKey] = time.Now()
+	for {
+		m.storageMu.Lock()
+		key := m.credKeyLocked(storage, path)
+		if e := m.storageCreds[key]; e.fresh() {
+			m.storageMu.Unlock()
+			return e, nil
+		}
+		if f := m.fetches[key]; f != nil {
+			m.storageMu.Unlock()
+			select {
+			case <-f.done:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			if f.abandoned && ctx.Err() == nil {
+				continue // its requester gave up, not the platform: ask again
+			}
+			return f.entry, f.err
+		}
+		f := &credFetch{done: make(chan struct{})}
+		m.fetches[key] = f
+		m.storageMu.Unlock()
 
-	return azureCreds, nil
+		m.fetchStorageCreds(ctx, f, key, storage, path, fileInfo)
+		return f.entry, f.err
+	}
+}
+
+// fetchStorageCreds sends f's request and files the response under the key it
+// covers, which a response naming the requester's folder can change from the
+// key it was fetched for.
+func (m *Manager) fetchStorageCreds(ctx context.Context, f *credFetch, key, storage, path string, fileInfo *models.CloudFile) {
+	inthttp.WarmupProxyIfNeeded(ctx, m.apiClient.GetConfig())
+	s3Creds, azureCreds, err := m.apiClient.GetStorageCredentials(ctx, fileInfo)
+
+	m.storageMu.Lock()
+	defer m.storageMu.Unlock()
+	defer close(f.done)
+	delete(m.fetches, key)
+	if err != nil {
+		f.err = fmt.Errorf("failed to refresh storage-specific credentials: %w", err)
+		f.abandoned = ctx.Err() != nil
+		return
+	}
+
+	// Aged on the wall clock, as EnsureFresh ages the default pair: the monotonic
+	// clock stops while a laptop sleeps, and the credential can expire meanwhile.
+	f.entry = &storageCreds{s3: s3Creds, azure: azureCreds, fetched: time.Now().Round(0)}
+	if dir := f.entry.storageDir(); dir != "" {
+		m.storageDirs[storage] = dir
+	}
+	// A credential past its refresh interval would only be fetched again. The
+	// daemon keeps one manager for its life, and would otherwise keep one for
+	// every file it ever downloaded from another user's folder.
+	for k, old := range m.storageCreds {
+		if !old.fresh() {
+			delete(m.storageCreds, k)
+		}
+	}
+	m.storageCreds[m.credKeyLocked(storage, path)] = f.entry
+}
+
+// credKeyLocked is the cache key of the credential that covers path: the
+// storage's, for a path in the requester's own folder there, as the platform
+// decides it, and the path's own otherwise. It goes by location alone: a file
+// the requester owns can sit in another user's folder. Caller holds storageMu.
+func (m *Manager) credKeyLocked(storage, path string) string {
+	if dir := m.storageDirs[storage]; dir != "" && (path == dir || strings.HasPrefix(path, dir+"/")) {
+		return storage
+	}
+	return storage + ":" + path
 }
 
 // GetUserProfile returns cached user profile, refreshing if needed

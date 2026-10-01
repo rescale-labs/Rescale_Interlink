@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -116,6 +117,46 @@ func TestCooldownPropagatesAcrossClients(t *testing.T) {
 	}
 	if resp.WaitDuration < 2*time.Second {
 		t.Errorf("WaitDuration should be ~3s, got %v", resp.WaitDuration)
+	}
+}
+
+// A credential request's limiter reaches the coordinator's bucket for its own
+// scope, through the store's hooks and the socket: the drain and cooldown a 429
+// sends land there, and the user scope's bucket keeps its tokens.
+func TestCredentialScopeReachesItsOwnBucket(t *testing.T) {
+	client, _, cleanup := startTestServer(t)
+	defer cleanup()
+	ratelimit.ResetGlobalStore()
+	t.Cleanup(ratelimit.ResetGlobalStore)
+	store := ratelimit.GlobalStore()
+	store.SetCoordinatorEnsurer(func() (ratelimit.CoordinatorClient, error) { return &clientAdapter{client: client}, nil })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, scope := range []ratelimit.Scope{ratelimit.ScopeUser, ratelimit.ScopeCredentialAccess} {
+		if err := store.GetLimiter("https://platform.rescale.com", "key-abc", scope).Wait(ctx); err != nil {
+			t.Fatalf("%s: %v", scope, err)
+		}
+	}
+	credentials := store.GetLimiter("https://platform.rescale.com", "key-abc", ratelimit.ScopeCredentialAccess)
+	credentials.Drain()
+	credentials.SetCooldown(7 * time.Second)
+
+	state, err := client.GetState(ctx)
+	if err != nil || len(state.Buckets) != 2 {
+		t.Fatalf("GetState: %+v, %v; want one bucket per scope used", state, err)
+	}
+	for key, bucket := range state.Buckets {
+		switch {
+		case strings.HasSuffix(key, "|credential-access"):
+			// Levels that seconds of delay cannot cross: the bucket refills at
+			// 21.25/s, and an undrained one holds 299 of 300.
+			if bucket.Tokens >= 100 || bucket.CooldownRemainMs < 1000 {
+				t.Errorf("the credential-access bucket was not drained and cooled down: %+v", bucket)
+			}
+		case bucket.Tokens < ratelimit.UserScopeBurstCapacity-1.5 || bucket.CooldownRemainMs != 0:
+			t.Errorf("the %s bucket was touched: %+v", key, bucket)
+		}
 	}
 }
 

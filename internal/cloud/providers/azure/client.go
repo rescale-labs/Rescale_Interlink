@@ -39,7 +39,7 @@ import (
 //
 // Thread-safe: All operations are safe for concurrent use.
 //
-// Cross-storage support (Sprint F.2):
+// Cross-storage support:
 // When fileInfo is provided, the client fetches credentials for that file's specific storage,
 // enabling cross-storage downloads (e.g., S3 user downloading Azure-stored job outputs).
 // When fileInfo is nil, the client uses the user's default storage credentials.
@@ -80,7 +80,7 @@ type AzureClient struct {
 //   - apiClient: Rescale API client for credential refresh
 //   - fileInfo: Optional file info for cross-storage downloads (nil for uploads or default storage)
 //
-// Cross-storage support (Sprint F.2):
+// Cross-storage support:
 // When fileInfo is provided (non-nil), the client fetches credentials for that file's specific
 // storage rather than the user's default storage. This enables scenarios like:
 //   - S3 user downloading job outputs stored in Azure
@@ -172,7 +172,7 @@ func buildSASURL(storageInfo *models.StorageInfo, creds *models.AzureCredentials
 	// the per-file token provides blob-scoped read access.
 	sasToken := creds.SASToken
 	if len(fileInfo) > 0 && fileInfo[0] != nil && fileInfo[0].PathParts != nil {
-		sasToken = GetPerFileSASToken(creds, fileInfo[0].PathParts.Path)
+		sasToken = GetPerFileSASToken(creds, *fileInfo[0].PathParts)
 	}
 
 	sasURL := fmt.Sprintf("https://%s.blob.core.windows.net/?%s", accountName, sasToken)
@@ -184,13 +184,13 @@ func buildSASURL(storageInfo *models.StorageInfo, creds *models.AzureCredentials
 	return sasURL, nil
 }
 
-// GetPerFileSASToken returns the blob-level SAS token for a specific file path,
-// falling back to the container-level SAS token if no per-file match is found.
-// Per-file tokens are returned by the API for shared-file credential requests
-// and provide read-only, blob-scoped access.
-func GetPerFileSASToken(creds *models.AzureCredentials, blobPath string) string {
+// GetPerFileSASToken returns the blob-level SAS token for a blob, matched by
+// container and path, falling back to the container-level SAS token if no
+// per-file match is found. Per-file tokens are returned by the API for
+// shared-file credential requests and provide read-only, blob-scoped access.
+func GetPerFileSASToken(creds *models.AzureCredentials, blob models.CloudFilePathParts) string {
 	for _, p := range creds.Paths {
-		if p.PathParts != nil && p.PathParts.Path == blobPath {
+		if p.PathParts != nil && *p.PathParts == blob {
 			return p.SASToken
 		}
 	}
@@ -214,7 +214,7 @@ func (c *AzureClient) Container() string {
 // This is thread-safe and shares credentials across all concurrent operations.
 // IMPORTANT: Reuses the existing HTTP client to maintain connection pool.
 //
-// Cross-storage support (Sprint F.2):
+// Cross-storage support:
 // When fileInfo was provided during client creation, refreshes credentials for that
 // file's specific storage (not user's default). This maintains cross-storage access
 // during long-running operations.

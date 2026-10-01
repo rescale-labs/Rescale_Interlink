@@ -5,7 +5,9 @@ import (
 	"testing"
 )
 
-func TestResolveScopeV3Default(t *testing.T) {
+// Every v3 call is in the user scope except credential requests, which the
+// platform counts apart.
+func TestResolveScopeV3(t *testing.T) {
 	r := NewRegistry()
 
 	tests := []struct {
@@ -14,7 +16,7 @@ func TestResolveScopeV3Default(t *testing.T) {
 		want   Scope
 	}{
 		{"GET", "/api/v3/users/me/", ScopeUser},
-		{"POST", "/api/v3/credentials/", ScopeUser},
+		{"POST", "/api/v3/credentials/", ScopeCredentialAccess},
 		{"GET", "/api/v3/files/abc123/", ScopeUser},
 		{"POST", "/api/v3/files/", ScopeUser},
 		{"DELETE", "/api/v3/files/abc123/", ScopeUser},
@@ -112,6 +114,7 @@ func TestGetScopeConfig(t *testing.T) {
 		{ScopeUser, UserScopeRatePerSec, UserScopeBurstCapacity},
 		{ScopeJobSubmission, JobSubmissionRatePerSec, JobSubmissionBurstCapacity},
 		{ScopeJobsUsage, JobsUsageRatePerSec, JobsUsageBurstCapacity},
+		{ScopeCredentialAccess, CredentialAccessRatePerSec, CredentialAccessBurstCapacity},
 	}
 
 	for _, tt := range tests {
@@ -127,13 +130,13 @@ func TestGetScopeConfig(t *testing.T) {
 	}
 }
 
+// A scope the registry does not know gets the user scope's config. That is what
+// a coordinator an older Interlink started makes of a newer scope.
 func TestGetScopeConfigUnknown(t *testing.T) {
 	r := NewRegistry()
 
-	// Unknown scope should return the default (user) config
-	cfg := r.GetScopeConfig(Scope("nonexistent"))
-	if cfg.Scope != ScopeUser {
-		t.Errorf("unknown scope: got %q, want %q", cfg.Scope, ScopeUser)
+	if cfg := r.GetScopeConfig(Scope("nonexistent")); cfg != r.GetScopeConfig(ScopeUser) {
+		t.Errorf("unknown scope: got %+v, want the user scope's config", cfg)
 	}
 }
 
@@ -141,15 +144,15 @@ func TestAllScopes(t *testing.T) {
 	r := NewRegistry()
 	scopes := r.AllScopes()
 
-	if len(scopes) != 3 {
-		t.Fatalf("AllScopes() returned %d scopes, want 3", len(scopes))
+	if len(scopes) != 4 {
+		t.Fatalf("AllScopes() returned %d scopes, want 4", len(scopes))
 	}
 
 	found := make(map[Scope]bool)
 	for _, s := range scopes {
 		found[s] = true
 	}
-	for _, want := range []Scope{ScopeUser, ScopeJobSubmission, ScopeJobsUsage} {
+	for _, want := range []Scope{ScopeUser, ScopeJobSubmission, ScopeJobsUsage, ScopeCredentialAccess} {
 		if !found[want] {
 			t.Errorf("AllScopes() missing %q", want)
 		}

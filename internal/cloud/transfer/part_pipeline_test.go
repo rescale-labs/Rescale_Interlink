@@ -130,6 +130,51 @@ func TestRunPartPipelineStagesEveryPart(t *testing.T) {
 	waitForGoroutines(t, baseline)
 }
 
+// The concurrent pipeline checkpoints through CheckpointThrottle, like the
+// other upload paths: the first staged part at once, then no more than one per
+// interval, and whatever is owed as it returns, a failed run included, since
+// every part it recorded is one the backend accepted.
+func TestRunPartPipelineCheckpointsThroughTheThrottle(t *testing.T) {
+	defer func(interval time.Duration) { CheckpointInterval = interval }(CheckpointInterval)
+	CheckpointInterval = time.Hour
+
+	const partSize = int64(16)
+	for _, tc := range []struct {
+		name    string
+		failAt  int64 // index of the part the backend refuses; -1 for none
+		wantEnd int64 // bytes the last checkpoint records
+	}{
+		{"a run that completes", -1, 40 * partSize},
+		{"a run that fails", 29, 29 * partSize},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var saved []int64
+			_, err := RunPartPipeline(context.Background(), PartPipelineConfig{
+				Reader:      bytes.NewReader(make([]byte, 40*partSize)),
+				PartSize:    partSize,
+				TotalParts:  40,
+				Concurrency: 1,
+				QueueDepth:  1,
+				WorkerLabel: "test staging worker",
+				StagePart: func(_ context.Context, part PartAssignment) (string, error) {
+					if part.Index == tc.failAt {
+						return "", fmt.Errorf("part %d was refused", part.Index)
+					}
+					return fmt.Sprintf("tag-%d", part.Index), nil
+				},
+				RecordPart: func(int64, string) {},
+				SaveState:  func(uploaded int64, _ int) { saved = append(saved, uploaded) },
+			})
+			if (err != nil) != (tc.failAt >= 0) {
+				t.Fatalf("RunPartPipeline: %v", err)
+			}
+			if len(saved) != 2 || saved[0] != partSize || saved[1] != tc.wantEnd {
+				t.Errorf("checkpoints recorded %v bytes, want [%d %d]: the first part, then what was owed at the end", saved, partSize, tc.wantEnd)
+			}
+		})
+	}
+}
+
 // TestCheckpointThrottle pins the policy in fake time: writes are bounded, an
 // upload that keeps moving is checkpointed again once the interval has passed,
 // and one that stalls holds its owed checkpoint until the next Offer or Flush.

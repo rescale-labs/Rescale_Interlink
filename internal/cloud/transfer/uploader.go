@@ -7,11 +7,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/cloud"
+	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/crypto" // package name is 'encryption'
+	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/resources"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
@@ -103,7 +106,6 @@ type StreamingUploadResumeParams struct {
 	MasterKey    []byte    // Encryption key from resume state
 	InitialIV    []byte    // Initial IV from resume state (for metadata)
 	CurrentIV    []byte    // Current IV from resume state (last ciphertext block)
-	FileID       []byte    // DEPRECATED: File identifier from legacy resume state
 	PartSize     int64     // Part size from resume state
 	RandomSuffix string    // Random suffix from resume state
 	OutputWriter io.Writer // Optional output for status messages
@@ -130,7 +132,6 @@ type StreamingUpload struct {
 	// Encryption state (CBC chaining format)
 	MasterKey []byte // Encryption key used for CBC
 	InitialIV []byte // Initial IV for CBC chaining (stored in metadata)
-	FileID    []byte // DEPRECATED: File identifier for legacy HKDF derivation
 	PartSize  int64  // Size of each part in bytes
 
 	// EncryptState is the CBC chain this upload is encrypting through, exposed
@@ -240,6 +241,62 @@ func (p EncryptedFileUploadParams) UploadPlan(encryptedSize int64, limits resour
 	})
 }
 
+// LoadResumeState loads the checkpoint beside the source, or nothing at all when
+// this attempt must not read it (Stateless, IgnoreResumeState).
+func (p EncryptedFileUploadParams) LoadResumeState() (*state.UploadResumeState, error) {
+	if p.Stateless || p.IgnoreResumeState {
+		return nil, nil
+	}
+	return state.LoadUploadState(p.LocalPath)
+}
+
+// RetireCheckpoint deletes the resume state beside the source. A stateless
+// attempt has none of its own: that sidecar belongs to whoever holds the upload
+// lock it could not take.
+func (p EncryptedFileUploadParams) RetireCheckpoint(objectKey string) {
+	if p.Stateless {
+		return
+	}
+	if err := state.DeleteUploadState(p.LocalPath); err != nil {
+		log.Printf("Warning: failed to delete the resume state of %s: %v", objectKey, err)
+	}
+}
+
+// ResumeState is this upload's checkpoint as far as the source, the encryption
+// and the destination describe it; the provider adds what its backend holds.
+func (p EncryptedFileUploadParams) ResumeState(storageType string, storage *models.StorageInfo, objectKey string, totalSize, partSize int64, createdAt time.Time) *state.UploadResumeState {
+	storageID, container := StorageDestination(storage)
+	return &state.UploadResumeState{
+		LocalPath:     p.LocalPath,
+		EncryptedPath: p.EncryptedPath,
+		ObjectKey:     objectKey,
+		TotalSize:     totalSize,
+		OriginalSize:  p.OriginalSize,
+		SourceModTime: p.SourceModTime,
+		PartSize:      partSize,
+		EncryptionKey: encryption.EncodeBase64(p.EncryptionKey),
+		IV:            encryption.EncodeBase64(p.IV),
+		RandomSuffix:  p.RandomSuffix,
+		CreatedAt:     createdAt,
+		LastUpdate:    time.Now(),
+		StorageType:   storageType,
+		StorageID:     storageID,
+		Container:     container,
+	}
+}
+
+// StorageDestination names the destination a provider uploads to. A resume
+// state records it so that an upload of the same source to another destination
+// (the sidecar keys on the local path alone) is not continued as this one. A
+// provider built without its storage info names neither, which reads as "not
+// recorded" rather than as a different destination.
+func StorageDestination(storage *models.StorageInfo) (storageID, container string) {
+	if storage == nil {
+		return "", ""
+	}
+	return storage.ID, storage.ConnectionSettings.Container
+}
+
 // VerifyUploadComplete reports whether an upload holds every byte and every part
 // of the file it is about to assemble. Both backends assemble whatever subset of
 // parts they are handed and report success, so a reader that stopped early would
@@ -278,8 +335,8 @@ func VerifyBlockList(blockIDs []string) error {
 	return nil
 }
 
-// CheckpointInterval bounds how often a streaming or sequential pre-encrypt
-// upload rewrites its resume checkpoint. Each write carries every part recorded
+// CheckpointInterval bounds how often a streaming or pre-encrypt upload rewrites
+// its resume checkpoint. Each write carries every part recorded
 // so far, so one per part made the traffic grow with the square of the part
 // count: 4.7 GB beside the source for a 10,000-part S3 upload, about 100 GB for
 // a 49,450-block Azure one. A checkpoint that lags the backend is still a
@@ -290,16 +347,11 @@ var CheckpointInterval = 10 * time.Second
 
 // CheckpointThrottle writes the first checkpoint it is offered at once and then
 // at most one per CheckpointInterval. One it holds back is owed until a later
-// Offer finds the interval passed, or until Flush, which the streaming and
-// sequential pre-encrypt uploads call on every orderly exit: success, failure
-// or cancel. There is no timer, so an upload that stalls leaves its owed
-// checkpoint unwritten, and a crash replays everything after the last one
-// written; the interval does not bound that.
-//
-// Concurrent pre-encrypt uploads do not use it: RunPartPipeline saves after
-// every 5 results (every quarter of them above 20) and returns on an error
-// without a final save, so the parts accepted since its last save are sent
-// again by the next attempt.
+// Offer finds the interval passed, or until Flush, which every upload path
+// calls on every orderly exit: success, failure or cancel. There is no timer,
+// so an upload that stalls leaves its owed checkpoint unwritten, and a crash
+// replays everything after the last one written; the interval does not bound
+// that.
 type CheckpointThrottle struct {
 	save func()
 	last time.Time

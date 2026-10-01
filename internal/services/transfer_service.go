@@ -115,12 +115,6 @@ func (ts *TransferService) GetQueue() *transfer.Queue {
 	return ts.queue
 }
 
-// GetSemaphore returns the transfer semaphore.
-// Used for shared concurrency control across multiple batches.
-func (ts *TransferService) GetSemaphore() chan struct{} {
-	return ts.semaphore
-}
-
 // StartTransfers initiates one or more transfers.
 // Returns immediately; progress is published via events.
 // The function handles both uploads and downloads based on request type.

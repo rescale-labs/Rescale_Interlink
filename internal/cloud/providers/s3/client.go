@@ -73,12 +73,11 @@ type S3Client struct {
 //   - Is thread-safe for concurrent operations
 //
 // Parameters:
-//   - ctx: Context for cancellation and timeout control
 //   - storageInfo: S3 storage configuration (bucket, region, path base)
 //   - apiClient: Rescale API client for credential refresh
 //   - fileInfo: Optional file info for cross-storage downloads (nil for uploads)
 //   - retryObserver: Where to report retries (zero value: stderr plus event bus)
-func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile, retryObserver cloud.RetryObserver) (*S3Client, error) {
+func NewS3Client(storageInfo *models.StorageInfo, apiClient *api.Client, fileInfo *models.CloudFile, retryObserver cloud.RetryObserver) (*S3Client, error) {
 	if storageInfo == nil {
 		return nil, fmt.Errorf("storageInfo is required")
 	}
@@ -101,7 +100,7 @@ func NewS3Client(ctx context.Context, storageInfo *models.StorageInfo, apiClient
 
 	// Wrap with credentials cache for automatic refresh
 	credCache := aws.NewCredentialsCache(credProvider, func(o *aws.CredentialsCacheOptions) {
-		// Refresh 5 minutes before expiry (credentials expire at ~15 min)
+		// Refresh 5 minutes before the 15-minute expiry Retrieve stamps
 		o.ExpiryWindow = 5 * time.Minute
 	})
 
@@ -168,7 +167,6 @@ func (c *S3Client) EnsureFreshCredentials(ctx context.Context) error {
 	var err error
 
 	// Use credential manager for all credential fetching (both default and file-specific)
-	// The manager handles caching keyed by storage ID, avoiding redundant API calls
 	if c.fileInfo != nil {
 		// Get cached credentials for the specific file's storage
 		s3Creds, err = c.credManager.GetS3CredentialsForStorage(ctx, c.fileInfo)
@@ -271,7 +269,7 @@ func TraceContext(ctx context.Context, operation string) context.Context {
 }
 
 // =============================================================================
-// Download Operations (Phase 7F)
+// Download Operations
 // =============================================================================
 
 // HeadObject retrieves object metadata (size, etc.) from S3.

@@ -1834,15 +1834,8 @@ type FileListOptions struct {
 	Ordering    string // Sort order: "name", "-name", "decryptedSize", "-decryptedSize", "dateUploaded", "-dateUploaded"
 }
 
-// ListFilesPage retrieves a page of files from the user's library (flat list).
-// pageURL: pass "" for first page, or NextURL from previous response.
-// Orders by most recent first (-dateUploaded) to show newest files at top.
-// pageSize: pass 0 for default (25), or specify items per page.
-func (c *Client) ListFilesPage(ctx context.Context, pageURL string, pageSize int) (*LegacyFilesPage, error) {
-	return c.ListFilesPageWithOptions(ctx, pageURL, pageSize, nil)
-}
-
-// ListFilesPageWithOptions retrieves a page of files with optional filtering.
+// ListFilesPageWithOptions retrieves a page of files from the user's library
+// (flat list), newest first, with optional filtering.
 // pageURL: pass "" for first page, or NextURL from previous response.
 // pageSize: pass 0 for default (25), or specify items per page.
 // options: optional filters (owner, search), pass nil for no filters.
@@ -3042,40 +3035,6 @@ func (c *Client) GetJobCustomFields(ctx context.Context, jobID string) ([]JobCus
 	}
 
 	return fields, nil
-}
-
-// GetJobCustomFieldValue retrieves a specific custom field value by name.
-// Returns the value as a string, or empty string if not found.
-func (c *Client) GetJobCustomFieldValue(ctx context.Context, jobID, fieldName string) (string, error) {
-	fields, err := c.GetJobCustomFields(ctx, jobID)
-	if err != nil {
-		return "", err
-	}
-
-	for _, f := range fields {
-		if f.Name == fieldName {
-			// Handle nil/null values (field defined but not set)
-			if f.Value == nil {
-				return "", nil
-			}
-			// Convert value to string
-			switch v := f.Value.(type) {
-			case string:
-				return v, nil
-			case bool:
-				if v {
-					return "true", nil
-				}
-				return "false", nil
-			case float64:
-				return fmt.Sprintf("%v", v), nil
-			default:
-				return fmt.Sprintf("%v", v), nil
-			}
-		}
-	}
-
-	return "", nil // Field not found
 }
 
 // WorkspaceCustomFieldsResponse represents the API response for workspace custom fields.

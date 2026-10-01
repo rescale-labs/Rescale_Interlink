@@ -20,6 +20,9 @@ const (
 
 	// ScopeJobsUsage is the scope for v2 job query endpoints (90000/hour = 25 req/sec).
 	ScopeJobsUsage Scope = "jobs-usage"
+
+	// ScopeCredentialAccess is the scope for POST /api/v3/credentials/ (90000/hour = 25 req/sec).
+	ScopeCredentialAccess Scope = "credential-access"
 )
 
 // ScopeConfig holds the rate limit configuration for a single scope.
@@ -100,6 +103,13 @@ func NewRegistry() *Registry {
 				TargetRate:    JobsUsageRatePerSec,
 				BurstCapacity: JobsUsageBurstCapacity,
 			},
+			ScopeCredentialAccess: {
+				Scope:         ScopeCredentialAccess,
+				HardLimitPerH: CredentialAccessLimitPerHour,
+				HardLimitPerS: float64(CredentialAccessLimitPerHour) / 3600.0,
+				TargetRate:    CredentialAccessRatePerSec,
+				BurstCapacity: CredentialAccessBurstCapacity,
+			},
 		},
 	}
 
@@ -114,6 +124,10 @@ func NewRegistry() *Registry {
 
 		// v2 job query endpoints — jobs-usage scope (90000/hour)
 		{Pattern: "/api/v2/jobs/", Method: "", Scope: ScopeJobsUsage},
+
+		// Storage credentials — counted apart from the user scope (90000/hour).
+		// Must match before the general /api/v3/ rule
+		{Pattern: "/api/v3/credentials/", Method: "", Scope: ScopeCredentialAccess},
 
 		// All v3 endpoints — user scope (7200/hour) — this is the default,
 		// listed explicitly for documentation and metrics clarity
@@ -150,8 +164,11 @@ func (r *Registry) ResolveScope(method, path string) Scope {
 	return r.defaultScope
 }
 
-// GetScopeConfig returns the rate limit configuration for a scope.
-// Returns the default scope config if the scope is not found.
+// GetScopeConfig returns the rate limit configuration for a scope, or the
+// default scope's for a scope it does not know. A coordinator started by an
+// older Interlink, which can outlive an upgrade, meets a newer scope this way:
+// the scope gets a bucket of its own at the user scope's rate, so its calls go
+// no faster than they did in the user scope and take nothing from the others.
 func (r *Registry) GetScopeConfig(scope Scope) ScopeConfig {
 	if cfg, ok := r.scopeConfigs[scope]; ok {
 		return cfg

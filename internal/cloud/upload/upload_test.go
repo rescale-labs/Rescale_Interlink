@@ -193,8 +193,6 @@ func (f *fakeStreamingUploader) CompleteStreamingUpload(_ context.Context, uploa
 	return &cloud.UploadResult{
 		StoragePath:   upload.StoragePath,
 		EncryptionKey: upload.MasterKey,
-		FormatVersion: 1,
-		PartSize:      upload.PartSize,
 	}, nil
 }
 
@@ -1145,7 +1143,7 @@ func TestCheckSourceUnchanged(t *testing.T) {
 }
 
 // =============================================================================
-// Pre-encrypt resume (F10)
+// Pre-encrypt resume
 // =============================================================================
 
 // resumableFakeUploader is a pre-encrypt provider that behaves the way the real
@@ -1336,10 +1334,10 @@ func (f *resumableFakeUploader) UploadEncryptedFile(_ context.Context, params tr
 	}, nil
 }
 
-// TestUploadPreEncryptResumesInterruptedUpload is the F10 regression: the
-// orchestrator generated a fresh key, IV and object suffix on every attempt and
-// deleted the encrypted copy on the way out, so the parts the backend had
-// already accepted described ciphertext nothing would ever ask for again.
+// TestUploadPreEncryptResumesInterruptedUpload: the orchestrator generated a
+// fresh key, IV and object suffix on every attempt and deleted the encrypted
+// copy on the way out, so the parts the backend had already accepted described
+// ciphertext nothing would ever ask for again.
 func TestUploadPreEncryptResumesInterruptedUpload(t *testing.T) {
 	tmpDir := t.TempDir()
 	source := filepath.Join(tmpDir, "resume.dat")
@@ -1774,7 +1772,6 @@ func (u *resumableStreamingUploader) CompleteStreamingUpload(_ context.Context, 
 		StoragePath:   uploadState.StoragePath,
 		EncryptionKey: uploadState.MasterKey,
 		IV:            uploadState.InitialIV,
-		PartSize:      uploadState.PartSize,
 	}, nil
 }
 

@@ -266,7 +266,7 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 }
 
 // =============================================================================
-// Upload lock ownership (F9)
+// Upload lock ownership
 // =============================================================================
 
 // withProcessLiveness swaps the liveness probe for the duration of a test, so a

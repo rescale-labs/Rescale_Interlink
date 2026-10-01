@@ -3,6 +3,7 @@ package coordinator
 import (
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/ratelimit"
@@ -168,28 +169,32 @@ func TestLeaseGrantFraction(t *testing.T) {
 }
 
 func TestLeaseFractionChangesWithClientCount(t *testing.T) {
-	srv := NewServer()
+	for scope, rate := range map[ratelimit.Scope]float64{
+		ratelimit.ScopeUser:             ratelimit.UserScopeRatePerSec,
+		ratelimit.ScopeCredentialAccess: ratelimit.CredentialAccessRatePerSec,
+	} {
+		srv := NewServer()
 
-	// Client 1 gets a lease
-	req1 := newTestRequest(MsgAcquireLease, ratelimit.ScopeUser)
-	req1.ClientID = "pid-1"
-	resp1 := srv.HandleRequest(req1)
-	if resp1.Lease == nil {
-		t.Fatal("first lease is nil")
-	}
+		// Client 1 gets a lease
+		req1 := newTestRequest(MsgAcquireLease, scope)
+		req1.ClientID = "pid-1"
+		resp1 := srv.HandleRequest(req1)
+		if resp1.Lease == nil || resp1.Lease.Rate != rate {
+			t.Fatalf("%s: first lease %+v, want rate %v", scope, resp1.Lease, rate)
+		}
 
-	// Client 2 gets a lease — rate should be split
-	req2 := newTestRequest(MsgAcquireLease, ratelimit.ScopeUser)
-	req2.ClientID = "pid-2"
-	resp2 := srv.HandleRequest(req2)
-	if resp2.Lease == nil {
-		t.Fatal("second lease is nil")
-	}
+		// Client 2 gets a lease — rate should be split
+		req2 := newTestRequest(MsgAcquireLease, scope)
+		req2.ClientID = "pid-2"
+		resp2 := srv.HandleRequest(req2)
+		if resp2.Lease == nil {
+			t.Fatalf("%s: second lease is nil", scope)
+		}
 
-	// With 2 active leases, each should get approximately half
-	expectedRate := ratelimit.UserScopeRatePerSec / 2.0
-	if resp2.Lease.Rate != expectedRate {
-		t.Errorf("second lease Rate = %v, want %v", resp2.Lease.Rate, expectedRate)
+		// With 2 active leases, each should get approximately half
+		if resp2.Lease.Rate != rate/2.0 {
+			t.Errorf("%s: second lease Rate = %v, want %v", scope, resp2.Lease.Rate, rate/2.0)
+		}
 	}
 }
 
@@ -318,6 +323,56 @@ func TestDifferentScopesDifferentBuckets(t *testing.T) {
 	if jobsResp.Type != MsgGranted {
 		t.Errorf("jobs-usage scope should still be available, got %s", jobsResp.Type)
 	}
+}
+
+// Each scope's bucket is its own, at that scope's rate and burst: credential
+// requests at theirs, and a scope the coordinator has no config for at the user
+// scope's, which is what a coordinator an older Interlink started makes of a
+// newer scope. Draining one or cooling it down leaves the user bucket alone.
+// In fake time, so that the token counts and waits are exact.
+func TestScopeBucketsAreSeparate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		srv := NewServer()
+		acquire := func(scope ratelimit.Scope) *Response {
+			return srv.HandleRequest(newTestRequest(MsgAcquire, scope))
+		}
+		if acquire(ratelimit.ScopeUser).Type != MsgGranted {
+			t.Fatal("the user bucket granted nothing")
+		}
+
+		for _, tc := range []struct {
+			scope       ratelimit.Scope
+			rate, burst float64
+		}{
+			{ratelimit.ScopeCredentialAccess, ratelimit.CredentialAccessRatePerSec, ratelimit.CredentialAccessBurstCapacity},
+			{"a-newer-scope", ratelimit.UserScopeRatePerSec, ratelimit.UserScopeBurstCapacity},
+		} {
+			acquire(tc.scope)
+			srv.mu.Lock()
+			tokens := srv.buckets[BucketKeyFromRequest(newTestRequest(MsgAcquire, tc.scope)).String()].GetCurrentTokens()
+			srv.mu.Unlock()
+			if tokens < tc.burst-1.5 || tokens > tc.burst-0.5 {
+				t.Errorf("%s: %.1f tokens after one grant, want a burst of %v", tc.scope, tokens, tc.burst)
+			}
+
+			srv.HandleRequest(newTestRequest(MsgDrain, tc.scope))
+			refill := time.Duration(float64(time.Second) / tc.rate)
+			if resp := acquire(tc.scope); resp.Type != MsgWait || resp.WaitDuration > refill || resp.WaitDuration < refill*8/10 {
+				t.Errorf("%s: after a drain got %s %v, want a wait of one token at %v/s (%v)", tc.scope, resp.Type, resp.WaitDuration, tc.rate, refill)
+			}
+
+			cooldown := newTestRequest(MsgSetCooldown, tc.scope)
+			cooldown.CooldownDuration = 5 * time.Second
+			srv.HandleRequest(cooldown)
+			if resp := acquire(tc.scope); resp.WaitDuration < 4*time.Second {
+				t.Errorf("%s: waited %v during a 5s cooldown", tc.scope, resp.WaitDuration)
+			}
+
+			if resp := acquire(ratelimit.ScopeUser); resp.Type != MsgGranted {
+				t.Errorf("draining and cooling down %s held the user scope back: %s", tc.scope, resp.Type)
+			}
+		}
+	})
 }
 
 func TestShutdownRequest(t *testing.T) {

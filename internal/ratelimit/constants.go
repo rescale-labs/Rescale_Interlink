@@ -28,6 +28,10 @@ const (
 	// Applies to v2 job query/read operations (not submission).
 	// Example: GET /api/v2/jobs/{id}/files/
 	JobsUsageLimitPerHour = 90000 // 25 requests per second
+
+	// CredentialAccessLimitPerHour is the rate limit for POST /api/v3/credentials/,
+	// which the server counts apart from the user scope.
+	CredentialAccessLimitPerHour = 90000 // 25 requests per second
 )
 
 // Target rates (requests per second): what our token bucket rate limiters use,
@@ -37,7 +41,7 @@ const (
 // drain and cooldown) is the safety net if the server rejects requests anyway.
 const (
 	// UserScopeRatePerSec is 85% of 2 req/sec = 1.7 req/sec
-	// Used for all v3 API endpoints (files, folders, jobs, credentials, etc.)
+	// Used for all v3 API endpoints (files, folders, jobs, etc.) but credentials
 	UserScopeRatePerSec = 1.7
 
 	// JobSubmissionRatePerSec is 85% of 0.278 req/sec = 0.236 req/sec
@@ -47,6 +51,10 @@ const (
 	// JobsUsageRatePerSec is 85% of 25 req/sec = 21.25 req/sec
 	// Used for v2 job query endpoints (GET /api/v2/jobs/{id}/files/, etc.)
 	JobsUsageRatePerSec = 21.25
+
+	// CredentialAccessRatePerSec is 85% of 25 req/sec = 21.25 req/sec
+	// Used only for POST /api/v3/credentials/
+	CredentialAccessRatePerSec = 21.25
 )
 
 // Burst capacities (tokens)
@@ -68,6 +76,11 @@ const (
 	// Calculation: 300 tokens ÷ 21.25 req/sec = 14.1 seconds
 	// Allows rapid file listing at startup
 	JobsUsageBurstCapacity = 300
+
+	// CredentialAccessBurstCapacity is jobs-usage's, which has the same hard limit:
+	// 300 tokens ÷ 21.25 req/sec = 14.1 seconds, enough to start a batch of
+	// downloads from other users' folders without waiting
+	CredentialAccessBurstCapacity = 300
 )
 
 // Visibility thresholds for utilization-based rate limit notifications.
@@ -109,7 +122,6 @@ const (
 // in registry.go.
 //
 // USER SCOPE (7200/hour = 2 req/sec):
-//   - POST /api/v3/credentials/
 //   - GET  /api/v3/users/me/
 //   - GET  /api/v3/users/me/folders/
 //   - POST /api/v3/files/
@@ -137,6 +149,9 @@ const (
 //   - GET /api/v2/jobs/{id}/files/
 //   - (other v2 job query endpoints)
 //
-// NOTE: We do NOT use other Rescale throttle scopes (file-access, credential-access,
-// clusters-usage, runs-usage, billing-endpoint, login-method) because those endpoints
-// are not currently needed by rescale-int.
+// CREDENTIAL-ACCESS SCOPE (90000/hour = 25 req/sec):
+//   - POST /api/v3/credentials/
+//
+// NOTE: We do NOT use other Rescale throttle scopes (file-access, clusters-usage,
+// runs-usage, billing-endpoint, login-method) because those endpoints are not
+// currently needed by rescale-int.

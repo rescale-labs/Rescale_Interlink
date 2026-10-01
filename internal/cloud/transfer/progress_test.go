@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// TestUploadAttemptProgressCountsEachByteOnce is the shape F18 describes: a
-// part reports part of itself, fails, and is retried with a reader the failed
-// one knows nothing about. The whole part must end up reported once.
+// TestUploadAttemptProgressCountsEachByteOnce: a part reports part of itself,
+// fails, and is retried with a reader the failed one knows nothing about. The
+// whole part must end up reported once.
 func TestUploadAttemptProgressCountsEachByteOnce(t *testing.T) {
 	part := make([]byte, 1000)
 	var reported int64

@@ -159,10 +159,9 @@ func TestUploadProgressReaderThreshold(t *testing.T) {
 	}
 }
 
-// TestUploadCiphertextReportsEachByteOnceAcrossRetries is the F18 regression.
-// The progress reader knows how to withdraw what it reported, but only through
-// its own Seek — and an outer retry does not seek, it builds a new reader and
-// drops the old one. The bytes the failed attempt reported stayed in the total
+// TestUploadCiphertextReportsEachByteOnceAcrossRetries: the progress reader
+// knows how to withdraw what it reported, but only through its own Seek — and an
+// outer retry does not seek, it builds a new reader and drops the old one. The bytes the failed attempt reported stayed in the total
 // and the retry added them again, so a transfer could show 100% before the file
 // had been sent.
 func TestUploadCiphertextReportsEachByteOnceAcrossRetries(t *testing.T) {

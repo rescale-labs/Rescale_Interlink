@@ -68,7 +68,7 @@ func TestS3ClientIgnoresTheUsersAWSEnvironment(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(name, value)
 			storage := &models.StorageInfo{ConnectionSettings: models.ConnectionSettings{Container: testBucket, Region: "us-east-1"}}
-			client, err := NewS3Client(context.Background(), storage, newFakeCredentialsAPI(t), nil, cloud.RetryObserver{})
+			client, err := NewS3Client(storage, newFakeCredentialsAPI(t), nil, cloud.RetryObserver{})
 			if err != nil {
 				t.Fatalf("NewS3Client: %v", err)
 			}
@@ -150,10 +150,10 @@ func uploadOnePart(ctx context.Context, s3Client *S3Client, partNumber int32) er
 	})
 }
 
-// TestRetryAfterRejectedCredentialFetchesAReplacement is the F15 regression:
-// the retry branch calls itself a forced refresh, but the refresh reads through
-// a cache that keeps serving the same credential for ten minutes. Every attempt
-// was rebuilt around the credential the backend had just rejected.
+// TestRetryAfterRejectedCredentialFetchesAReplacement: the retry branch calls
+// itself a forced refresh, but the refresh reads through a cache that keeps
+// serving the same credential for ten minutes. Every attempt was rebuilt around
+// the credential the backend had just rejected.
 func TestRetryAfterRejectedCredentialFetchesAReplacement(t *testing.T) {
 	backend, server := newFakeS3Backend(t)
 	backend.rejectOncePerPart = true

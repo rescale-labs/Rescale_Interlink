@@ -66,9 +66,9 @@ const (
 
 // Credential refresh intervals
 const (
-	// GlobalCredentialRefreshInterval - interval for global credential manager refresh (10 minutes)
-	// AWS credentials expire at ~15 minutes, refresh with 5 min buffer
-	// Azure SAS tokens also expire at ~15 minutes
+	// GlobalCredentialRefreshInterval - how long the credential manager serves a
+	// storage credential before it asks for another (10 minutes). The response's
+	// expiration is not read; the platform's credentials last well beyond this.
 	GlobalCredentialRefreshInterval = 10 * time.Minute
 
 	// PeriodicCredentialRefreshInterval - background refresh cadence for

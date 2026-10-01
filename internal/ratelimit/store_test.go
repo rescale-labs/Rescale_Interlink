@@ -84,11 +84,11 @@ func TestStoreGetLimitersReturnsAllScopes(t *testing.T) {
 
 	limiters := s.GetLimiters("https://platform.rescale.com", "key-abc")
 
-	if len(limiters) != 3 {
-		t.Fatalf("GetLimiters returned %d limiters, want 3", len(limiters))
+	if len(limiters) != 4 {
+		t.Fatalf("GetLimiters returned %d limiters, want 4", len(limiters))
 	}
 
-	for _, scope := range []Scope{ScopeUser, ScopeJobSubmission, ScopeJobsUsage} {
+	for _, scope := range []Scope{ScopeUser, ScopeJobSubmission, ScopeJobsUsage, ScopeCredentialAccess} {
 		if _, ok := limiters[scope]; !ok {
 			t.Errorf("GetLimiters missing scope %q", scope)
 		}
@@ -707,8 +707,8 @@ func TestWallClockGap_TriggersRecovery(t *testing.T) {
 }
 
 func TestRefreshCoordinatorHooks_RebindsStaleHooks(t *testing.T) {
-	// Feedback #1 test: coordinator dies during quiet download phase,
-	// next upload uses existing cached limiter. The stale hook should be
+	// The coordinator dies during a quiet download phase and the next upload
+	// uses the cached limiter. The stale hook should be
 	// refreshed before the first request falls to emergency cap.
 	ResetGlobalStore()
 	s := GlobalStore()
@@ -949,8 +949,8 @@ func TestKeepAlive_RefCounting(t *testing.T) {
 }
 
 func TestStaleHookDetection_AfterCoordinatorDeath(t *testing.T) {
-	// Feedback #1 exact scenario: coordinator dies during quiet download phase,
-	// next upload uses existing cached limiter. The first request should NOT
+	// The coordinator dies during a quiet download phase and the next upload
+	// uses the cached limiter. The first request should NOT
 	// fall through to emergency cap.
 	ResetGlobalStore()
 	s := GlobalStore()

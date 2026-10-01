@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/state"
+	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/transfer"
@@ -23,9 +25,9 @@ import (
 func TestNewTransferService(t *testing.T) {
 	for _, tc := range []struct{ configured, want int }{{0, 20}, {3, 3}} {
 		ts := NewTransferService(nil, events.NewEventBus(100), TransferServiceConfig{MaxConcurrent: tc.configured})
-		if ts.GetQueue() == nil || cap(ts.GetSemaphore()) != tc.want {
+		if ts.GetQueue() == nil || cap(ts.semaphore) != tc.want {
 			t.Errorf("MaxConcurrent %d: queue set %v, semaphore capacity %d, want %d",
-				tc.configured, ts.GetQueue() != nil, cap(ts.GetSemaphore()), tc.want)
+				tc.configured, ts.GetQueue() != nil, cap(ts.semaphore), tc.want)
 		}
 		ts.ClearCompleted()
 		ts.CancelAll()
@@ -42,11 +44,11 @@ func TestStreamingDownloadBatchAdaptiveConcurrency(t *testing.T) {
 	})
 
 	// Verify resource manager is initialized (prerequisite for adaptive concurrency).
-	// RunBatchFromChannel panics if ResourceMgr is nil — this was the Bug #1 issue:
-	// before the fix, StartStreamingDownloadBatch created a hardcoded 5-worker pool
-	// instead of using the resource manager for adaptive concurrency.
+	// RunBatchFromChannel panics if ResourceMgr is nil. StartStreamingDownloadBatch
+	// once created a hardcoded 5-worker pool instead of using the resource
+	// manager for adaptive concurrency.
 	if ts.resourceMgr == nil {
-		t.Fatal("resourceMgr is nil — RunBatchFromChannel would panic (Bug #1 regression)")
+		t.Fatal("resourceMgr is nil — RunBatchFromChannel would panic")
 	}
 
 	// Verify transfer manager is initialized
@@ -96,13 +98,10 @@ func newBatchFixture(t *testing.T) (*TransferService, <-chan events.Event) {
 }
 
 // awaitReport returns the report checkBatchCompletion filed, failing the test
-// when whether one was filed does not match want.
+// when whether one was filed does not match want. The report is published
+// inline, so it is waiting by the time checkBatchCompletion returns.
 func awaitReport(t *testing.T, ch <-chan events.Event, want bool) *events.ReportableErrorEvent {
 	t.Helper()
-	wait := 200 * time.Millisecond
-	if want {
-		wait = time.Second
-	}
 	select {
 	case event := <-ch:
 		re := event.(*events.ReportableErrorEvent)
@@ -110,7 +109,7 @@ func awaitReport(t *testing.T, ch <-chan events.Event, want bool) *events.Report
 			t.Fatalf("unexpected report: %s", re.ErrorMessage)
 		}
 		return re
-	case <-time.After(wait):
+	default:
 		if want {
 			t.Fatal("expected a report, got none")
 		}
@@ -215,90 +214,64 @@ func TestWaitForBatch_ContextCancel(t *testing.T) {
 	}
 }
 
+// waitAcrossScan runs WaitForBatch on a batch whose scan ends a minute into the
+// bubble's fake time, failing the test if the wait returns before that. It
+// returns once the queue's progress ticker has seen the batch finish and
+// stopped, which the bubble needs before it can close.
+func waitAcrossScan(t *testing.T, ts *TransferService, batchID string) transfer.BatchStats {
+	t.Helper()
+	const scan = time.Minute
+	go func() {
+		time.Sleep(scan)
+		ts.queue.MarkBatchScanInProgress(batchID, false)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	start := time.Now()
+	bs, err := ts.WaitForBatch(ctx, batchID)
+	if waited := time.Since(start); err != nil || waited < scan {
+		t.Errorf("WaitForBatch returned %v after %v, want it to wait out the %v scan", err, waited, scan)
+	}
+	time.Sleep(scan) // the scan's end, when the wait came back early
+	ts.queue.CleanupBatch(batchID)
+	time.Sleep(constants.TableRefreshBatchInterval) // the ticker's last look
+	return bs
+}
+
 // TestWaitForBatch_EmptyBatch — batch pre-registered with no tasks;
 // MarkBatchScanInProgress(false) flips TotalKnown=true; WaitForBatch
-// returns the empty-batch stats (Total=0).
+// returns the empty-batch stats (Total=0). The waits are in fake time.
 func TestWaitForBatch_EmptyBatch(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ts := NewTransferService(nil, events.NewEventBus(100), TransferServiceConfig{})
+		const batchID = "empty-batch"
+		ts.queue.PreRegisterBatch(batchID, "Empty", "download", SourceLabelDaemon)
+		ts.queue.MarkBatchScanInProgress(batchID, true)
 
-	batchID := "empty-batch"
-	ts.queue.PreRegisterBatch(batchID, "Empty", "download", SourceLabelDaemon)
-	ts.queue.MarkBatchScanInProgress(batchID, true)
-	// Before flipping scan-in-progress off, WaitForBatch must NOT return.
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
-	defer cancel()
-	done := make(chan transfer.BatchStats, 1)
-	go func() {
-		bs, _ := ts.WaitForBatch(ctx, batchID)
-		done <- bs
-	}()
-
-	// Leave scan-in-progress true for a beat; WaitForBatch should still be waiting.
-	time.Sleep(400 * time.Millisecond)
-	select {
-	case <-done:
-		t.Fatal("WaitForBatch returned early while TotalKnown=false")
-	default:
-	}
-
-	// Flip TotalKnown=true: empty batch — WaitForBatch returns.
-	ts.queue.MarkBatchScanInProgress(batchID, false)
-	select {
-	case bs := <-done:
-		if bs.Total != 0 {
-			t.Errorf("WaitForBatch Total = %d, want 0", bs.Total)
+		if bs := waitAcrossScan(t, ts, batchID); bs.Total != 0 || !bs.TotalKnown {
+			t.Errorf("WaitForBatch returned %+v, want an empty batch whose total is known", bs)
 		}
-		if !bs.TotalKnown {
-			t.Error("WaitForBatch returned with TotalKnown=false")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("WaitForBatch did not return after TotalKnown flipped true")
-	}
+	})
 }
 
 // TestWaitForBatch_FastFirstTask — a fast-completing first task must not
 // cause WaitForBatch to return early while scan-in-progress is still true.
 func TestWaitForBatch_FastFirstTask(t *testing.T) {
-	eventBus := events.NewEventBus(100)
-	ts := NewTransferService(nil, eventBus, TransferServiceConfig{})
+	synctest.Test(t, func(t *testing.T) {
+		ts := NewTransferService(nil, events.NewEventBus(100), TransferServiceConfig{})
+		const batchID = "fast-first"
+		ts.queue.PreRegisterBatch(batchID, "Fast", "download", SourceLabelDaemon)
+		ts.queue.MarkBatchScanInProgress(batchID, true)
+		task := ts.queue.TrackTransferWithBatch(
+			"f1.dat", 10, transfer.TaskTypeDownload, "fid", "/tmp/f1",
+			SourceLabelDaemon, batchID, "Fast",
+		)
+		ts.queue.Complete(task.ID)
 
-	batchID := "fast-first"
-	ts.queue.PreRegisterBatch(batchID, "Fast", "download", SourceLabelDaemon)
-	ts.queue.MarkBatchScanInProgress(batchID, true)
-
-	// Register + complete one task while scan is still in progress.
-	task := ts.queue.TrackTransferWithBatch(
-		"f1.dat", 10, transfer.TaskTypeDownload, "fid", "/tmp/f1",
-		SourceLabelDaemon, batchID, "Fast",
-	)
-	ts.queue.Complete(task.ID)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	done := make(chan transfer.BatchStats, 1)
-	go func() {
-		bs, _ := ts.WaitForBatch(ctx, batchID)
-		done <- bs
-	}()
-
-	// Even though the task is done, scan-in-progress prevents early return.
-	time.Sleep(400 * time.Millisecond)
-	select {
-	case <-done:
-		t.Fatal("WaitForBatch returned while TotalKnown=false (fast-first task)")
-	default:
-	}
-
-	ts.queue.MarkBatchScanInProgress(batchID, false)
-	select {
-	case bs := <-done:
-		if bs.Completed != 1 {
+		if bs := waitAcrossScan(t, ts, batchID); bs.Completed != 1 {
 			t.Errorf("WaitForBatch Completed = %d, want 1", bs.Completed)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("WaitForBatch did not return after scan flip")
-	}
+	})
 }
 
 func TestRegisterSkipPlaceholderTask(t *testing.T) {

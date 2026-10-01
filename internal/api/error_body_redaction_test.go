@@ -113,10 +113,6 @@ func TestAPITransportErrorsQuoteNoCredentials(t *testing.T) {
 			raw := fmt.Errorf("read failed: %w", stallErr{timeout: true})
 			return reporting.RedactedError(raw), raw
 		}},
-		{"a wrapped temporary error", func() (error, error) {
-			raw := fmt.Errorf("read failed: %w", stallErr{temporary: true})
-			return reporting.RedactedError(raw), raw
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err, raw := tc.errs()
@@ -137,7 +133,7 @@ func classification(err error) string {
 	var netErr net.Error
 	isNet := errors.As(err, &netErr)
 	return fmt.Sprint(inthttp.ClassifyError(err), reporting.ClassifyErrorClass(err), reporting.IsReportable(err, reporting.CategoryTransfer),
-		status, isNet && netErr.Timeout(), isNet && netErr.Temporary(), errors.As(err, new(*url.Error)), errors.As(err, new(stallErr)))
+		status, isNet && netErr.Timeout(), errors.As(err, new(*url.Error)), errors.As(err, new(stallErr)))
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -146,10 +142,12 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { retu
 
 // stallErr is a network error whose text names no timeout, so that only its
 // methods classify it.
-type stallErr struct{ timeout, temporary bool }
+type stallErr struct{ timeout bool }
 
 func (e stallErr) Error() string {
 	return `read "https://acct.blob.core.windows.net/c/f?sv=2020-10-02&sig=FAKESIG": stalled`
 }
-func (e stallErr) Timeout() bool   { return e.timeout }
-func (e stallErr) Temporary() bool { return e.temporary }
+func (e stallErr) Timeout() bool { return e.timeout }
+
+// Temporary is what net.Error still requires; nothing reads it.
+func (e stallErr) Temporary() bool { return false }

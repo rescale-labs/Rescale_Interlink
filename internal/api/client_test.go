@@ -182,16 +182,16 @@ func TestListFilesPage_NormalizesFullNextURLAndCursor(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	page, err := client.ListFilesPage(context.Background(), "", 25)
+	page, err := client.ListFilesPageWithOptions(context.Background(), "", 25, nil)
 	if err != nil {
-		t.Fatalf("ListFilesPage(first page) error = %v", err)
+		t.Fatalf("ListFilesPageWithOptions(first page) error = %v", err)
 	}
 	if page.NextURL != "/api/v3/files/?page=2&page_size=25" {
 		t.Fatalf("NextURL = %q, want normalized API path", page.NextURL)
 	}
 
-	if _, err := client.ListFilesPage(context.Background(), fullNext, 25); err != nil {
-		t.Fatalf("ListFilesPage(full cursor) error = %v", err)
+	if _, err := client.ListFilesPageWithOptions(context.Background(), fullNext, 25, nil); err != nil {
+		t.Fatalf("ListFilesPageWithOptions(full cursor) error = %v", err)
 	}
 	if !seenPage2 {
 		t.Fatal("server did not receive normalized page 2 request")
@@ -299,9 +299,9 @@ func TestListFilesPageWithOptions_BuildsQuery(t *testing.T) {
 	}
 }
 
-// TestListFilesPage_UnfilteredRequestMatchesWithOptions verifies the convenience
-// wrapper and the options-aware call issue the same unfiltered request.
-func TestListFilesPage_UnfilteredRequestMatchesWithOptions(t *testing.T) {
+// TestListFilesPage_UnfilteredRequestKeepsItsShape: with no options the listing
+// sends the request it always has, which every unfiltered caller relies on.
+func TestListFilesPage_UnfilteredRequestKeepsItsShape(t *testing.T) {
 	var seen []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v3/files/" {
@@ -317,21 +317,11 @@ func TestListFilesPage_UnfilteredRequestMatchesWithOptions(t *testing.T) {
 	defer server.Close()
 
 	client := newTestClient(t, server.URL)
-	if _, err := client.ListFilesPage(context.Background(), "", 0); err != nil {
-		t.Fatalf("ListFilesPage() error = %v", err)
-	}
 	if _, err := client.ListFilesPageWithOptions(context.Background(), "", 0, nil); err != nil {
 		t.Fatalf("ListFilesPageWithOptions() error = %v", err)
 	}
-
-	if len(seen) != 2 {
-		t.Fatalf("saw %d requests, want 2", len(seen))
-	}
-	if seen[0] != seen[1] {
-		t.Errorf("requests differ:\n  ListFilesPage            = %q\n  ListFilesPageWithOptions = %q", seen[0], seen[1])
-	}
-	if seen[0] != "/api/v3/files/?page_size=25&ordering=-dateUploaded" {
-		t.Errorf("request URI = %q, want the historical unfiltered shape", seen[0])
+	if len(seen) != 1 || seen[0] != "/api/v3/files/?page_size=25&ordering=-dateUploaded" {
+		t.Errorf("requests %q, want the historical unfiltered shape", seen)
 	}
 }
 

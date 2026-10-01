@@ -317,43 +317,13 @@ func testUploadParams(localPath, encryptedPath string, plan *resources.UploadPla
 	}
 }
 
-// TestPreEncryptBlockBlobCheckpointWritesAreBounded: the checkpoint, which
-// carries every staged block ID, was rewritten after each block. The progress
-// callback runs between a block and its checkpoint, so it sees each rewrite.
-func TestPreEncryptBlockBlobCheckpointWritesAreBounded(t *testing.T) {
-	_, server := newFakeBlobBackend(t)
-	azureClient := newTestAzureClient(t, server)
-	dir := t.TempDir()
-	localPath, encryptedPath := filepath.Join(dir, "source.dat"), filepath.Join(dir, "source.dat.enc")
-	testsupport.WriteTestFile(t, encryptedPath, 8*64)
-	testsupport.WriteTestFile(t, localPath, 8*64)
-
-	params := testUploadParams(localPath, encryptedPath, &resources.UploadPlan{PartSize: 64})
-	versions := map[int]bool{}
-	params.ProgressCallback = func(float64) {
-		recorded := -1
-		if saved, _ := state.LoadUploadState(localPath); saved != nil {
-			recorded = len(saved.BlockIDs)
-		}
-		versions[recorded] = true
-	}
-	pathForRescale := state.BuildObjectKey(testPathBase, filepath.Base(localPath), params.RandomSuffix)
-	if err := (&Provider{}).uploadEncryptedBlockBlob(context.Background(), azureClient, params, "blob", pathForRescale, 8*64); err != nil {
-		t.Fatalf("sequential block blob upload failed: %v", err)
-	}
-
-	if len(versions) > 2 {
-		t.Errorf("an 8-block upload rewrote its checkpoint %d times", len(versions)-1)
-	}
-	if saved, _ := state.LoadUploadState(localPath); saved == nil || len(saved.BlockIDs) != 8 {
-		t.Errorf("the checkpoint written on the way out does not hold all 8 blocks: %+v", saved)
-	}
-}
-
-// TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit: the throttle holds
-// checkpoints back while the upload runs, and the flush after the loop writes
-// the one it owes. A refused block or a cancel returned from inside the loop,
-// past that flush, so the next attempt staged blocks Azure already held again.
+// TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit: the checkpoint,
+// which carries every staged block ID, was rewritten after each block; and a
+// refused block or a cancel returned from inside the loop, past the flush after
+// it, so the next attempt staged blocks Azure already held again. The throttle
+// now holds checkpoints back while the upload runs, which the progress
+// callback, running between a block and its checkpoint, sees as at most one
+// rewrite, and every exit writes the one it owes.
 func TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit(t *testing.T) {
 	// Every checkpoint after the first is held back, however slowly the parts
 	// land, so the ones owed when the upload stops are left to its exit.
@@ -372,15 +342,23 @@ func TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit(t *testing.T) {
 			defer cancel()
 			if stop == "refused" {
 				backend.refuseBlocksFrom = 4
-			} else {
-				fixture.params.ProgressCallback = func(done float64) {
-					if done >= 0.5 { // block 3 has landed; block 4 goes out cancelled
-						cancel()
-					}
+			}
+			versions := map[int]bool{}
+			fixture.params.ProgressCallback = func(done float64) {
+				recorded := -1
+				if saved, _ := state.LoadUploadState(fixture.localPath); saved != nil {
+					recorded = len(saved.BlockIDs)
+				}
+				versions[recorded] = true
+				if stop == "cancelled" && done >= 0.5 { // block 3 has landed; block 4 goes out cancelled
+					cancel()
 				}
 			}
 			if err := (&Provider{}).uploadEncryptedBlockBlob(ctx, newTestAzureClient(t, server), fixture.params, "blob", fixture.pathForRescale, 8*64); err == nil {
 				t.Fatal("the interrupted attempt reported success")
+			}
+			if len(versions) > 2 {
+				t.Errorf("the checkpoint was rewritten %d times while the upload ran", len(versions)-1)
 			}
 			saved, _ := state.LoadUploadState(fixture.localPath)
 			if saved == nil {
@@ -399,6 +377,9 @@ func TestPreEncryptBlockBlobCheckpointsWhatLandedOnEveryExit(t *testing.T) {
 			}
 			if got := resumed.stagedBlockIDs(); !slices.Equal(got, blocks[4:]) {
 				t.Errorf("the resumed attempt staged %d block(s), want blocks 4 to 7", len(got))
+			}
+			if saved, _ := state.LoadUploadState(fixture.localPath); saved == nil || len(saved.BlockIDs) != 8 {
+				t.Errorf("the checkpoint written on the way out does not hold all 8 blocks: %+v", saved)
 			}
 			resumed.mu.Lock()
 			defer resumed.mu.Unlock()
@@ -753,8 +734,9 @@ func TestPreEncryptBlockBlobConcurrentHonorsPlanWorkerCap(t *testing.T) {
 }
 
 // TestPreEncryptBlockBlobConcurrentResumesMatchingUpload is the Azure half of
-// F10: with the interrupted upload's identity restored, the blocks already
-// staged are not staged again, and the commit still lists the whole blob.
+// the resume: with the interrupted upload's identity restored, the blocks
+// already staged are not staged again, and the commit still lists the whole
+// blob.
 func TestPreEncryptBlockBlobConcurrentResumesMatchingUpload(t *testing.T) {
 	backend, server := newFakeBlobBackend(t)
 	// The staged block the checkpoint names is still uncommitted on the service.
@@ -830,8 +812,8 @@ func TestPreEncryptBlockBlobConcurrentResumesMatchingUpload(t *testing.T) {
 	}
 }
 
-// TestUploadCiphertextReportsEachByteOnceAcrossRetries is the Azure half of
-// F18: an outer retry replaces the progress reader, and only the discarded
+// TestUploadCiphertextReportsEachByteOnceAcrossRetries is the Azure half of the
+// S3 test: an outer retry replaces the progress reader, and only the discarded
 // reader knew how to withdraw what it had reported.
 func TestUploadCiphertextReportsEachByteOnceAcrossRetries(t *testing.T) {
 	backend, server := newFakeBlobBackend(t)

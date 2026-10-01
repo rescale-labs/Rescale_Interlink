@@ -33,6 +33,15 @@ func TestWarmupProxyIfNeededLogsAFailureOnce(t *testing.T) {
 	log.SetOutput(&logged)
 	warmupFailure = ""
 
+	// Only a Basic proxy is warmed up: no other mode sends it anything.
+	WarmupProxyIfNeeded(context.Background(), nil)
+	for _, mode := range []string{"", "no-proxy", "system", "ntlm"} {
+		WarmupProxyIfNeeded(context.Background(), &config.Config{ProxyMode: mode, ProxyHost: u.Hostname(), ProxyPort: port, APIBaseURL: proxy.URL})
+	}
+	if n := requests.Load(); n != 0 {
+		t.Fatalf("%d warmup requests outside Basic mode, want none", n)
+	}
+
 	cfg := &config.Config{ProxyMode: "basic", ProxyHost: u.Hostname(), ProxyPort: port, APIBaseURL: proxy.URL}
 	var wg sync.WaitGroup
 	for range 5 {

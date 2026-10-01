@@ -243,9 +243,7 @@ type JobResponse struct {
 
 // JobFolder is the workspace folder reference embedded in a job listing.
 type JobFolder struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	ParentID string `json:"parentId"`
+	ID string `json:"id"`
 }
 
 // JobStatusContent represents job status

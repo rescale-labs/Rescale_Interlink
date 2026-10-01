@@ -53,7 +53,8 @@ func NewRescaleCredentialProvider(apiClient *api.Client, fileInfo *models.CloudF
 // This is called automatically by AWS SDK when credentials are needed or expired
 //
 // The method is thread-safe and can be called concurrently by multiple S3 clients.
-// Credentials are assumed to expire in 15 minutes (conservative estimate).
+// The response's expiration is not read, so the credential is stamped to expire
+// 15 minutes from now: a pace for the SDK's cache, well inside its real lifetime.
 //
 // If fileInfo was provided during construction, requests cached credentials for that file's storage.
 // Otherwise, requests cached credentials for user's default storage.
@@ -61,7 +62,7 @@ func (p *RescaleCredentialProvider) Retrieve(ctx context.Context) (aws.Credentia
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Fetch credentials using credential manager's cache (keyed by storage ID for file-specific)
+	// Fetch credentials using credential manager's cache
 	var s3Creds *models.S3Credentials
 	var err error
 
@@ -78,7 +79,6 @@ func (p *RescaleCredentialProvider) Retrieve(ctx context.Context) (aws.Credentia
 		return aws.Credentials{}, fmt.Errorf("received nil S3 credentials")
 	}
 
-	// Assume 15-minute expiry (conservative, safe assumption)
 	// AWS SDK's CredentialsCache will refresh before expiry based on ExpiryWindow
 	expiresAt := time.Now().Add(15 * time.Minute)
 

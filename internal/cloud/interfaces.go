@@ -46,21 +46,8 @@ type UploadResult struct {
 	// EncryptionKey is the AES-256 key used to encrypt the file (32 bytes)
 	EncryptionKey []byte
 
-	// IV is the initialization vector for legacy (v0) format
-	// For streaming (v1) format, this may be empty as IV is derived per-part
+	// IV is the initialization vector the file was encrypted with (16 bytes)
 	IV []byte
-
-	// FormatVersion indicates the encryption format used
-	// 0 = legacy (full-file CBC with single IV)
-	// 1 = streaming (per-part encryption with key derivation)
-	FormatVersion int
-
-	// FileID is the unique identifier for streaming format (v1)
-	// Used for per-part key derivation
-	FileID string
-
-	// PartSize is the part size used for streaming format (v1)
-	PartSize int64
 }
 
 // CloudTransfer is what every cloud storage provider has in common.

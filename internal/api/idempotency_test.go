@@ -101,7 +101,7 @@ func (h *countingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "unrouted "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 }
 
-// TestCreateJobDoesNotRepeatAnAmbiguousRequest covers F17 for job creation. The
+// TestCreateJobDoesNotRepeatAnAmbiguousRequest covers job creation. The
 // platform has no idempotency key, so a POST that may already have created a
 // job must not be sent again: the caller keeps only the last response's ID and
 // the earlier jobs are untracked — and chargeable.
@@ -128,7 +128,7 @@ func TestCreateJobDoesNotRepeatAnAmbiguousRequest(t *testing.T) {
 	}
 }
 
-// TestRegisterFileAdoptsTheRecordAnAmbiguousRequestCreated covers F17 for file
+// TestRegisterFileAdoptsTheRecordAnAmbiguousRequestCreated covers file
 // registration: the record exists, so the retry has to find it rather than mint
 // a second one describing the same uploaded bytes.
 func TestRegisterFileAdoptsTheRecordAnAmbiguousRequestCreated(t *testing.T) {

@@ -41,7 +41,7 @@ func TestListJobsInFolder_FollowsNextOnTheConfiguredHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListJobsInFolder: %v", err)
 	}
-	if len(jobs) != 2 || jobs[1].ID != "job2" || jobs[1].Folder == nil || jobs[1].Folder.ID != "sub" || jobs[1].Folder.ParentID != "root" {
+	if len(jobs) != 2 || jobs[1].ID != "job2" || jobs[1].Folder == nil || jobs[1].Folder.ID != "sub" {
 		t.Errorf("jobs = %+v, want job1 and job2 with job2's folder", jobs)
 	}
 	if len(queries) != 2 || queries[0] != "f=0&ordering=-dateInserted&page_size=200&q=folder%3Aroot" || queries[1] != "page=2&page_size=200" {

@@ -270,19 +270,12 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 
 	// Up to double the threads for large files, capped at CPU cores below: multi-GB
 	// files gain throughput where network and disk can take more parallelism.
-	if fileSize >= constants.SmallFileThreshold {
-		// Scale factor based on file size
-		if fileSize >= constants.LargeFile10GB {
-			// 10GB+: use up to 2x threads
-			desired = desired * 2
-		} else if fileSize >= constants.LargeFile5GB {
-			// 5-10GB: use up to 1.75x threads
-			desired = desired * 7 / 4
-		} else if fileSize >= constants.LargeFile1GB {
-			// 1-5GB: use up to 1.5x threads
-			desired = desired * 3 / 2
-		}
-		// else: 100MB-1GB uses base allocation
+	if fileSize >= constants.LargeFile10GB {
+		desired = desired * 2
+	} else if fileSize >= constants.LargeFile5GB {
+		desired = desired * 7 / 4
+	} else if fileSize >= constants.LargeFile1GB {
+		desired = desired * 3 / 2
 	}
 
 	// Cap at pool share
@@ -295,7 +288,7 @@ func (m *Manager) calculateDesiredThreads(fileSize int64, totalFiles int) int {
 		desired = constants.MaxThreadsPerFile
 	}
 
-	// Never exceed CPU cores (hard limit for aggressive mode)
+	// Never exceed CPU cores
 	if desired > cpuCores {
 		desired = cpuCores
 	}

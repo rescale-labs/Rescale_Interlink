@@ -960,9 +960,9 @@ func (m *tickingHKDFPartDownloader) DownloadEncryptedRange(ctx context.Context, 
 	return out, "", nil
 }
 
-// TestDownloadStreamingConcurrentJoinsTheProgressTicker is the F8 residual: the
-// driver closed the ticker's stop channel on the way out without waiting for the
-// goroutine to see it. The callback it calls belongs to the caller — a progress
+// TestDownloadStreamingConcurrentJoinsTheProgressTicker: the driver closed the
+// ticker's stop channel on the way out without waiting for the goroutine to see
+// it. The callback it calls belongs to the caller — a progress
 // bar, a queue entry — and calling it after the download has returned reports
 // progress for a transfer that is over, on a goroutine nothing is waiting for.
 func TestDownloadStreamingConcurrentJoinsTheProgressTicker(t *testing.T) {

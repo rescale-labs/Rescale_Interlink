@@ -85,6 +85,9 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 		}
 	}
 
+	// A failed stateless attempt leaves nothing to discard, unlike S3's: staged
+	// blocks carry no upload ID for an abort to name, and uncommitted ones
+	// expire on their own after seven days.
 	if uploadErr != nil {
 		return nil, fmt.Errorf("Azure upload failed: %w", uploadErr)
 	}
@@ -105,7 +108,6 @@ func (p *Provider) UploadEncryptedFile(ctx context.Context, params transfer.Encr
 		StoragePath:   pathForRescale,
 		EncryptionKey: params.EncryptionKey,
 		IV:            params.IV,
-		FormatVersion: 0, // Legacy pre-encrypt format
 	}, nil
 }
 
@@ -235,34 +237,7 @@ func startFreshAfterVanishedUpload(params transfer.EncryptedFileUploadParams, bl
 		fmt.Fprintf(params.OutputWriter, "Starting a fresh upload of %s: Azure no longer holds the staged blocks of the interrupted upload\n",
 			filepath.Base(params.LocalPath))
 	}
-	retireCheckpoint(params, blobPath)
-}
-
-// resumeStateFor loads the checkpoint beside a source, or nothing at all when
-// this attempt must not read it. A stateless attempt holds no lock on that
-// sidecar, so what it describes may be an upload still being filled; one the
-// caller has already judged and could not delete must treat it as absent, since
-// adopting it continues what the caller refused.
-//
-// There is nothing to retire here even so: staged blocks carry no upload ID for
-// an abort to name, and uncommitted ones expire on their own after seven days.
-func resumeStateFor(params transfer.EncryptedFileUploadParams) (*state.UploadResumeState, error) {
-	if params.Stateless || params.IgnoreResumeState {
-		return nil, nil
-	}
-	return state.LoadUploadState(params.LocalPath)
-}
-
-// retireCheckpoint deletes the resume state beside a source. A stateless attempt
-// has none of its own: that sidecar belongs to whoever holds the upload lock it
-// could not take.
-func retireCheckpoint(params transfer.EncryptedFileUploadParams, blobPath string) {
-	if params.Stateless {
-		return
-	}
-	if err := state.DeleteUploadState(params.LocalPath); err != nil {
-		log.Printf("Warning: failed to delete the resume state of %s: %v", blobPath, err)
-	}
+	params.RetireCheckpoint(blobPath)
 }
 
 // commitFailure reports a rejected commit, retiring the checkpoint when the
@@ -274,7 +249,7 @@ func retireCheckpoint(params transfer.EncryptedFileUploadParams, blobPath string
 // and it would name them on every attempt after this one.
 func commitFailure(params transfer.EncryptedFileUploadParams, blobPath string, err error) error {
 	if bloberror.HasCode(err, bloberror.InvalidBlockList) {
-		retireCheckpoint(params, blobPath)
+		params.RetireCheckpoint(blobPath)
 		return fmt.Errorf("Azure no longer holds the blocks of %s to commit: %w", blobPath, err)
 	}
 	return err
@@ -337,7 +312,7 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	blockSize := plan.PartSize
 	totalBlocks := transfer.CalculateTotalParts(encryptedSize, blockSize)
 
-	existingState, _ := resumeStateFor(params)
+	existingState, _ := params.LoadResumeState()
 	var blockIDs []string
 	var alreadyStaged map[int64]string
 	var uploadedBytes int64 = 0
@@ -398,25 +373,9 @@ func (p *Provider) uploadEncryptedBlockBlob(ctx context.Context, azureClient *Az
 	}
 
 	checkpoints := transfer.NewCheckpointThrottle(func() {
-		state.SaveUploadState(&state.UploadResumeState{
-			LocalPath:     params.LocalPath,
-			EncryptedPath: params.EncryptedPath,
-			ObjectKey:     pathForRescale,
-			TotalSize:     encryptedSize,
-			OriginalSize:  params.OriginalSize,
-			SourceModTime: params.SourceModTime,
-			UploadedBytes: uploadedBytes,
-			BlockIDs:      blockIDs,
-			PartSize:      blockSize,
-			EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
-			IV:            encryption.EncodeBase64(params.IV),
-			RandomSuffix:  params.RandomSuffix,
-			CreatedAt:     createdAt,
-			LastUpdate:    time.Now(),
-			StorageType:   "AzureStorage",
-			StorageID:     p.storageID(),
-			Container:     p.storageContainer(),
-		}, params.LocalPath)
+		saved := params.ResumeState("AzureStorage", p.storageInfo, pathForRescale, encryptedSize, blockSize, createdAt)
+		saved.UploadedBytes, saved.BlockIDs = uploadedBytes, blockIDs
+		state.SaveUploadState(saved, params.LocalPath)
 	})
 	// A failed or cancelled attempt returns from inside the loop.
 	defer checkpoints.Flush()
@@ -546,7 +505,7 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	// Ensure cleanup on completion
 	defer params.TransferHandle.Complete()
 
-	existingState, loadErr := resumeStateFor(params)
+	existingState, loadErr := params.LoadResumeState()
 	if loadErr != nil {
 		log.Printf("Warning: Failed to load resume state: %v", loadErr)
 	}
@@ -668,25 +627,8 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 					currentBlockIDs = append(currentBlockIDs, blockID)
 				}
 			}
-			currentState := &state.UploadResumeState{
-				LocalPath:     params.LocalPath,
-				EncryptedPath: params.EncryptedPath,
-				ObjectKey:     pathForRescale,
-				TotalSize:     totalSize,
-				OriginalSize:  params.OriginalSize,
-				SourceModTime: params.SourceModTime,
-				UploadedBytes: uploaded,
-				BlockIDs:      currentBlockIDs,
-				PartSize:      partSize,
-				EncryptionKey: encryption.EncodeBase64(params.EncryptionKey),
-				IV:            encryption.EncodeBase64(params.IV),
-				RandomSuffix:  params.RandomSuffix,
-				CreatedAt:     createdAt,
-				LastUpdate:    time.Now(),
-				StorageType:   "AzureStorage",
-				StorageID:     p.storageID(),
-				Container:     p.storageContainer(),
-			}
+			currentState := params.ResumeState("AzureStorage", p.storageInfo, pathForRescale, totalSize, partSize, createdAt)
+			currentState.UploadedBytes, currentState.BlockIDs = uploaded, currentBlockIDs
 			state.SaveUploadState(currentState, params.LocalPath)
 		},
 	})
@@ -731,23 +673,4 @@ func (p *Provider) uploadEncryptedBlockBlobConcurrent(ctx context.Context, azure
 	}
 
 	return nil
-}
-
-// storageID and storageContainer name the destination this provider uploads to.
-// A resume state records them so that an upload of the same source to another
-// destination — the sidecar keys on the local path alone — is not continued as
-// this one. A provider built without its storage info records neither, which
-// reads as "not recorded" rather than as a different destination.
-func (p *Provider) storageID() string {
-	if p.storageInfo == nil {
-		return ""
-	}
-	return p.storageInfo.ID
-}
-
-func (p *Provider) storageContainer() string {
-	if p.storageInfo == nil {
-		return ""
-	}
-	return p.storageInfo.ConnectionSettings.Container
 }
