@@ -16,6 +16,7 @@ import (
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/events"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/transfer"
 )
 
@@ -120,10 +121,14 @@ func awaitReport(t *testing.T, ch <-chan events.Event, want bool) *events.Report
 // TestCheckBatchCompletion pins which finished batches file a report. A total
 // wipeout is reported only when its representative per-task error is the
 // server's; a partial failure is reported for server and network errors but
-// not for auth. A lock refusal is the user's to act on, never a report.
+// not for auth. A lock refusal or a refused name is the user's to act on,
+// never a report, and a refused name does not hide a real failure beside it.
 func TestCheckBatchCompletion(t *testing.T) {
 	server := errors.New("500 internal server error")
 	refused := fmt.Errorf("S3Storage upload failed: failed to acquire upload lock: %w", state.ErrUploadLocked)
+	refusedName := func(folder string) error {
+		return reporting.UsageError(fmt.Errorf(`file in %q not downloaded: filename cannot contain ':': "run:1"`, folder))
+	}
 	tests := []struct {
 		name              string
 		download          bool
@@ -131,19 +136,22 @@ func TestCheckBatchCompletion(t *testing.T) {
 		err               error
 		wantReport        bool
 		wantClass         string // checked when set
+		refusedNames      int    // failed rows first, names the GUI's scan refused
 	}{
-		{"total wipeout", false, 0, 5, server, true, ""},
-		{"partial network failure", false, 8, 2, errors.New("dial tcp: lookup api.rescale.com: no such host"), true, ""},
-		{"partial server error", false, 3, 1, server, true, "server_error"},
-		{"partial auth failure", true, 5, 2, errors.New("403 Forbidden"), false, ""},
-		{"every transfer refused by a lock", false, 0, 2, refused, false, ""},
-		{"some transfers refused by a lock", false, 3, 2, refused, false, ""},
-		{"no failures", false, 5, 0, nil, false, ""},
-		{"wipeout, local filesystem", true, 0, 5, errors.New("open /Users/x/Downloads/out/f.dat: permission denied"), false, ""},
-		{"wipeout, disk full", true, 0, 5, errors.New("write /Volumes/ext/f.dat: no space left on device"), false, ""},
-		{"wipeout, network down", true, 0, 5, errors.New("dial tcp: lookup api.rescale.com: no such host"), false, ""},
-		{"wipeout, server error", true, 0, 5, errors.New("API returned 500 internal server error"), true, "server_error"},
-		{"wipeout with no task error recorded", false, 0, 3, nil, false, ""},
+		{"total wipeout", false, 0, 5, server, true, "", 0},
+		{"partial network failure", false, 8, 2, errors.New("dial tcp: lookup api.rescale.com: no such host"), true, "", 0},
+		{"partial server error", false, 3, 1, server, true, "server_error", 0},
+		{"partial auth failure", true, 5, 2, errors.New("403 Forbidden"), false, "", 0},
+		{"every transfer refused by a lock", false, 0, 2, refused, false, "", 0},
+		{"some transfers refused by a lock", false, 3, 2, refused, false, "", 0},
+		{"no failures", false, 5, 0, nil, false, "", 0},
+		{"wipeout, local filesystem", true, 0, 5, errors.New("open /Users/x/Downloads/out/f.dat: permission denied"), false, "", 0},
+		{"wipeout, disk full", true, 0, 5, errors.New("write /Volumes/ext/f.dat: no space left on device"), false, "", 0},
+		{"wipeout, network down", true, 0, 5, errors.New("dial tcp: lookup api.rescale.com: no such host"), false, "", 0},
+		{"wipeout, server error", true, 0, 5, errors.New("API returned 500 internal server error"), true, "server_error", 0},
+		{"wipeout with no task error recorded", false, 0, 3, nil, false, "", 0},
+		{"refused names beside a server error", true, 4, 1, server, true, "server_error", 5},
+		{"refused names under network_runs", true, 4, 2, refusedName("network_runs"), false, "", 0},
 	}
 
 	for _, tt := range tests {
@@ -153,6 +161,9 @@ func TestCheckBatchCompletion(t *testing.T) {
 			taskType, direction := transfer.TaskTypeUpload, "upload"
 			if tt.download {
 				taskType, direction = transfer.TaskTypeDownload, "download"
+			}
+			for i := 0; i < tt.refusedNames; i++ {
+				ts.RecordRefusedDownload("batch", "TestBatch", "run:1", "", "/dst", refusedName("case"))
 			}
 			for i := 0; i < tt.completed+tt.failed; i++ {
 				task := q.TrackTransferWithBatch(fmt.Sprintf("file%d.dat", i), 1024, taskType,

@@ -12,13 +12,12 @@ const (
 	DaemonStderrLogName = "daemon-stderr.log"
 
 	// StartupLogName is the very-early boot log, written before the main
-	// logger is initialized. Renamed from daemon-startup.log to startup.log
-	// in Plan 2; the one-time migration in RunStartupMigrations renames any
-	// existing daemon-startup.log on first run of the new version.
+	// logger is initialized. RunStartupMigrations renames an earlier
+	// version's daemon-startup.log to it.
 	StartupLogName = "startup.log"
 
-	// LegacyStartupLogName is the pre-Plan-2 filename, referenced only by
-	// the migration path.
+	// LegacyStartupLogName is the name earlier versions used, referenced only
+	// by the migration.
 	LegacyStartupLogName = "daemon-startup.log"
 
 	// InterlinkLogName is the GUI + CLI unified log, written when the user

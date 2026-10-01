@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/util/tags"
@@ -87,10 +88,8 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
-			// Validate maxConcurrent
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 
 			// Validate duplicate flags (mutually exclusive)
@@ -203,10 +202,8 @@ Examples:
 			// Normalize output directory (removes trailing slash)
 			outputDir = filepath.Clean(outputDir)
 
-			// Validate max-concurrent
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 
 			// Get API client

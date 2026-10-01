@@ -785,7 +785,6 @@ export namespace wailsapp {
 	    running: boolean;
 	    pid: number;
 	    ipcConnected: boolean;
-	    state: string;
 	    version: string;
 	    uptime: string;
 	    lastScan: string;
@@ -795,10 +794,8 @@ export namespace wailsapp {
 	    error?: string;
 	    errorCode?: string;
 	    lastErrorTime?: string;
-	    userConfigured: boolean;
 	    userState: string;
 	    userStateDetail?: string;
-	    userRegistered: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new DaemonStatusDTO(source);
@@ -809,7 +806,6 @@ export namespace wailsapp {
 	        this.running = source["running"];
 	        this.pid = source["pid"];
 	        this.ipcConnected = source["ipcConnected"];
-	        this.state = source["state"];
 	        this.version = source["version"];
 	        this.uptime = source["uptime"];
 	        this.lastScan = source["lastScan"];
@@ -819,10 +815,8 @@ export namespace wailsapp {
 	        this.error = source["error"];
 	        this.errorCode = source["errorCode"];
 	        this.lastErrorTime = source["lastErrorTime"];
-	        this.userConfigured = source["userConfigured"];
 	        this.userState = source["userState"];
 	        this.userStateDetail = source["userStateDetail"];
-	        this.userRegistered = source["userRegistered"];
 	    }
 	}
 	export class DaemonTransferTaskDTO {

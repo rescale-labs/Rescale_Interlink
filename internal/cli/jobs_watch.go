@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/util/filter"
@@ -66,9 +67,8 @@ Examples:
 			if newerThan != "" && (filterPatterns != "" || excludePatterns != "" || searchTerms != "") {
 				return fmt.Errorf("--filter, --exclude, and --search are only valid with --job-id (not --newer-than)")
 			}
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 
 			logger := GetLogger()

@@ -9,6 +9,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/ipc"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // ErrLaunch marks a daemon process that could not be started, as against a
@@ -32,8 +33,8 @@ func Start(conf *config.DaemonConfig) error {
 	if err := config.CheckDownloadFolder(conf.Daemon.DownloadFolder); err != nil {
 		return err
 	}
-	if err := CheckMaxConcurrent(conf.Daemon.MaxConcurrent, "max_concurrent in daemon.conf"); err != nil {
-		return err
+	if err := config.CheckMaxConcurrent(conf.Daemon.MaxConcurrent, "max_concurrent in daemon.conf"); err != nil {
+		return reporting.UsageError(err)
 	}
 	folder := conf.Daemon.DownloadFolder
 	if folder == "" {

@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/rescale/rescale-int/internal/ipc"
 )
 
 // Config represents the application configuration for Rescale Interlink.
@@ -248,7 +250,7 @@ func LoadConfigCSV(path string) (*Config, error) {
 }
 
 // SaveConfigCSV saves configuration to a CSV file
-// Secrets registry (spec §4.3, §11.2):
+// Secrets:
 //
 //	Persisted to disk (strict permissions):
 //	  - API key → token file (owner-only ACL via WriteTokenFile).
@@ -257,8 +259,7 @@ func LoadConfigCSV(path string) (*Config, error) {
 //
 // Before adding a new field that holds a secret, decide which list it
 // belongs in and document it here. Persisting a new secret is a security
-// decision (threat-model change), not an implementation convenience —
-// revisit spec §11 before choosing the persisted list.
+// decision (threat-model change), not an implementation convenience.
 //
 // CSV format: key,value pairs
 func SaveConfigCSV(cfg *Config, path string) error {
@@ -554,9 +555,8 @@ const ConfigDir = "rescale"
 const OldConfigDir = "rescale-int"
 
 // getConfigDir returns the platform-appropriate config directory.
-//   - Windows: %LOCALAPPDATA%\Rescale\Interlink — Roaming was used until
-//     Plan 2 moved it to Local per spec §3.2. Credentials no longer sync
-//     between machines.
+//   - Windows: %LOCALAPPDATA%\Rescale\Interlink, so credentials do not
+//     roam to other machines.
 //   - Unix: ~/.config/rescale (XDG standard)
 func getConfigDir() string {
 	if runtime.GOOS == "windows" {
@@ -574,9 +574,10 @@ func getConfigDir() string {
 	return ""
 }
 
-// getOldConfigDirs returns legacy config directories for read-side fallback
-// during the transition window. Order: first-match-wins on read.
-//   - Windows: %APPDATA%\Rescale\Interlink (Roaming — pre-Plan-2 location).
+// getOldConfigDirs returns legacy config directories for read-side fallback.
+// Order: first-match-wins on read.
+//   - Windows: %APPDATA%\Rescale\Interlink (Roaming, where earlier versions
+//     kept it).
 //   - Unix: ~/.config/rescale-int (pre-rename — only state/PID ever lived here).
 func getOldConfigDirs() []string {
 	if runtime.GOOS == "windows" {
@@ -594,8 +595,7 @@ func getOldConfigDirs() []string {
 	return nil
 }
 
-// getOldConfigDir is retained for callers using the single-old-dir API.
-// Returns the first legacy dir; empty if none.
+// getOldConfigDir returns the first legacy dir; empty if none.
 func getOldConfigDir() string {
 	if dirs := getOldConfigDirs(); len(dirs) > 0 {
 		return dirs[0]
@@ -604,9 +604,9 @@ func getOldConfigDir() string {
 }
 
 // GetDefaultConfigPath returns the default config file path
-// - Windows: %APPDATA%\Rescale\Interlink\config.csv (standard Windows location)
+// - Windows: %LOCALAPPDATA%\Rescale\Interlink\config.csv
 // - Unix: ~/.config/rescale/config.csv (XDG standard)
-// Falls back to old location ~/.config/rescale-int/config.csv if new location doesn't exist
+// Falls back to an earlier version's location (getOldConfigDir) if only that exists
 func GetDefaultConfigPath() string {
 	configDir := getConfigDir()
 	if configDir == "" {
@@ -614,12 +614,10 @@ func GetDefaultConfigPath() string {
 	}
 	newPath := filepath.Join(configDir, "config.csv")
 
-	// Check if new location exists
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath
 	}
 
-	// Check if old location exists (migration case - Unix only)
 	if oldDir := getOldConfigDir(); oldDir != "" {
 		oldPath := filepath.Join(oldDir, "config.csv")
 		if _, err := os.Stat(oldPath); err == nil {
@@ -634,9 +632,9 @@ func GetDefaultConfigPath() string {
 }
 
 // GetDefaultTokenPath returns the default token file path
-// - Windows: %APPDATA%\Rescale\Interlink\token (standard Windows location)
+// - Windows: %LOCALAPPDATA%\Rescale\Interlink\token
 // - Unix: ~/.config/rescale/token (XDG standard)
-// Falls back to old location ~/.config/rescale-int/token if new location doesn't exist
+// Falls back to an earlier version's location (getOldConfigDir) if only that exists
 // This is where 'config init' saves the API key
 func GetDefaultTokenPath() string {
 	configDir := getConfigDir()
@@ -645,12 +643,10 @@ func GetDefaultTokenPath() string {
 	}
 	newPath := filepath.Join(configDir, "token")
 
-	// Check if new location exists
 	if _, err := os.Stat(newPath); err == nil {
 		return newPath
 	}
 
-	// Check if old location exists (migration case - Unix only)
 	if oldDir := getOldConfigDir(); oldDir != "" {
 		oldPath := filepath.Join(oldDir, "token")
 		if _, err := os.Stat(oldPath); err == nil {
@@ -726,7 +722,7 @@ func writeTokenFile(path, token string, flag int) error {
 	// Write token with secure permissions (0600 = owner read/write only).
 	// On Windows, 0600 is honored via a coarser ACL — applyTokenFileACL
 	// below tightens it to the explicit (owner, Administrators, SYSTEM)
-	// model required by spec §11.2.
+	// model.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|flag, 0600)
 	if err == nil {
 		_, err = f.WriteString(token + "\n")
@@ -748,9 +744,8 @@ func writeTokenFile(path, token string, flag int) error {
 	}
 
 	// Best-effort explicit-ACL tightening on Windows. A failure here does
-	// NOT block the write — the file has already been written with Go's
-	// default permissions, which is no worse than pre-Plan-4 behavior.
-	sid, sidErr := currentUserSID()
+	// NOT block the write: the file keeps Go's default permissions.
+	sid, sidErr := ipc.CurrentUserSID()
 	if sidErr != nil {
 		// Straight to stderr, like the other token-security warnings: the CLI
 		// drops the standard logger's output unless asked for it, and silence

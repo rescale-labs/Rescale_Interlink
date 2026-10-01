@@ -8,11 +8,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rescale/rescale-int/internal/ipc"
 	"golang.org/x/sys/windows"
 )
 
 // TestWriteTokenFile_WindowsExplicitACL verifies that WriteTokenFile
-// applies the spec §11.2 explicit ACL: three ACEs (owner, Administrators,
+// applies the explicit ACL: three ACEs (owner, Administrators,
 // SYSTEM), each with full access, and no inheritance.
 func TestWriteTokenFile_WindowsExplicitACL(t *testing.T) {
 	dir := t.TempDir()
@@ -102,7 +103,7 @@ func TestMigrate_AppliesACLOnCopiedToken(t *testing.T) {
 
 	// The migration applies the current process SID, so GetNamedSecurityInfo
 	// returns three ACEs with one recognizable owner.
-	if sid, err := currentUserSID(); err != nil || sid == "" {
+	if sid, err := ipc.CurrentUserSID(); err != nil || sid == "" {
 		t.Skipf("could not capture current user SID: %v", err)
 	}
 	t.Setenv("APPDATA", filepath.Join(profileRoot, "AppData", "Roaming"))

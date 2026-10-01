@@ -8,19 +8,15 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/rescale/rescale-int/internal/ipc"
 	"github.com/rescale/rescale-int/internal/logging"
 )
 
-// RunStartupMigrations executes all one-time file migrations Plan 2 introduces.
-//
-// Migrations included:
+// RunStartupMigrations moves files from where earlier versions kept them:
 //  1. Windows: token + config.csv from AppData\Roaming to AppData\Local.
-//  2. Unix: state file from ~/.config/rescale-int/ to ~/.config/rescale/.
-//     (The state file is also migrated lazily by State.Load(); this is
-//     the eager path.)
-//  3. macOS: logs from ~/Library/Application Support/rescale/logs to
+//  2. macOS: logs from ~/Library/Application Support/rescale/logs to
 //     ~/.config/rescale/logs.
-//  4. All platforms: rename daemon-startup.log to startup.log.
+//  3. All platforms: rename daemon-startup.log to startup.log.
 //
 // All migrations are idempotent and safe to call on every startup. Each
 // migration logs at WARN on failure and continues — a migration failure
@@ -91,18 +87,15 @@ func migrateMacOSLogs(logger *logging.Logger) {
 }
 
 // migrateCurrentUserWindowsCredentials moves the current user's token and
-// config.csv from Roaming to Local (per spec §3.2). Token files re-apply
-// the explicit ACL after copy using the current process SID.
+// config.csv from Roaming to Local. The token gets the explicit ACL again
+// after the copy.
 func migrateCurrentUserWindowsCredentials(logger *logging.Logger) {
 	oldDir := firstOldWindowsDir()
 	newDir := getConfigDir()
 	if oldDir == "" || newDir == "" || oldDir == newDir {
 		return
 	}
-	// Capture the current user's SID once; reuse for the token entry.
-	// currentUserSID() is the Windows-only helper defined alongside
-	// applyTokenFileACL; returns "" on non-Windows.
-	sid, sidErr := currentUserSID()
+	sid, sidErr := ipc.CurrentUserSID()
 	if sidErr != nil && logger != nil {
 		logger.Warn().Err(sidErr).Msg("Could not capture current user SID for migrated token ACL")
 	}
@@ -146,7 +139,7 @@ func firstOldWindowsDir() string {
 //   - dst already present → no-op, source left alone (avoid overwrite).
 //   - partial failure → source preserved; dst cleaned up if created.
 //
-// Cross-volume moves fall through to copy since os.Rename may fail.
+// It copies rather than renames, since a rename fails across volumes.
 func copyThenRemove(src, dst string) error {
 	if src == "" || dst == "" || src == dst {
 		return nil

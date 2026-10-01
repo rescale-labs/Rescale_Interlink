@@ -27,9 +27,6 @@ type DaemonStatusDTO struct {
 	// IPCConnected indicates if we can communicate with the daemon via IPC
 	IPCConnected bool `json:"ipcConnected"`
 
-	// State is the daemon state ("running", "paused", "stopped", "error", "pending")
-	State string `json:"state"`
-
 	// Version is the daemon version
 	Version string `json:"version"`
 
@@ -104,20 +101,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		userState = "error"
 	}
 
-	// The State field keeps the older "running"/"paused"/"stopped"/"error"/
-	// "pending" vocabulary.
-	legacyState := "stopped"
-	switch st.PerUser {
-	case service.PerUserRunning:
-		legacyState = "running"
-	case service.PerUserPaused:
-		legacyState = "paused"
-	case service.PerUserError:
-		legacyState = "error"
-	case service.PerUserPending:
-		legacyState = "pending"
-	}
-
 	lastScan := ""
 	if st.LastScanTime != nil && !st.LastScanTime.IsZero() {
 		lastScan = st.LastScanTime.Format(time.RFC3339)
@@ -132,7 +115,6 @@ func (a *App) GetDaemonStatus() DaemonStatusDTO {
 		Running:         st.IPCConnected || pid != 0,
 		PID:             pid,
 		IPCConnected:    st.IPCConnected,
-		State:           legacyState,
 		Version:         version.Version,
 		Uptime:          st.Uptime,
 		LastScan:        lastScan,
@@ -313,7 +295,7 @@ func (a *App) SaveDaemonConfig(dto DaemonConfigDTO) error {
 		client.SetTimeout(3 * time.Second)
 		ctx := context.Background()
 		if client.IsServiceRunning(ctx) {
-			if err := a.TriggerProfileRescan(); err != nil {
+			if err := a.TriggerDaemonScan(); err != nil {
 				a.logWarn("Daemon", fmt.Sprintf("Poll after save failed (non-fatal): %v", err))
 			}
 		}
@@ -632,12 +614,6 @@ func (a *App) ResumeDaemon() error {
 	}
 	a.logInfo("Daemon", "Daemon resumed")
 	return nil
-}
-
-// TriggerProfileRescan asks the user's running daemon to poll for completed
-// jobs now, as TriggerDaemonScan does; the frontend calls both.
-func (a *App) TriggerProfileRescan() error {
-	return a.TriggerDaemonScan()
 }
 
 // GetDaemonTransferSnapshot retrieves a point-in-time view of daemon

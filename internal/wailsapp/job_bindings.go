@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/rescale/rescale-int/internal/pur/validation"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/services"
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // emitScanProgress publishes a scan progress event for software/hardware catalog scanning.
@@ -1509,12 +1511,10 @@ func (a *App) SaveTemplate(name string, job JobSpecDTO) (err error) {
 		return err
 	}
 
-	// Atomic write: write to temp file then rename
-	tmpPath := fullPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	return paths.WriteFileAtomic(fullPath, 0644, false, func(w io.Writer) error {
+		_, err := w.Write(data)
 		return err
-	}
-	return os.Rename(tmpPath, fullPath)
+	})
 }
 
 // DeleteTemplate deletes a template by name.

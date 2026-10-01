@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
@@ -431,9 +432,8 @@ Examples:
 			if noTar && len(inputFiles) == 0 {
 				logger.Warn().Msg("--no-tar has no effect without --files")
 			}
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 
 			// Get API client
@@ -922,9 +922,8 @@ Examples:
 			} else if cmd.Flags().Changed("output") {
 				return fmt.Errorf("--output applies only when downloading one file with --file-id; to set the directory for all of a job's files, use --outdir")
 			}
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 
 			// Get API client

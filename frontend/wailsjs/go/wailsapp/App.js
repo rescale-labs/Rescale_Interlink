@@ -38,10 +38,6 @@ export function CheckLocalFolderExists(arg1, arg2) {
   return window['go']['wailsapp']['App']['CheckLocalFolderExists'](arg1, arg2);
 }
 
-export function ClearCatalogCache() {
-  return window['go']['wailsapp']['App']['ClearCatalogCache']();
-}
-
 export function ClearCompletedTransfers() {
   return window['go']['wailsapp']['App']['ClearCompletedTransfers']();
 }
@@ -52,10 +48,6 @@ export function ClearSavedAPIKey() {
 
 export function CreateRemoteFolder(arg1, arg2) {
   return window['go']['wailsapp']['App']['CreateRemoteFolder'](arg1, arg2);
-}
-
-export function DefaultDOEMaxCases() {
-  return window['go']['wailsapp']['App']['DefaultDOEMaxCases']();
 }
 
 export function DeleteRemoteItems(arg1, arg2) {
@@ -392,10 +384,6 @@ export function TestConnection() {
 
 export function TriggerDaemonScan() {
   return window['go']['wailsapp']['App']['TriggerDaemonScan']();
-}
-
-export function TriggerProfileRescan() {
-  return window['go']['wailsapp']['App']['TriggerProfileRescan']();
 }
 
 export function UpdateConfig(arg1) {

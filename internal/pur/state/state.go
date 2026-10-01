@@ -1,8 +1,10 @@
 package state
 
 import (
+	"bytes"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/reporting"
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // SubmitStatusIndeterminate marks a job whose creation may or may not have
@@ -160,25 +163,8 @@ func (m *Manager) saveUnlocked() error {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
 
-	// Write to a temporary file first, one of this save's own, created with mode
-	// 0600: a fixed name would follow a link planted there, keep the mode of a
-	// file an earlier build left behind, and be shared by two runs saving at once.
-	file, err := os.CreateTemp(dir, filepath.Base(m.filePath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp state file: %w", err)
-	}
-	tempFile := file.Name()
-
-	// Use a flag to track successful completion for cleanup
-	success := false
-	defer func() {
-		if !success {
-			file.Close()
-			os.Remove(tempFile) // Clean up temp file on error
-		}
-	}()
-
-	writer := csv.NewWriter(file)
+	var buf bytes.Buffer
+	writer := csv.NewWriter(&buf)
 
 	// Write header
 	header := []string{"Index", "JobName", "Directory", "TarPath", "TarStatus", "FileID",
@@ -221,16 +207,13 @@ func (m *Manager) saveUnlocked() error {
 		return fmt.Errorf("failed to flush state writer: %w", err)
 	}
 
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("failed to close temp state file: %w", err)
+	// Each save stages under a name of its own: two runs may save at once.
+	if err := paths.WriteFileAtomic(m.filePath, 0600, true, func(w io.Writer) error {
+		_, err := w.Write(buf.Bytes())
+		return err
+	}); err != nil {
+		return fmt.Errorf("failed to write state file: %w", err)
 	}
-
-	// Atomic rename
-	if err := os.Rename(tempFile, m.filePath); err != nil {
-		return fmt.Errorf("failed to rename state file: %w", err)
-	}
-
-	success = true
 	return nil
 }
 

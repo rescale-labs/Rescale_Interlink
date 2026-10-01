@@ -4,6 +4,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/reporting"
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // lockFile takes the exclusive lock that claims of the PID file and rewrites of
@@ -52,13 +54,13 @@ func WritePIDFile() error {
 	if err := CheckPIDFile(); err != nil {
 		return err
 	}
-	tmpPath := pidPath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
-		return fmt.Errorf("failed to write PID file: %w", err)
-	}
-	pidClaimStep()
-	if err := os.Rename(tmpPath, pidPath); err != nil {
-		os.Remove(tmpPath)
+	if err := paths.WriteFileAtomic(pidPath, 0600, false, func(w io.Writer) error {
+		if _, err := io.WriteString(w, strconv.Itoa(os.Getpid())); err != nil {
+			return err
+		}
+		pidClaimStep()
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to write PID file: %w", err)
 	}
 	return nil

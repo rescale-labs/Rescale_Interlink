@@ -52,6 +52,7 @@ func TestDaemonConfigLoadSave(t *testing.T) {
 	cfg.Daemon.MaxConcurrent = 3
 	cfg.Daemon.LookbackDays = 14
 	cfg.Daemon.UseJobNameDir = false
+	cfg.Daemon.IncludeWorkspaceFolders, cfg.Daemon.FlattenFolderStructure = true, true
 	cfg.Filters.NamePrefix = "TestPrefix"
 	cfg.Filters.NameContains = "Contains"
 	cfg.Filters.Exclude = "test,debug,scratch"
@@ -95,6 +96,9 @@ func TestDaemonConfigLoadSave(t *testing.T) {
 	if loaded.Daemon.UseJobNameDir != cfg.Daemon.UseJobNameDir {
 		t.Errorf("UseJobNameDir mismatch: expected %v, got %v", cfg.Daemon.UseJobNameDir, loaded.Daemon.UseJobNameDir)
 	}
+	if !loaded.Daemon.IncludeWorkspaceFolders || !loaded.Daemon.FlattenFolderStructure {
+		t.Errorf("workspace folder settings: %v, %v; want both on", loaded.Daemon.IncludeWorkspaceFolders, loaded.Daemon.FlattenFolderStructure)
+	}
 	if loaded.Filters.NamePrefix != cfg.Filters.NamePrefix {
 		t.Errorf("NamePrefix mismatch: expected %s, got %s", cfg.Filters.NamePrefix, loaded.Filters.NamePrefix)
 	}
@@ -134,7 +138,8 @@ func TestDaemonConfigLoadNonExistent(t *testing.T) {
 
 // Only a daemon.conf without a Conditional tag takes the lowercase default. One
 // that names the old default, under either key, keeps it: every earlier save
-// wrote the tag out, so existing setups go on matching their tagged jobs.
+// wrote the tag out, so existing setups go on matching their tagged jobs. The
+// workspace folder settings, which no earlier save wrote, are off.
 func TestDaemonConfigConditionalTagDefault(t *testing.T) {
 	for eligibility, want := range map[string]string{
 		"":                                 "autodownload",
@@ -149,8 +154,9 @@ func TestDaemonConfigConditionalTagDefault(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadDaemonConfig(%q): %v", eligibility, err)
 		}
-		if got := cfg.Eligibility.AutoDownloadTag; got != want {
-			t.Errorf("with [eligibility] %q the tag is %q, want %q", eligibility, got, want)
+		if got := cfg.Eligibility.AutoDownloadTag; got != want || cfg.Daemon.IncludeWorkspaceFolders || cfg.Daemon.FlattenFolderStructure {
+			t.Errorf("with [eligibility] %q the tag is %q and the workspace folder settings %v, %v; want %q and both off",
+				eligibility, got, cfg.Daemon.IncludeWorkspaceFolders, cfg.Daemon.FlattenFolderStructure, want)
 		}
 	}
 }

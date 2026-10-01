@@ -9,41 +9,6 @@ import (
 	"testing"
 )
 
-// Colour codes are for a terminal. A log sent to a pipe or a file carried them
-// anyway, as noise to whatever read it.
-func TestConsoleOutputUncolouredOffATerminal(t *testing.T) {
-	t.Setenv("NO_COLOR", "") // zerolog treats empty as unset
-	f, err := os.Create(filepath.Join(t.TempDir(), "out.log"))
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	defer f.Close()
-
-	orig := os.Stdout
-	os.Stdout = f
-	l := NewLogger("cli", nil)
-	os.Stdout = orig
-
-	l.Info().Str("k", "v").Msg("direct")
-	// The CLI's logger writes through a redacting wrapper, which hides the file.
-	l.SetOutput(struct{ io.Writer }{f})
-	l.Info().Str("k", "v").Msg("wrapped")
-	l.WithOutput(struct{ io.Writer }{f}).Info().Str("k", "v").Msg("routed")
-
-	data, err := os.ReadFile(f.Name())
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	for _, msg := range []string{"direct", "wrapped", "routed"} {
-		if !strings.Contains(string(data), msg) {
-			t.Fatalf("the %q line never reached the file:\n%q", msg, data)
-		}
-	}
-	if strings.Contains(string(data), "\x1b[") {
-		t.Errorf("colour codes written to a file:\n%q", data)
-	}
-}
-
 // A file on a terminal is coloured, and so is a writer marked with Via as ending
 // up on one; a writer ending up on a plain file is not.
 func TestConsoleOutputColouredOnATerminal(t *testing.T) {
@@ -103,6 +68,7 @@ func (s ttySink) IsTerminal() bool { return s.tty }
 
 // Logs routed to the progress display colour as its terminal allows, not as
 // stdout does: with `upload ... > run.log` on a terminal they had lost colour.
+// Off a terminal, colour codes are noise to whatever reads the log.
 func TestRoutedOutputColoursForItsDestination(t *testing.T) {
 	stdout, err := os.Create(filepath.Join(t.TempDir(), "run.log"))
 	if err != nil {
@@ -113,6 +79,18 @@ func TestRoutedOutputColoursForItsDestination(t *testing.T) {
 	os.Stdout = stdout
 	l := NewLogger("cli", nil)
 	os.Stdout = orig
+
+	// The logger's own output, here a file, and a wrapper that cannot say where
+	// it lands, as the CLI's redacting writer hides the file, are no terminal.
+	t.Setenv("NO_COLOR", "") // zerolog treats empty as unset
+	l.Info().Msg("direct")
+	var wrapped bytes.Buffer
+	l.SetOutput(struct{ io.Writer }{&wrapped})
+	l.Info().Msg("wrapped")
+	if direct, _ := os.ReadFile(stdout.Name()); !strings.Contains(string(direct), "direct") || !strings.Contains(wrapped.String(), "wrapped") ||
+		strings.Contains(string(direct)+wrapped.String(), "\x1b[") {
+		t.Errorf("logged %q to stdout and %q to the wrapper, want both lines uncoloured", direct, wrapped.String())
+	}
 
 	for _, tt := range []struct {
 		name, noColor string

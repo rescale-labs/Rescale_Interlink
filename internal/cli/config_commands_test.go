@@ -48,7 +48,7 @@ func TestConfigDefaultPath(t *testing.T) {
 		t.Error("GetDefaultConfigPath() returned empty string")
 	}
 
-	// Should be an absolute path (e.g., ~/.config/rescale-int/config.csv)
+	// Should be an absolute path (e.g., ~/.config/rescale/config.csv)
 	if !filepath.IsAbs(path) {
 		t.Error("Default config path is not absolute")
 	}

@@ -136,8 +136,9 @@ jobs:
           # package:test for the Windows-only exited-child test; the tests that
           # reach piddomain_windows.go and, for a live PID, liveness_windows.go;
           # the Windows-only tests of the retired service, the per-user pipes,
-          # the tray and drive-relative scan roots; and the tests that reach the
-          # Windows process checks of 'daemon stop --force'.
+          # the tray, the app's daemon start and stop, and drive-relative scan
+          # roots; and the tests that reach the Windows process checks of
+          # 'daemon stop --force'.
           PLATFORM_TESTS: >-
             ./cmd/rescale-int-tray:TestStartRefusalsAreShown
             ./cmd/rescale-int-tray:TestStartupStartsOnlyWhenEnabledAndShowsWhy
@@ -162,6 +163,7 @@ jobs:
             ./internal/service:TestUninstallWithoutTheServiceSucceeds
             ./internal/util/multipart:TestScanDirectories_DriveRelativeRoots
             ./internal/wailsapp:TestStartDaemonSaysWhyItCannotStart
+            ./internal/wailsapp:TestStopDaemonNamesADaemonItCannotReach
         run: |
           # Each package runs once, verbosely; each of its listed tests must pass.
           names=$(for pt in $PLATFORM_TESTS; do printf '%s|' "${pt#*:}"; done)

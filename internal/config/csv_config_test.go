@@ -74,8 +74,8 @@ func TestLoadConfigCSV(t *testing.T) {
 					t.Errorf("APIKey should be empty (not loaded from config), got %q", cfg.APIKey)
 				}
 				// Should have defaults
-				if cfg.TarWorkers == 0 {
-					t.Error("TarWorkers should have default value")
+				if cfg.TarWorkers == 0 || cfg.FlattenJobDownload {
+					t.Errorf("TarWorkers %d, FlattenJobDownload %v; want a default and false", cfg.TarWorkers, cfg.FlattenJobDownload)
 				}
 			},
 		},
@@ -373,7 +373,8 @@ tar_workers,4
 }
 
 // TestConfigRoundTripPreservesAPIURL tests that Save then Load preserves the API URL
-// when TenantURL is blank (legacy alias sync).
+// when TenantURL is blank (legacy alias sync), the workers and the
+// flatten_job_download flag.
 func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 	tmpDir := t.TempDir()
 	csvPath := tmpDir + "/config.csv"
@@ -390,6 +391,8 @@ func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 		MaxRetries:    1,
 		SortField:     "name",
 		SortAscending: true,
+
+		FlattenJobDownload: true,
 	}
 
 	if err := SaveConfigCSV(original, csvPath); err != nil {
@@ -413,51 +416,9 @@ func TestConfigRoundTripPreservesAPIURL(t *testing.T) {
 		t.Errorf("After round-trip: TenantURL = %q, want %q (should be synced)",
 			loaded.TenantURL, "https://platform.rescale.com")
 	}
-	if loaded.TarWorkers != 2 || loaded.UploadWorkers != 3 || loaded.JobWorkers != 4 {
-		t.Errorf("After round-trip: workers = %d/%d/%d, want 2/3/4", loaded.TarWorkers, loaded.UploadWorkers, loaded.JobWorkers)
-	}
-}
-
-// TestConfigRoundTripFlattenJobDownload verifies the flatten_job_download flag
-// persists through a save/load cycle and defaults to false when absent.
-func TestConfigRoundTripFlattenJobDownload(t *testing.T) {
-	tmpDir := t.TempDir()
-	csvPath := tmpDir + "/config.csv"
-
-	original := &Config{
-		TarWorkers:         4,
-		UploadWorkers:      4,
-		JobWorkers:         4,
-		ProxyMode:          "no-proxy",
-		APIBaseURL:         "https://platform.rescale.com",
-		MaxRetries:         1,
-		SortField:          "name",
-		SortAscending:      true,
-		FlattenJobDownload: true,
-	}
-
-	if err := SaveConfigCSV(original, csvPath); err != nil {
-		t.Fatalf("SaveConfigCSV() error = %v", err)
-	}
-	loaded, err := LoadConfigCSV(csvPath)
-	if err != nil {
-		t.Fatalf("LoadConfigCSV() error = %v", err)
-	}
-	if !loaded.FlattenJobDownload {
-		t.Error("After round-trip: FlattenJobDownload = false, want true")
-	}
-
-	// Default: a config with no flatten_job_download key parses as false.
-	defPath := tmpDir + "/default.csv"
-	if err := os.WriteFile(defPath, []byte("key,value\napi_base_url,https://platform.rescale.com\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	def, err := LoadConfigCSV(defPath)
-	if err != nil {
-		t.Fatalf("LoadConfigCSV(default) error = %v", err)
-	}
-	if def.FlattenJobDownload {
-		t.Error("Default FlattenJobDownload = true, want false")
+	if loaded.TarWorkers != 2 || loaded.UploadWorkers != 3 || loaded.JobWorkers != 4 || !loaded.FlattenJobDownload {
+		t.Errorf("After round-trip: workers = %d/%d/%d, flatten_job_download %v; want 2/3/4 and true",
+			loaded.TarWorkers, loaded.UploadWorkers, loaded.JobWorkers, loaded.FlattenJobDownload)
 	}
 }
 

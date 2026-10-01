@@ -34,7 +34,6 @@ Commands:
   path  - Show configuration file path`,
 	}
 
-	// Add config subcommands
 	configCmd.AddCommand(newConfigInitCmd())
 	configCmd.AddCommand(newConfigShowCmd())
 	configCmd.AddCommand(newConfigTestCmd())
@@ -114,7 +113,6 @@ Use --force to overwrite an existing configuration or token file.`,
 				return errConfigInitNeedsTTY
 			}
 
-			// Get config path
 			configPath := cfgFile
 			if configPath == "" {
 				configPath = config.GetDefaultConfigPath()
@@ -165,7 +163,6 @@ Use --force to overwrite an existing configuration or token file.`,
 
 			reader := bufio.NewReader(cmd.InOrStdin())
 
-			// API Key (required)
 			var apiKeyInput string
 			for apiKeyInput == "" {
 				fmt.Print("API Key (required): ")
@@ -182,7 +179,6 @@ Use --force to overwrite an existing configuration or token file.`,
 				}
 			}
 
-			// API Base URL — menu of valid platforms
 			fmt.Println("\nRescale Platform:")
 			for i, p := range config.AllowedPlatformURLs {
 				fmt.Printf("  %d. %s (%s)\n", i+1, p.Label, p.URL)
@@ -205,7 +201,6 @@ Use --force to overwrite an existing configuration or token file.`,
 				}
 			}
 
-			// Worker settings
 			fmt.Println()
 			fmt.Println("Worker Settings (press Enter for defaults)")
 			fmt.Println("-------------------------------------------")
@@ -246,7 +241,6 @@ Use --force to overwrite an existing configuration or token file.`,
 				}
 			}
 
-			// Proxy settings
 			fmt.Println()
 			fmt.Print("Configure proxy? [y/N]: ")
 			proxyInput, err := readPromptLine(reader)
@@ -302,7 +296,6 @@ Use --force to overwrite an existing configuration or token file.`,
 				proxyMode = "no-proxy"
 			}
 
-			// Create config
 			cfg := &config.Config{
 				APIKey:         apiKeyInput,
 				APIBaseURL:     apiURLInput,
@@ -317,11 +310,10 @@ Use --force to overwrite an existing configuration or token file.`,
 				MaxRetries:     1,
 			}
 
-			// Save API key to a separate token file (for security, not in config CSV).
-			// Use config.WriteTokenFile so the file picks up the Windows
-			// explicit-ACL tightening on par with the GUI path.
-			// It creates the directory owner-only, as SaveConfigCSV does. Without
-			// --force the create is exclusive: a token that appeared during the
+			// The API key goes to its own token file, not the configuration.
+			// Both token writers create the folder owner-only and give the
+			// file the Windows explicit ACL, as the GUI does. Without --force
+			// the create is exclusive: a token that appeared during the
 			// prompts is refused, not replaced.
 			writeToken := config.CreateTokenFile
 			if force {
@@ -378,22 +370,18 @@ This command shows the merged configuration from:
 
 Priority: flags > environment > config file > defaults`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Get config path
 			configPath := cfgFile
 			if configPath == "" {
 				configPath = config.GetDefaultConfigPath()
 			}
 
-			// Load config
 			cfg, err := config.LoadConfigCSV(configPath)
 			if err != nil {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Merge with environment, token file, and flags
 			cfg.MergeWithFlagsAndTokenFile(apiKey, tokenFile, apiBaseURL, "", "", 0)
 
-			// Display config
 			fmt.Println("Current Configuration")
 			fmt.Println("=====================")
 			fmt.Println()
@@ -469,7 +457,6 @@ Use this to verify your API key and network connectivity.`,
 			fmt.Println("======================")
 			fmt.Println()
 
-			// Load config
 			configPath := cfgFile
 			if configPath == "" {
 				configPath = config.GetDefaultConfigPath()
@@ -480,10 +467,8 @@ Use this to verify your API key and network connectivity.`,
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Merge with environment, token file, and flags
 			cfg.MergeWithFlagsAndTokenFile(apiKey, tokenFile, apiBaseURL, "", "", 0)
 
-			// Validate config
 			if err := cfg.Validate(); err != nil {
 				return fmt.Errorf("invalid configuration: %w", err)
 			}
@@ -492,17 +477,14 @@ Use this to verify your API key and network connectivity.`,
 			fmt.Println("Testing connection...")
 			fmt.Println()
 
-			// Create API client
 			apiClient, err := api.NewClient(cfg)
 			if err != nil {
 				return fmt.Errorf("failed to create API client: %w", err)
 			}
 
-			// Test connection with timeout
 			ctx, cancel := context.WithTimeout(GetContext(), constants.APIConnectionTestTimeout)
 			defer cancel()
 
-			// Fetch user info as a test
 			user, err := getUserProfile(apiClient, ctx)
 			if err != nil {
 				logger.Error().Err(err).Msg("Connection test failed")
@@ -546,11 +528,9 @@ func newConfigPathCmd() *cobra.Command {
 			fmt.Printf("  %s\n", configPath)
 			fmt.Println()
 
-			// Check if file exists
 			if _, err := os.Stat(configPath); err == nil {
 				fmt.Println("Status: ✓ File exists")
 
-				// Show file info
 				if fileInfo, err := os.Stat(configPath); err == nil {
 					fmt.Printf("Size:   %d bytes\n", fileInfo.Size())
 					fmt.Printf("Modified: %s\n", fileInfo.ModTime().Format("2006-01-02 15:04:05"))

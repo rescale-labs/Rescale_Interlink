@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/diskspace"
 	inthttp "github.com/rescale/rescale-int/internal/http"
@@ -232,10 +233,8 @@ Examples:
 				return fmt.Errorf("path is not a directory: %s", localPath)
 			}
 
-			// Validate max-concurrent
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 			// If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
 			// so adaptive concurrency can scale up for small files (default of 5 would cap it)
@@ -741,10 +740,8 @@ Examples:
 			}
 			outputDir = filepath.Clean(outputDir) // Normalize path (removes trailing slash)
 
-			// Validate max-concurrent
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 			// If user didn't explicitly set --max-concurrent, use MaxMaxConcurrent
 			// so adaptive concurrency can scale up for small files (default of 5 would cap it)

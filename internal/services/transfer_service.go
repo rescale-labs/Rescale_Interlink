@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1198,10 +1199,13 @@ func (ts *TransferService) checkBatchCompletion(batchID, direction string) {
 }
 
 // dominantFailure samples a batch's failed tasks and returns the most common
-// error class together with a representative error of that class.
-// ok is false when no failed task recorded an error to reason about.
+// error class together with a representative error of that class. Refusals
+// marked by reporting.UsageError are left out: they are the user's to act on,
+// so they must neither hide a real failure beside them nor be reported for a
+// word in their path. ok is false when no other failed task recorded an error.
 func (ts *TransferService) dominantFailure(batchID string) (cls reporting.ErrorClass, representative error, ok bool) {
-	failedTasks := ts.queue.GetFailedTaskErrors(batchID, 5)
+	failedTasks := slices.DeleteFunc(ts.queue.GetFailedTaskErrors(batchID, 50), reporting.IsUsageError)
+	failedTasks = failedTasks[:min(len(failedTasks), 5)]
 	if len(failedTasks) == 0 {
 		return "", nil, false
 	}

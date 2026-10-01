@@ -21,6 +21,7 @@ import (
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
+	"github.com/rescale/rescale-int/internal/util/paths"
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
@@ -1023,19 +1024,10 @@ func WriteJobIDFile(outputDir, jobID string) error {
 	if err := validation.ValidateDownloadTarget(path); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(outputDir, JobIDFileName+".tmp-*")
-	if err != nil {
+	return paths.WriteFileAtomic(path, 0600, true, func(w io.Writer) error {
+		_, err := io.WriteString(w, jobID+"\n")
 		return err
-	}
-	defer os.Remove(tmp.Name()) // No-op once the rename below succeeds.
-	if _, err := tmp.WriteString(jobID + "\n"); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	})
 }
 
 // readJobIDFile reads the job ID from the .jobid marker inside dir. Returns the

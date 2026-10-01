@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"gopkg.in/ini.v1"
 
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // Hardcoded auto-download constants (not user-configurable).
@@ -79,8 +81,8 @@ const (
 //	show_download_complete = true
 //	show_download_failed = true
 //
-// Note: Mode (Enabled/Conditional/Disabled) is now set per-job via the
-// "Auto Download" custom field in the Rescale workspace, not in this config.
+// Mode (Enabled/Conditional/Disabled) is set per job via the "Auto Download"
+// custom field in the Rescale workspace, not in this config.
 type DaemonConfig struct {
 	// Daemon core settings
 	Daemon DaemonCoreConfig
@@ -357,27 +359,12 @@ func SaveDaemonConfig(cfg *DaemonConfig, path string) error {
 	notifySection.Key("show_download_complete").SetValue(fmt.Sprintf("%t", cfg.Notifications.ShowDownloadComplete))
 	notifySection.Key("show_download_failed").SetValue(fmt.Sprintf("%t", cfg.Notifications.ShowDownloadFailed))
 
-	// Save to file with restricted permissions (user read/write only)
-	// Use temporary file + rename for atomicity
-	tmpPath := path + ".tmp"
-	if err := iniFile.SaveTo(tmpPath); err != nil {
-		return fmt.Errorf("failed to write config: %w", err)
-	}
-
-	// Set restrictive permissions on Unix
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(tmpPath, 0600); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to set config permissions: %w", err)
-		}
-	}
-
-	// Atomic rename
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+	if err := paths.WriteFileAtomic(path, 0600, false, func(w io.Writer) error {
+		_, err := iniFile.WriteTo(w)
+		return err
+	}); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
-
 	return nil
 }
 
@@ -396,7 +383,7 @@ func (cfg *DaemonConfig) Validate() error {
 		if cfg.Daemon.PollIntervalMinutes < 1 || cfg.Daemon.PollIntervalMinutes > 1440 {
 			return ErrDaemonInvalidPollInterval
 		}
-		if cfg.Daemon.MaxConcurrent < constants.MinMaxConcurrent || cfg.Daemon.MaxConcurrent > constants.MaxMaxConcurrent {
+		if CheckMaxConcurrent(cfg.Daemon.MaxConcurrent, "max_concurrent") != nil {
 			return ErrDaemonInvalidMaxConcurrent
 		}
 		if cfg.Daemon.LookbackDays < 1 || cfg.Daemon.LookbackDays > 365 {
@@ -404,6 +391,15 @@ func (cfg *DaemonConfig) Validate() error {
 		}
 	}
 
+	return nil
+}
+
+// CheckMaxConcurrent refuses a max_concurrent outside the range every transfer
+// command, 'daemon run' and daemon.conf take, naming where it came from.
+func CheckMaxConcurrent(n int, source string) error {
+	if n < constants.MinMaxConcurrent || n > constants.MaxMaxConcurrent {
+		return fmt.Errorf("%s must be between %d and %d, got %d", source, constants.MinMaxConcurrent, constants.MaxMaxConcurrent, n)
+	}
 	return nil
 }
 

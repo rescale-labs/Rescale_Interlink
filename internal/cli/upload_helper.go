@@ -14,7 +14,7 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/state"
 	"github.com/rescale/rescale-int/internal/cloud/upload"
-	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/config"
 	inthttp "github.com/rescale/rescale-int/internal/http"
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/progress"
@@ -347,10 +347,8 @@ func UploadFilesWithIDs(
 		}
 	}
 
-	// Validate maxConcurrent
-	if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-		return nil, fmt.Errorf("maxConcurrent must be between %d and %d, got %d",
-			constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+	if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+		return nil, err
 	}
 
 	// Create UploadUI for professional progress bars

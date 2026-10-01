@@ -201,8 +201,8 @@ Examples:
 					return nil
 				}
 			}
-			if err := daemon.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
-				return err
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return reporting.UsageError(err)
 			}
 
 			// Early startup logging for debugging Windows subprocess launch issues.
@@ -302,8 +302,8 @@ Examples:
 			if !cmd.Flags().Changed("max-concurrent") {
 				maxConcurrent = daemonConf.Daemon.MaxConcurrent
 				// Here, not in a background daemon's child, whose refusal no one sees.
-				if err := daemon.CheckMaxConcurrent(maxConcurrent, "max_concurrent in daemon.conf"); err != nil {
-					return err
+				if err := config.CheckMaxConcurrent(maxConcurrent, "max_concurrent in daemon.conf"); err != nil {
+					return reporting.UsageError(err)
 				}
 			}
 			if !cmd.Flags().Changed("use-job-id") {
@@ -545,15 +545,8 @@ Examples:
 var onWindows = runtime.GOOS == "windows"
 
 // oldServiceRunning reports whether a service installed by an earlier version
-// is running; see service.OldServiceRunning. A variable so a test on any
-// system can run one.
-var oldServiceRunning = func() bool {
-	if !service.IsInstalled() {
-		return false
-	}
-	st, err := service.QueryStatus()
-	return err == nil && st == service.StatusRunning
-}
+// is running. A variable so a test on any system can run one.
+var oldServiceRunning = service.OldServiceIsRunning
 
 // newDaemonStatusCmd creates the 'daemon status' command.
 func newDaemonStatusCmd() *cobra.Command {
@@ -1272,8 +1265,8 @@ Examples:
 				if _, err := fmt.Sscanf(value, "%d", &v); err != nil {
 					return usage("invalid integer: %s", value)
 				}
-				if err := daemon.CheckMaxConcurrent(v, "max_concurrent"); err != nil {
-					return err
+				if err := config.CheckMaxConcurrent(v, "max_concurrent"); err != nil {
+					return reporting.UsageError(err)
 				}
 				cfg.Daemon.MaxConcurrent, value = v, strconv.Itoa(v)
 			case "lookback_days":

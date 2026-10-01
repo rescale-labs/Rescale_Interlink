@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rescale/rescale-int/internal/reporting"
+	"github.com/rescale/rescale-int/internal/util/paths"
 )
 
 // DownloadedJob tracks a job that has been downloaded by the daemon.
@@ -241,35 +243,18 @@ func (s *State) write() error {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	// Write to a uniquely named temp file in the same directory, then rename
-	// for atomicity. A fixed ".tmp" name is not safe: two writers (a daemon
-	// plus a `daemon retry` invocation, or two daemons) interleave writes into
-	// the same temp file and the survivor renames a half-written mixture over
-	// the real state.
-	tmp, err := os.CreateTemp(filepath.Dir(s.filePath), filepath.Base(s.filePath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp state file: %w", err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // No-op once the rename below succeeds.
-
-	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("failed to set state file permissions: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+	// Each write stages under a name of its own: a daemon of an earlier
+	// version, still running after an upgrade, writes the file without its
+	// lock.
+	if err := paths.WriteFileAtomic(s.filePath, 0600, true, func(w io.Writer) error {
+		if _, err := w.Write(data); err != nil {
+			return err
+		}
+		stateFileStep()
+		return nil
+	}); err != nil {
 		return fmt.Errorf("failed to write state file: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("failed to close temp state file: %w", err)
-	}
-
-	stateFileStep()
-	if err := os.Rename(tmpName, s.filePath); err != nil {
-		return fmt.Errorf("failed to rename state file: %w", err)
-	}
-
 	return nil
 }
 

@@ -91,7 +91,6 @@ func DefaultAPIConfigPath() (string, error) {
 }
 
 // APIConfigPathForUser returns the apiconfig path for a specific user profile directory.
-// This is used by the Windows service to enumerate per-user configs.
 // - Windows: <userProfileDir>\AppData\Roaming\Rescale\Interlink\apiconfig
 // - Unix: <userProfileDir>/.config/rescale/apiconfig
 func APIConfigPathForUser(userProfileDir string) string {

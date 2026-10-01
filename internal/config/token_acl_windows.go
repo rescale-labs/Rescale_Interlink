@@ -16,13 +16,12 @@ import (
 //   - NT AUTHORITY\SYSTEM (SY)
 //
 // The descriptor is SE_DACL_PROTECTED: no inheritance from the parent
-// directory is applied. This is the explicit-ACL posture spec §11.2
-// commits to — falling back to inherited defaults is not sufficient
-// because a misconfigured parent could widen access unexpectedly.
+// directory is applied. Inherited defaults are not sufficient because a
+// misconfigured parent could widen access unexpectedly.
 //
 // If ownerSID is empty, no ACL is applied and an error is returned —
 // callers should log WARN and continue (the file has still been written
-// with Go's default permissions, same as pre-Plan-4 behavior).
+// with Go's default permissions).
 func applyTokenFileACL(path string, ownerSID string) error {
 	if path == "" {
 		return fmt.Errorf("empty path")
@@ -53,17 +52,4 @@ func applyTokenFileACL(path string, ownerSID string) error {
 		return fmt.Errorf("SetNamedSecurityInfo %s: %w", path, err)
 	}
 	return nil
-}
-
-// currentUserSID returns the SID of the user the current process is
-// running as, as a string suitable for inclusion in an SDDL ACE.
-func currentUserSID() (string, error) {
-	token := windows.GetCurrentProcessToken()
-	// GetCurrentProcessToken returns a pseudo-handle that does not need
-	// to be closed; it is valid for the life of the process.
-	user, err := token.GetTokenUser()
-	if err != nil {
-		return "", fmt.Errorf("get token user: %w", err)
-	}
-	return user.User.Sid.String(), nil
 }

@@ -227,23 +227,6 @@ func TestStoreCoordinatorHooks(t *testing.T) {
 	}
 }
 
-func TestStoreFallbackWithoutCoordinator(t *testing.T) {
-	ResetGlobalStore()
-	s := GlobalStore()
-
-	s.SetCoordinatorEnsurer(func() (CoordinatorClient, error) {
-		return nil, errors.New("no coordinator")
-	})
-
-	limiter := s.GetLimiter("https://platform.rescale.com", "key-abc", ScopeUser)
-
-	// Should be at emergency rate (burst=1 = starts with 1 token)
-	tokens := limiter.GetCurrentTokens()
-	if tokens > 1.1 {
-		t.Errorf("emergency cap limiter should start with ~1 token (burst=1), got %.2f", tokens)
-	}
-}
-
 func TestColdStartEmergencyCapInvariant(t *testing.T) {
 	ResetGlobalStore()
 	s := GlobalStore()
@@ -289,13 +272,11 @@ func TestRuntimeDisconnectEmergencyCapInvariant(t *testing.T) {
 	mock.acquireErr = ErrCoordinatorUnreachable
 	mock.mu.Unlock()
 
-	// Next Wait() should fail-over to local with reconfigured emergency rate
+	// Next Wait() should fail over to the local limiter, whose emergency rate
+	// TestDegradedModeNotifies checks.
 	if err := limiter.Wait(ctx); err != nil {
 		t.Fatalf("second Wait() error after disconnect: %v", err)
 	}
-
-	// Verify limiter was reconfigured (hooks cleared after disconnect)
-	// The limiter should now be at emergency rate, not full rate
 }
 
 func TestCoordinatorReconnectAfterFailure(t *testing.T) {

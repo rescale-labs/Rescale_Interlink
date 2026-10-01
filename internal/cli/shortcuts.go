@@ -4,6 +4,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/spf13/cobra"
 )
@@ -46,10 +47,8 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logger := GetLogger()
 
-			// Validate max-concurrent
-			if maxConcurrent < constants.MinMaxConcurrent || maxConcurrent > constants.MaxMaxConcurrent {
-				return fmt.Errorf("--max-concurrent must be between %d and %d, got %d",
-					constants.MinMaxConcurrent, constants.MaxMaxConcurrent, maxConcurrent)
+			if err := config.CheckMaxConcurrent(maxConcurrent, "--max-concurrent"); err != nil {
+				return err
 			}
 
 			// Get API client
