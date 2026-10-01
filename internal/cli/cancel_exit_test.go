@@ -36,17 +36,17 @@ func runWithCancel(t *testing.T, cmd *cobra.Command, fn func(context.Context, do
 
 // A cancel that lands while a file downloads fails that file and stops the
 // batch before the next starts: the command fails, and its summary counts the
-// file already there (sub3's f1, which the scan lists before sub2's own files),
-// the interrupted one and the one never started, and says it stopped.
+// file already there (f4, first in path order), the interrupted one and the
+// one never started, and says it stopped.
 func TestFoldersDownloadDirFailsWhenCancelled(t *testing.T) {
 	lib := newFakeLibrary(t)
 	lib.files["f4"], lib.files["f5"] = "sub2", "sub2"
 	useFakeLibrary(t, lib)
 	out := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(out, "sub2", "sub3"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(out, "sub2"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(out, "sub2", "sub3", "f1.dat"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(out, "sub2", "f4.dat"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 

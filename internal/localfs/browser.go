@@ -32,14 +32,9 @@ func newAncestryMap() *ancestryMap {
 	return &ancestryMap{entries: make(map[int]dirIdentity)}
 }
 
-// set records a directory identity at the given depth, trimming deeper entries.
-func (a *ancestryMap) set(depth int, id dirIdentity) {
-	a.trimTo(depth)
-	a.entries[depth] = id
-}
-
-// trimTo removes all entries at depth >= d. Used before cycle-checking a symlink
-// at depth d, so that sibling real directories don't cause false cycle detection.
+// trimTo removes all entries at depth >= d. Used before a link or a directory
+// at depth d is checked or recorded, so that sibling real directories don't
+// cause false cycle detection.
 func (a *ancestryMap) trimTo(depth int) {
 	for d := range a.entries {
 		if d >= depth {
@@ -361,9 +356,8 @@ func resolveSymlinksParallel(ctx context.Context, entries []entryInfo, symlinkIn
 // WalkStream enables pipelined processing where folder creation can begin while
 // the walk is still discovering files.
 //
-// Avoids loading all files into memory before uploads start. Uses the same
-// filtering logic as WalkCollect (hidden handling, symlink skipping) for
-// consistent behavior.
+// Avoids loading all files into memory before uploads start. It is the same
+// walk as WalkCollect (see walker), so both see the same entries.
 //
 // Ordering is guaranteed per channel, never across channels. filepath.WalkDir
 // visits entries in lexical order, parents before children, and reads through
@@ -403,381 +397,134 @@ func WalkStream(ctx context.Context, root string, opts WalkOptions) (
 		defer close(skipped)
 		defer close(errs)
 
-		// Initialize ancestry tracking for symlink cycle detection.
-		var ancestry *ancestryMap
-		if opts.FollowSymlinks {
-			realRoot, _ := realPath(root)
-			ancestry = newAncestryMap().below(realRoot)
-		}
-
-		// Compute root depth for relative depth calculation
-		rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
-
-		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return nil // Skip inaccessible entries (matches WalkCollect)
-			}
-
-			// Check context cancellation
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			// Skip root itself
-			if path == root {
-				return nil
-			}
-
-			name := d.Name()
-
-			// Handle hidden items (matches WalkCollect exactly)
-			if !opts.IncludeHidden && IsHiddenName(name) {
-				if d.IsDir() && opts.SkipHiddenDirs {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			// Check if symlink using Lstat (doesn't follow symlinks)
-			fileInfo, err := os.Lstat(path)
-			if err != nil {
-				return nil // Skip entries we can't stat
-			}
-
-			isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
-
-			if isSymlink {
-				if !opts.FollowSymlinks {
-					if d.IsDir() {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-
-				// Surfaced to the caller, so the user sees that the link was
-				// left out rather than silently lost.
-				depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-				resolvedTarget, realInfo, reason := followLink(path, ancestry, depth)
-				if reason != "" {
-					emitSkipped(ctx, skipped, skippedLink(path, realInfo, reason))
-					return nil
-				}
-
-				if realInfo.IsDir() {
-					// Emit a synthetic directory entry for the symlink alias itself.
-					aliasEntry := FileEntry{
-						Path:    path,
-						Name:    name,
-						Size:    realInfo.Size(),
-						IsDir:   true,
-						ModTime: realInfo.ModTime(),
-						Mode:    realInfo.Mode(),
-					}
-					select {
-					case dirs <- aliasEntry:
-					case <-ctx.Done():
-						return ctx.Err()
-					}
-
-					// Walk the symlink target, emitting entries with ORIGINAL path prefix
-					_ = walkSymlinkedDir(ctx, resolvedTarget, path, opts, ancestry.below(resolvedTarget), dirs, files, skipped)
-					return nil // We handled it ourselves — return nil (not SkipDir) because d.IsDir()=false for symlinks
-				}
-
-				// Symlinked file — use real info for size/modtime
-				fileInfo = realInfo
-			}
-
-			// Defensive: an entry not classified as a directory by Lstat may
-			// still resolve to a directory through Stat — e.g. a Windows
-			// reparse-point junction whose Lstat mode lacks ModeSymlink (some
-			// legacy junctions are tagged ModeIrregular instead). Emitting it
-			// as a file would propagate to UploadFile and fail with
-			// "cannot upload a directory". Detect, skip, and surface.
-			if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
-				if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
-					emitSkipped(ctx, skipped, skippedLink(path, realInfo, skipNoDirLink))
-					return nil
-				}
-			}
-
-			entry := FileEntry{
-				Path:    path,
-				Name:    name,
-				Size:    fileInfo.Size(),
-				IsDir:   d.IsDir(),
-				ModTime: fileInfo.ModTime(),
-				Mode:    fileInfo.Mode(),
-			}
-
-			if d.IsDir() {
-				if opts.FollowSymlinks && ancestry != nil {
-					depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-					if realInfo, statErr := os.Stat(path); statErr == nil {
-						if id, ok := getDirIdentity(realInfo); ok {
-							ancestry.set(depth, id)
-						}
-					}
-				}
-				select {
-				case dirs <- entry:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			} else {
-				select {
-				case files <- entry:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-
-			return nil
-		})
-
-		if walkErr != nil && ctx.Err() == nil {
-			errs <- walkErr
+		w := walker{ctx: ctx, opts: opts, emit: sendTo(ctx, dirs, files, skipped)}
+		if err := w.walkRoot(root); err != nil && ctx.Err() == nil {
+			errs <- err
 		}
 	}()
 
 	return dirs, files, skipped, errs
 }
 
-// symlinkedEntry is the per-entry state both symlinked-tree walks compute
-// before they diverge on how they report it.
-type symlinkedEntry struct {
-	originalPath string
-	name         string
-	fileInfo     os.FileInfo
-	isSymlink    bool
-	depth        int // levels below the resolved root, which is depth 0
-}
-
-// resolveSymlinkedEntry maps an entry inside a resolved symlink target back to
-// the path the caller sees and applies the skip rules both walks share. A nil
-// entry means "not reported": the WalkDir callback returns skipErr instead —
-// nil to continue, filepath.SkipDir to prune a hidden directory.
-func resolveSymlinkedEntry(resolvedRoot, originalRoot, resolvedPath string,
-	d fs.DirEntry, opts WalkOptions) (*symlinkedEntry, error) {
-	// Skip root itself
-	if resolvedPath == resolvedRoot {
-		return nil, nil
-	}
-
-	// Compute the original path by replacing the resolved prefix with the original prefix
-	relPath, err := filepath.Rel(resolvedRoot, resolvedPath)
-	if err != nil {
-		return nil, nil
-	}
-	originalPath := filepath.Join(originalRoot, relPath)
-	name := d.Name()
-
-	// Hidden handling (same as main walk)
-	if !opts.IncludeHidden && IsHiddenName(name) {
-		if d.IsDir() && opts.SkipHiddenDirs {
-			return nil, filepath.SkipDir
-		}
-		return nil, nil
-	}
-
-	// Symlink handling within the symlinked tree
-	fileInfo, err := os.Lstat(resolvedPath)
-	if err != nil {
-		return nil, nil
-	}
-
-	return &symlinkedEntry{
-		originalPath: originalPath,
-		name:         name,
-		fileInfo:     fileInfo,
-		isSymlink:    fileInfo.Mode()&os.ModeSymlink != 0,
-		depth:        strings.Count(relPath, string(filepath.Separator)) + 1,
-	}, nil
-}
-
-// walkSymlinkedDir walks a resolved symlink target directory, emitting entries
-// with paths rewritten to use the original symlink path prefix.
-// This ensures the orchestrator builds correct remote folder structure.
-// The ancestry parameter is this walk's own chain (ancestryMap.below), which
-// it extends with every directory it enters, so a link to any of them is a cycle.
-func walkSymlinkedDir(
-	ctx context.Context,
-	resolvedRoot string, // The real directory path (after EvalSymlinks)
-	originalRoot string, // The symlink path (what the user sees)
-	opts WalkOptions,
-	ancestry *ancestryMap,
-	dirs chan<- FileEntry,
-	files chan<- FileEntry,
-	skipped chan<- FileEntry,
-) error {
-	return filepath.WalkDir(resolvedRoot, func(resolvedPath string, d fs.DirEntry, err error) error {
-		if err != nil {
+// sendTo is WalkStream's sink: a directory or a file waits for room on its
+// channel, and an entry left out goes through emitSkipped.
+func sendTo(ctx context.Context, dirs, files, skipped chan<- FileEntry) func(FileEntry) error {
+	return func(e FileEntry) error {
+		ch := files
+		switch {
+		case e.SkipReason != "":
+			emitSkipped(ctx, skipped, e)
 			return nil
+		case e.IsDir:
+			ch = dirs
 		}
-
 		select {
+		case ch <- e:
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
 		}
-
-		se, skipErr := resolveSymlinkedEntry(resolvedRoot, originalRoot, resolvedPath, d, opts)
-		if se == nil {
-			return skipErr
-		}
-		originalPath, name, fileInfo, isSymlink := se.originalPath, se.name, se.fileInfo, se.isSymlink
-
-		if isSymlink {
-			nestedResolved, realInfo, reason := followLink(resolvedPath, ancestry, se.depth)
-			if reason != "" {
-				emitSkipped(ctx, skipped, skippedLink(originalPath, realInfo, reason))
-				return nil
-			}
-
-			if realInfo.IsDir() {
-				// Emit synthetic directory entry for the alias
-				aliasEntry := FileEntry{
-					Path:    originalPath,
-					Name:    name,
-					IsDir:   true,
-					Size:    realInfo.Size(),
-					ModTime: realInfo.ModTime(),
-					Mode:    realInfo.Mode(),
-				}
-				select {
-				case dirs <- aliasEntry:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-
-				_ = walkSymlinkedDir(ctx, nestedResolved, originalPath, opts, ancestry.below(nestedResolved), dirs, files, skipped)
-				return nil
-			}
-
-			// Symlinked file — use real info
-			fileInfo = realInfo
-		}
-
-		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
-		// a directory (Windows junction with ModeIrregular) must not be
-		// emitted as a file.
-		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
-			if realInfo, statErr := os.Stat(resolvedPath); statErr == nil && realInfo.IsDir() {
-				emitSkipped(ctx, skipped, skippedLink(originalPath, realInfo, skipNoDirLink))
-				return nil
-			}
-		}
-
-		entry := FileEntry{
-			Path:    originalPath, // Use ORIGINAL path, not resolved
-			Name:    name,
-			Size:    fileInfo.Size(),
-			IsDir:   d.IsDir(),
-			ModTime: fileInfo.ModTime(),
-			Mode:    fileInfo.Mode(),
-		}
-
-		if d.IsDir() {
-			if id, ok := getDirIdentity(fileInfo); ok {
-				// A folder on the chain through a mount alias or firmlink,
-				// which no link's real path shows, is a loop too.
-				if ancestry.trimTo(se.depth); ancestry.contains(id) {
-					emitSkipped(ctx, skipped, skippedLink(originalPath, fileInfo, skipCycle))
-					return filepath.SkipDir
-				}
-				ancestry.entries[se.depth] = id
-			}
-			select {
-			case dirs <- entry:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		} else {
-			select {
-			case files <- entry:
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-
-		return nil
-	})
+	}
 }
 
-// collectSymlinkedDir is the WalkCollect counterpart of walkSymlinkedDir.
-// It collects entries into slices instead of sending to channels.
-func collectSymlinkedDir(
-	resolvedRoot, originalRoot string,
-	opts WalkOptions,
-	ancestry *ancestryMap,
-	result *WalkCollectResult,
-) error {
-	return filepath.WalkDir(resolvedRoot, func(resolvedPath string, d fs.DirEntry, err error) error {
+// walker is the one walk behind WalkStream and WalkCollect. It follows links
+// to files and directories wherever they point, except a link to a directory
+// the walk is inside, or to one containing it, which would walk it again; it
+// reports every entry it leaves out, with a SkipReason. Cycle detection uses
+// device+inode ancestry tracking on Unix. On Windows, links to directories are
+// NOT followed (getDirIdentity returns false). Unless opts.IncludeHidden is
+// set, hidden entries are left out and a hidden directory is not walked into.
+type walker struct {
+	ctx  context.Context
+	opts WalkOptions
+	emit func(FileEntry) error // a directory, a file, or an entry left out
+}
+
+// walkRoot walks root, whose chain starts with its real path and every
+// directory that contains it (ancestryMap.below).
+func (w walker) walkRoot(root string) error {
+	realRoot, _ := realPath(root)
+	return w.walk(root, root, newAncestryMap().below(realRoot), false)
+}
+
+// walk walks dir and reports each entry under shown, the path the caller sees
+// for dir: the root itself, or the link a followed walk came through, so that
+// the orchestrator builds the remote folder structure under the link's name.
+// ancestry is this walk's own chain, which it extends with every directory it
+// enters. A linked walk also leaves out a directory already on the chain: a
+// mount alias or firmlink leads back that way where no link's real path shows
+// it. The root's own walk only records its directories: checking them would
+// change uploads from a tree holding a bind mount, or a file system that reuses
+// inode numbers.
+func (w walker) walk(dir, shown string, ancestry *ancestryMap, linked bool) error {
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == dir {
+			return nil // Skip inaccessible entries, and dir itself
+		}
+		if err := w.ctx.Err(); err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return nil
 		}
+		shownPath, name := filepath.Join(shown, rel), d.Name()
 
-		se, skipErr := resolveSymlinkedEntry(resolvedRoot, originalRoot, resolvedPath, d, opts)
-		if se == nil {
-			return skipErr
+		if !w.opts.IncludeHidden && IsHiddenName(name) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		originalPath, name, fileInfo, isSymlink := se.originalPath, se.name, se.fileInfo, se.isSymlink
 
-		if isSymlink {
-			nestedResolved, realInfo, reason := followLink(resolvedPath, ancestry, se.depth)
+		// Check if symlink using Lstat (doesn't follow symlinks)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return nil // Skip entries we can't stat
+		}
+		depth := strings.Count(rel, string(filepath.Separator)) + 1 // dir is depth 0
+
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, realInfo, reason := followLink(path, ancestry, depth)
 			if reason != "" {
-				result.Symlinks = append(result.Symlinks, skippedLink(originalPath, realInfo, reason))
-				return nil
+				return w.emit(skippedLink(shownPath, realInfo, reason))
 			}
-
 			if realInfo.IsDir() {
-				// Add as directory entry
-				result.Directories = append(result.Directories, FileEntry{
-					Path: originalPath, Name: name, IsDir: true,
-					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: realInfo.Mode(),
-				})
-				_ = collectSymlinkedDir(nestedResolved, originalPath, opts, ancestry.below(nestedResolved), result)
-				return nil
+				// A directory entry for the link itself, then its target's
+				// entries under the link's path.
+				if err := w.emit(FileEntry{Path: shownPath, Name: name, Size: realInfo.Size(), IsDir: true,
+					ModTime: realInfo.ModTime(), Mode: realInfo.Mode()}); err != nil {
+					return err
+				}
+				_ = w.walk(target, shownPath, ancestry.below(target), true)
+				return nil // not SkipDir: d.IsDir() is false for a link
 			}
-
-			fileInfo = realInfo
+			info = realInfo // Symlinked file — use real info for size/modtime
 		}
 
-		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
-		// a directory (Windows junction with ModeIrregular) must not be
-		// emitted as a file.
-		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
-			if realInfo, statErr := os.Stat(resolvedPath); statErr == nil && realInfo.IsDir() {
-				result.Symlinks = append(result.Symlinks, skippedLink(originalPath, realInfo, skipNoDirLink))
-				return nil
+		// Defensive: an entry not classified as a directory by Lstat may
+		// still resolve to a directory through Stat — e.g. a Windows
+		// reparse-point junction whose Lstat mode lacks ModeSymlink (some
+		// legacy junctions are tagged ModeIrregular instead). Emitting it
+		// as a file would propagate to UploadFile and fail with
+		// "cannot upload a directory". Detect, skip, and surface.
+		if shouldProbeResolvedDirectory(info.Mode(), d.IsDir()) {
+			if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
+				return w.emit(skippedLink(shownPath, realInfo, skipNoDirLink))
 			}
-		}
-
-		entry := FileEntry{
-			Path:    originalPath,
-			Name:    name,
-			Size:    fileInfo.Size(),
-			IsDir:   d.IsDir(),
-			ModTime: fileInfo.ModTime(),
-			Mode:    fileInfo.Mode(),
 		}
 
 		if d.IsDir() {
-			if id, ok := getDirIdentity(fileInfo); ok {
-				if ancestry.trimTo(se.depth); ancestry.contains(id) { // see walkSymlinkedDir
-					result.Symlinks = append(result.Symlinks, skippedLink(originalPath, fileInfo, skipCycle))
+			if id, ok := getDirIdentity(info); ok {
+				if ancestry.trimTo(depth); linked && ancestry.contains(id) {
+					_ = w.emit(skippedLink(shownPath, info, skipCycle))
 					return filepath.SkipDir
 				}
-				ancestry.entries[se.depth] = id
+				ancestry.entries[depth] = id
 			}
-			result.Directories = append(result.Directories, entry)
-		} else {
-			result.Files = append(result.Files, entry)
 		}
-
-		return nil
+		return w.emit(FileEntry{Path: shownPath, Name: name, Size: info.Size(), IsDir: d.IsDir(),
+			ModTime: info.ModTime(), Mode: info.Mode()})
 	})
 }
 
@@ -785,132 +532,33 @@ func collectSymlinkedDir(
 type WalkCollectResult struct {
 	Directories []FileEntry // All directories found
 	Files       []FileEntry // All regular files found
-	Symlinks    []FileEntry // All symbolic links found
+	Symlinks    []FileEntry // The entries the walk left out, each with its SkipReason
 }
 
-// WalkCollect walks a directory tree and collects entries into categorized slices.
-//
-// Unlike Walk which uses callbacks, WalkCollect returns all results at once.
-// This is useful when you need to process all files/directories after scanning.
-//
-// When FollowSymlinks is false (default), symlinks are NOT followed and are collected
-// in the Symlinks slice. When true, symlinks are followed as WalkStream follows
-// them, their targets appear in Directories/Files, and the links left out are
-// collected in Symlinks with a SkipReason.
+// WalkCollect walks a directory tree and collects entries into categorized
+// slices: the same walk as WalkStream (see walker), returned all at once. This
+// is useful when you need to process all files/directories after scanning.
 func WalkCollect(root string, opts WalkOptions) (*WalkCollectResult, error) {
 	result := &WalkCollectResult{
 		Directories: make([]FileEntry, 0),
 		Files:       make([]FileEntry, 0),
 		Symlinks:    make([]FileEntry, 0),
 	}
-
-	var ancestry *ancestryMap
-	if opts.FollowSymlinks {
-		realRoot, _ := realPath(root)
-		ancestry = newAncestryMap().below(realRoot)
-	}
-	rootDepth := strings.Count(filepath.Clean(root), string(filepath.Separator))
-
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			// Error accessing path - skip it
-			return nil
-		}
-
-		// Skip root itself
-		if path == root {
-			return nil
-		}
-
-		name := d.Name()
-
-		// Handle hidden items
-		if !opts.IncludeHidden && IsHiddenName(name) {
-			if d.IsDir() && opts.SkipHiddenDirs {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Check if symlink using Lstat (doesn't follow symlinks)
-		fileInfo, err := os.Lstat(path)
-		if err != nil {
-			// Skip entries we can't stat
-			return nil
-		}
-
-		isSymlink := fileInfo.Mode()&os.ModeSymlink != 0
-
-		if isSymlink {
-			if !opts.FollowSymlinks {
-				// Original behavior — collect in Symlinks slice and skip
-				entry := FileEntry{
-					Path: path, Name: name, Size: fileInfo.Size(), IsDir: d.IsDir(),
-					ModTime: fileInfo.ModTime(), Mode: fileInfo.Mode(), IsSymlink: true,
-				}
-				result.Symlinks = append(result.Symlinks, entry)
-				if d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-
-			depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-			resolvedTarget, realInfo, reason := followLink(path, ancestry, depth)
-			if reason != "" {
-				result.Symlinks = append(result.Symlinks, skippedLink(path, realInfo, reason))
-				return nil
-			}
-
-			if realInfo.IsDir() {
-				// Emit as directory
-				result.Directories = append(result.Directories, FileEntry{
-					Path: path, Name: name, IsDir: true,
-					Size: realInfo.Size(), ModTime: realInfo.ModTime(), Mode: realInfo.Mode(),
-				})
-				_ = collectSymlinkedDir(resolvedTarget, path, opts, ancestry.below(resolvedTarget), result)
-				return nil
-			}
-
-			// Symlinked file — use real info
-			fileInfo = realInfo
-		}
-
-		// Defensive: see WalkStream — Lstat-as-non-symlink that resolves to
-		// a directory (Windows junction with ModeIrregular) must not be
-		// emitted as a file.
-		if shouldProbeResolvedDirectory(fileInfo.Mode(), d.IsDir()) {
-			if realInfo, statErr := os.Stat(path); statErr == nil && realInfo.IsDir() {
-				result.Symlinks = append(result.Symlinks, skippedLink(path, realInfo, skipNoDirLink))
-				return nil
-			}
-		}
-
-		entry := FileEntry{
-			Path:    path,
-			Name:    name,
-			Size:    fileInfo.Size(),
-			IsDir:   d.IsDir(),
-			ModTime: fileInfo.ModTime(),
-			Mode:    fileInfo.Mode(),
-		}
-
-		if d.IsDir() {
-			if opts.FollowSymlinks && ancestry != nil {
-				depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - rootDepth
-				if realInfo, statErr := os.Stat(path); statErr == nil {
-					if id, ok := getDirIdentity(realInfo); ok {
-						ancestry.set(depth, id)
-					}
-				}
-			}
-			result.Directories = append(result.Directories, entry)
-		} else {
-			result.Files = append(result.Files, entry)
-		}
-
-		return nil
-	})
-
+	err := walker{ctx: context.Background(), opts: opts, emit: appendTo(result)}.walkRoot(root)
 	return result, err
+}
+
+// appendTo is WalkCollect's sink: each entry goes on the list of its kind.
+func appendTo(result *WalkCollectResult) func(FileEntry) error {
+	return func(e FileEntry) error {
+		switch {
+		case e.SkipReason != "":
+			result.Symlinks = append(result.Symlinks, e)
+		case e.IsDir:
+			result.Directories = append(result.Directories, e)
+		default:
+			result.Files = append(result.Files, e)
+		}
+		return nil
+	}
 }

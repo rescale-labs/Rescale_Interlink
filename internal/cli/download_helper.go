@@ -360,14 +360,13 @@ func executeJobDownload(
 	// Build work items for the batch runner
 	items := make([]cliDownloadItem, len(files))
 	for i, file := range files {
-		jf := file // capture loop variable
 		items[i] = cliDownloadItem{
 			idx:       i,
 			fileID:    file.ID,
 			name:      file.Name,
 			size:      file.DecryptedSize,
 			localPath: fileOutputPaths[file.ID],
-			jobFile:   &jf,
+			jobFile:   &file,
 		}
 	}
 
@@ -384,6 +383,10 @@ func executeJobDownload(
 		logger:         logger,
 	})
 }
+
+// skipChecksumUsage is the help for --skip-checksum, which does the same in
+// every download command.
+const skipChecksumUsage = "Warn instead of failing when the checksum does not match (not recommended; the file-size check still applies)"
 
 // downloadBatchOptions carries the parts of a CLI download that differ per
 // command. Everything else — progress bars, conflict handling, the worker pool,
@@ -433,6 +436,26 @@ func initialDownloadConflictMode(overwriteAll, skipAll, resumeAll bool) Download
 		return DownloadResumeAll
 	}
 	return DownloadSkipOnce
+}
+
+// downloadTarget returns the path a file meant for path is written to, and the
+// file already there, if any; both download loops take their target from it.
+// A folder at path stays, and the file arrives beside it as <path>.file. The
+// target is checked before it is returned, so the conflict handling that
+// follows, which may remove, follow or keep what is there, only meets a target
+// that is safe to write.
+func downloadTarget(path string) (string, os.FileInfo, error) {
+	target := path
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		target += ".file"
+	}
+	if err := validation.ValidateDownloadTarget(target); err != nil {
+		return target, nil, err
+	}
+	if info, err := os.Stat(target); err == nil && !info.IsDir() {
+		return target, info, nil
+	}
+	return target, nil, nil
 }
 
 // resolveDownloadConflict decides what to do about a file already sitting at
@@ -496,9 +519,10 @@ func resolveDownloadConflict(
 				os.Remove(outputPath)
 			}
 		} else {
-			resumeState, _ := state.LoadDownloadState(outputPath)
+			// The chunked download keeps its record beside the encrypted copy.
+			resumeState, _ := state.LoadDownloadState(encryptedPath)
 			if resumeState != nil {
-				if err := state.ValidateDownloadState(resumeState, outputPath); err == nil {
+				if err := state.ValidateDownloadState(resumeState, encryptedPath); err == nil {
 					resumeProgress := state.GetDownloadResumeProgress(resumeState)
 					fmt.Fprintf(w, "↻ Resuming download for %s from %.1f%% (%d/%d bytes)...\n",
 						item.name, resumeProgress*100, resumeState.DownloadedBytes, resumeState.TotalSize)
@@ -508,7 +532,7 @@ func resolveDownloadConflict(
 				} else {
 					fmt.Fprintf(w, "Resume state invalid for %s (reason: %v). Starting fresh download...\n",
 						item.name, err)
-					state.CleanupExpiredDownloadResume(resumeState, outputPath, false)
+					state.CleanupExpiredDownloadResume(resumeState, encryptedPath, false)
 					os.Remove(outputPath)
 				}
 			} else {
@@ -568,21 +592,16 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 			}
 		}
 
-		// Check if path exists as a directory (name collision with folder)
-		if info, statErr := os.Lstat(outputPath); statErr == nil && info.IsDir() {
-			originalPath := outputPath
-			outputPath = outputPath + ".file"
+		outputPath, existing, err := downloadTarget(outputPath)
+		if outputPath != item.localPath {
 			fmt.Fprintf(downloadUI.Writer(), "⚠️  File '%s' conflicts with directory, downloading as '%s'\n",
-				filepath.Base(originalPath), filepath.Base(outputPath))
+				filepath.Base(item.localPath), filepath.Base(outputPath))
 		}
-		// Before any conflict handling, which would remove, follow or keep it.
-		if err := validation.ValidateDownloadTarget(outputPath); err != nil {
+		if err != nil {
 			return err
 		}
-
-		// Check if file exists and handle conflict
-		if info, statErr := os.Stat(outputPath); statErr == nil && !info.IsDir() {
-			skip, err := resolveDownloadConflict(conflictResolver, item, outputPath, info, opts, downloadUI.Writer())
+		if existing != nil {
+			skip, err := resolveDownloadConflict(conflictResolver, item, outputPath, existing, opts, downloadUI.Writer())
 			if err != nil {
 				return err
 			}
@@ -630,6 +649,7 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 				retryReporter(ensureBar(), downloadUI.Writer())(ev)
 			},
 			TransferHandle: transferHandle,
+			OutputWriter:   timingWriter(downloadUI),
 			SkipChecksum:   opts.skipChecksum,
 		}
 		// A job file arrives from the v2 listing with its metadata attached, so
@@ -644,7 +664,7 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 		if err := downloadFileFn(ctx, params); err != nil {
 			ensureBar().Complete(err)
 
-			if state.DownloadResumeStateExists(outputPath) {
+			if state.DownloadResumeStateExists(outputPath + ".encrypted") {
 				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume this download, run the same command again.\n", item.name)
 			}
 
@@ -692,6 +712,17 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 	fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
 	if len(skippedFiles) > 0 {
 		fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
+	}
+	return nil
+}
+
+// timingWriter is the writer a download's --timing lines go to: the progress
+// display's, since a line written straight to stderr lands inside the bars. The
+// transfer layer also prints its format and thread choices for every file to
+// this writer, so without --timing there is none.
+func timingWriter(ui *progress.DownloadUI) io.Writer {
+	if cloud.TimingEnabled() {
+		return ui.Writer()
 	}
 	return nil
 }

@@ -443,17 +443,3 @@ func TestScanFilesWritesNothingWhenEveryFileIsSkipped(t *testing.T) {
 		t.Errorf("a run that generated nothing still replaced the file: %q", data)
 	}
 }
-
-// --skip-checksum does the same in every download command, so its help says
-// the same.
-func TestSkipChecksumHelpMatches(t *testing.T) {
-	want := newJobsDownloadCmd().Flags().Lookup("skip-checksum").Usage
-	for name, got := range map[string]string{
-		"files download":       newFilesDownloadCmd().Flags().Lookup("skip-checksum").Usage,
-		"folders download-dir": newFoldersDownloadDirCmd().Flags().Lookup("skip-checksum").Usage,
-	} {
-		if got != want {
-			t.Errorf("%s --skip-checksum says %q, want %q", name, got, want)
-		}
-	}
-}

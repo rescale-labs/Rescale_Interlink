@@ -104,7 +104,7 @@ Examples:
 
 			templateJobs, err := config.LoadJobsCSV(templatePath)
 			if err != nil {
-				return fmt.Errorf("failed to load template: %w", err)
+				return reporting.UsageError(fmt.Errorf("failed to load template: %w", err))
 			}
 			if len(templateJobs) == 0 {
 				return fmt.Errorf("template CSV is empty")

@@ -831,7 +831,7 @@ Examples:
 	cmd.Flags().BoolVarP(&overwriteAll, "overwrite", "w", false, "Overwrite existing files without prompting")
 	cmd.Flags().BoolVarP(&skipAll, "skip", "S", false, "Skip existing files/folders without prompting")
 	cmd.Flags().BoolVarP(&mergeAll, "merge", "m", false, "Merge into existing folders, skip existing files")
-	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Warn instead of failing when the checksum does not match (not recommended; the file-size check still applies)")
+	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, skipChecksumUsage)
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview what would be downloaded without actually downloading")
 
 	return cmd

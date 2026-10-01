@@ -5,7 +5,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"sync"
@@ -165,10 +164,7 @@ func walkCollectRel(t *testing.T, root string, opts WalkOptions) (dirs, files, s
 func TestWalkStream_BasicTraversal(t *testing.T) {
 	root := createTestTree(t)
 
-	dirs, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden:  true,
-		SkipHiddenDirs: false,
-	})
+	dirs, files := drainWalkStream(t, root, WalkOptions{IncludeHidden: true})
 
 	wantDirs := []string{"a", "a/sub", "a/sub/deep", "b"}
 	wantFiles := []string{
@@ -187,10 +183,7 @@ func TestWalkStream_ContextCancellation(t *testing.T) {
 	root := createTestTree(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{
-		IncludeHidden:  true,
-		SkipHiddenDirs: false,
-	})
+	dirChan, fileChan, _, errChan := WalkStream(ctx, root, WalkOptions{IncludeHidden: true})
 
 	// Read one entry then cancel
 	select {
@@ -239,10 +232,7 @@ func TestWalkStream_HiddenFiles(t *testing.T) {
 		[]string{"visible.txt", ".hidden_file", ".hidden_dir/inside.txt"},
 	)
 
-	dirs, files := drainWalkStream(t, root, WalkOptions{
-		IncludeHidden:  false,
-		SkipHiddenDirs: true,
-	})
+	dirs, files := drainWalkStream(t, root, WalkOptions{IncludeHidden: false})
 
 	// Should only see visible items
 	if !slices.Equal(dirs, []string{"visible"}) {
@@ -334,7 +324,7 @@ func TestWalkStream_PerChannelOrdering(t *testing.T) {
 }
 
 // TestWalkStream_WalkCollectConsistency pins WalkStream and WalkCollect to the
-// same entry set for the same options, with and without symlink following.
+// same entry set for the same options, with and without links.
 func TestWalkStream_WalkCollectConsistency(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -343,12 +333,12 @@ func TestWalkStream_WalkCollectConsistency(t *testing.T) {
 	}{
 		{
 			name: "no_symlinks",
-			opts: WalkOptions{IncludeHidden: true, SkipHiddenDirs: true},
+			opts: WalkOptions{IncludeHidden: true},
 		},
 		{
 			name:  "following_symlinks",
 			links: [][2]string{{"b", "link_to_b"}, {"file0.txt", "link_file.txt"}},
-			opts:  WalkOptions{IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true},
+			opts:  WalkOptions{IncludeHidden: true},
 		},
 	}
 
@@ -375,34 +365,23 @@ func TestWalkStream_WalkCollectConsistency(t *testing.T) {
 // walker reports such a link as skipped instead (inode_windows.go).
 const noDirLinksOnWindows = "Windows does not follow links to directories"
 
-// TestWalkStream_FollowSymlinks covers what a followed link contributes to the
-// walk. Every row builds a tree, adds its links, and drains WalkStream with the
-// same options bar FollowSymlinks; the wants are membership claims, since a row
-// only cares about the aliased entries.
+// TestWalkStream_FollowSymlinks covers what a followed link to a file
+// contributes to the walk, and that a broken link contributes nothing. Every row
+// builds a tree, adds its links, and drains WalkStream; the wants are
+// membership claims, since a row only cares about the linked entries. Links to
+// directories are TestWalk_FollowsLinksButNotLoops's (see noDirLinksOnWindows).
 func TestWalkStream_FollowSymlinks(t *testing.T) {
 	tests := []struct {
 		name        string
 		tree        func(*testing.T) string // nil: createTestTree
 		links       [][2]string
-		follow      bool
-		dirLink     bool // follows a link to a directory; see noDirLinksOnWindows
-		wantDirs    []string
 		wantFiles   []string
 		absentDirs  []string
 		absentFiles []string
 	}{
 		{
-			name:      "symlinked_dir",
-			links:     [][2]string{{"b", "link_to_b"}},
-			follow:    true,
-			dirLink:   true,
-			wantDirs:  []string{"link_to_b"},
-			wantFiles: []string{"b/file5.txt", "link_to_b/file5.txt"},
-		},
-		{
 			name:      "symlinked_file",
 			links:     [][2]string{{"file0.txt", "a/link_file.txt"}},
-			follow:    true,
 			wantFiles: []string{"a/link_file.txt"},
 		},
 		{
@@ -410,62 +389,14 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			name:        "broken_symlink",
 			tree:        func(t *testing.T) string { return mkTree(t, nil, []string{"file.txt"}) },
 			links:       [][2]string{{"/nonexistent/path/that/does/not/exist", "broken_link"}},
-			follow:      true,
 			wantFiles:   []string{"file.txt"},
 			absentDirs:  []string{"broken_link"},
 			absentFiles: []string{"broken_link"},
-		},
-		{
-			name:        "not_following_skips_links",
-			links:       [][2]string{{"b", "link_to_b"}, {"file0.txt", "link_file.txt"}},
-			follow:      false,
-			absentDirs:  []string{"link_to_b"},
-			absentFiles: []string{"link_file.txt"},
-		},
-		{
-			// Entries from the aliased walk keep the alias prefix: "link/...",
-			// never the resolved "a/sub/...".
-			name:      "path_rewriting",
-			links:     [][2]string{{"a/sub", "link"}},
-			follow:    true,
-			dirLink:   true,
-			wantDirs:  []string{"link", "link/deep"},
-			wantFiles: []string{"link/file3.txt", "link/deep/file4.txt"},
-		},
-		{
-			// BOTH aliases produce entries (ancestry stack, not global dedup).
-			name:      "duplicate_aliases",
-			tree:      func(t *testing.T) string { return mkTree(t, nil, []string{"shared/data.txt"}) },
-			links:     [][2]string{{"shared", "linkA"}, {"shared", "linkB"}},
-			follow:    true,
-			dirLink:   true,
-			wantFiles: []string{"linkA/data.txt", "linkB/data.txt", "shared/data.txt"},
-		},
-		{
-			name:     "alias_root_dir_entry",
-			links:    [][2]string{{"a/sub", "link_to_sub"}},
-			follow:   true,
-			dirLink:  true,
-			wantDirs: []string{"link_to_sub"},
-		},
-		{
-			// A sibling link to an already-visited directory is not a cycle. This
-			// validates the depth-indexed ancestry map against a wrong global dedup.
-			name:      "sibling_no_cycle",
-			tree:      func(t *testing.T) string { return mkTree(t, []string{"b"}, []string{"a/sub/file.txt"}) },
-			links:     [][2]string{{"a/sub", "b/link"}},
-			follow:    true,
-			dirLink:   true,
-			wantDirs:  []string{"b/link"},
-			wantFiles: []string{"b/link/file.txt"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.dirLink && runtime.GOOS == "windows" {
-				t.Skip(noDirLinksOnWindows)
-			}
 			makeTree := tc.tree
 			if makeTree == nil {
 				makeTree = createTestTree
@@ -473,15 +404,8 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 			root := makeTree(t)
 			addSymlinks(t, root, tc.links)
 
-			dirs, files := drainWalkStream(t, root, WalkOptions{
-				IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: tc.follow,
-			})
+			dirs, files := drainWalkStream(t, root, WalkOptions{IncludeHidden: true})
 
-			for _, want := range tc.wantDirs {
-				if !slices.Contains(dirs, want) {
-					t.Errorf("expected %q in dirs, got: %v", want, dirs)
-				}
-			}
 			for _, want := range tc.wantFiles {
 				if !slices.Contains(files, want) {
 					t.Errorf("expected %q in files, got: %v", want, files)
@@ -498,71 +422,6 @@ func TestWalkStream_FollowSymlinks(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestWalkStream_FollowSymlinks_NoHang covers the links that would walk forever
-// without cycle detection. The only assertion is that the walk finishes.
-func TestWalkStream_FollowSymlinks_NoHang(t *testing.T) {
-	tests := []struct {
-		name  string
-		tree  func(*testing.T) string
-		links [][2]string
-	}{
-		{
-			name:  "cycle_to_ancestor",
-			tree:  func(t *testing.T) string { return mkTree(t, nil, []string{"a/file.txt"}) },
-			links: [][2]string{{"a", "a/loop"}},
-		},
-		{
-			name:  "self_reference_to_root",
-			tree:  func(t *testing.T) string { return mkTree(t, nil, []string{"file.txt"}) },
-			links: [][2]string{{".", "self"}},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			root := tc.tree(t)
-			addSymlinks(t, root, tc.links)
-
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				drainWalkStream(t, root, WalkOptions{
-					IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-				})
-			}()
-
-			select {
-			case <-done:
-			case <-time.After(10 * time.Second):
-				t.Fatal("walk did not complete within timeout")
-			}
-		})
-	}
-}
-
-func TestWalkCollect_FollowSymlinks(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip(noDirLinksOnWindows)
-	}
-	root := createTestTree(t)
-	addSymlinks(t, root, [][2]string{{"b", "link_to_b"}})
-
-	dirs, files, symlinks := walkCollectRel(t, root, WalkOptions{
-		IncludeHidden: true, SkipHiddenDirs: true, FollowSymlinks: true,
-	})
-
-	if !slices.Contains(dirs, "link_to_b") {
-		t.Errorf("expected link_to_b in dirs, got: %v", dirs)
-	}
-	if !slices.Contains(files, "link_to_b/file5.txt") {
-		t.Errorf("expected link_to_b/file5.txt in files, got: %v", files)
-	}
-	// Symlinks slice should be empty when following.
-	if len(symlinks) != 0 {
-		t.Errorf("expected 0 symlinks when following, got: %v", symlinks)
 	}
 }
 
@@ -634,37 +493,5 @@ func TestWalkStream_SkippedChannelDrainsCleanly(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	default:
-	}
-}
-
-// TestWalkCollect_SymlinkSliceContainsBrokenSymlinks verifies the existing
-// Symlinks-slice behavior. On Unix, getDirIdentity always succeeds, so this
-// test does not exercise the unidentifiable branch directly — but it documents
-// the contract that the Symlinks slice is the surface for "we walked it but
-// couldn't follow it" cases.
-func TestWalkCollect_SymlinkSliceContainsBrokenSymlinks(t *testing.T) {
-	root := mkTree(t, nil, []string{"real.txt"})
-	// Symlink pointing at a non-existent target: Stat will fail.
-	addSymlinks(t, root, [][2]string{{"missing.txt", "broken_link"}})
-
-	result, err := WalkCollect(root, WalkOptions{
-		IncludeHidden:  true,
-		FollowSymlinks: false, // Without follow, all symlinks land in Symlinks.
-	})
-	if err != nil {
-		t.Fatalf("WalkCollect: %v", err)
-	}
-
-	foundLink := false
-	for _, e := range result.Symlinks {
-		if filepath.Base(e.Path) == "broken_link" {
-			foundLink = true
-			if !e.IsSymlink {
-				t.Errorf("broken_link entry IsSymlink=false, want true")
-			}
-		}
-	}
-	if !foundLink {
-		t.Errorf("broken_link not in result.Symlinks: %+v", result.Symlinks)
 	}
 }

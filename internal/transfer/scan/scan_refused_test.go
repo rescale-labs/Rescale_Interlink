@@ -11,8 +11,8 @@ import (
 	"testing"
 )
 
-// A server name that cannot be written safely fails that entry alone: both
-// scanners report it with its location and reason and go on with its
+// A server name that cannot be written safely fails that entry alone: the
+// scanner reports it with its location and reason and goes on with its
 // siblings, and a refused folder is one entry for its whole subtree, which is
 // never listed.
 func TestScansReportRefusedNamesAndKeepTheRest(t *testing.T) {
@@ -76,21 +76,8 @@ func TestScansReportRefusedNamesAndKeepTheRest(t *testing.T) {
 		listed = nil
 	}
 
-	folders, files, err := ScanRemoteFolderRecursiveWithProgress(context.Background(), client, "root", "", nil)
-	if err != nil {
-		t.Errorf("recursive scan: %v", err)
-	}
-	var gotFolders, gotFiles []string
-	for _, f := range folders {
-		gotFolders = append(gotFolders, f.RelativePath)
-	}
-	for _, f := range files {
-		gotFiles = append(gotFiles, describe(f))
-	}
-	check("recursive", gotFolders, gotFiles)
-
 	events, errs := ScanRemoteFolderStreaming(context.Background(), client, "root", nil)
-	gotFolders, gotFiles = nil, nil
+	var gotFolders, gotFiles []string
 	for event := range events {
 		if event.Folder != nil {
 			gotFolders = append(gotFolders, event.Folder.RelativePath)

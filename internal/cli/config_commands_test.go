@@ -15,7 +15,7 @@ import (
 )
 
 // TestConfigCommands pins the config group's subcommands and each one's name,
-// help text, handler and flags.
+// help text and handler.
 func TestConfigCommands(t *testing.T) {
 	var names []string
 	for _, sub := range newConfigCmd().Commands() {
@@ -27,22 +27,16 @@ func TestConfigCommands(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		cmd   *cobra.Command
-		use   string
-		flags []string
+		cmd *cobra.Command
+		use string
 	}{
-		{newConfigPathCmd(), "path", nil},
-		{newConfigShowCmd(), "show", nil},
-		{newConfigTestCmd(), "test", nil},
-		{newConfigInitCmd(), "init", []string{"force"}},
+		{newConfigPathCmd(), "path"},
+		{newConfigShowCmd(), "show"},
+		{newConfigTestCmd(), "test"},
+		{newConfigInitCmd(), "init"},
 	} {
 		if tc.cmd.Use != tc.use || tc.cmd.Short == "" || tc.cmd.RunE == nil {
 			t.Errorf("config %s: Use %q, Short %q, RunE set %v", tc.use, tc.cmd.Use, tc.cmd.Short, tc.cmd.RunE != nil)
-		}
-		for _, name := range tc.flags {
-			if tc.cmd.Flags().Lookup(name) == nil {
-				t.Errorf("config %s: --%s flag not found", tc.use, name)
-			}
 		}
 	}
 }

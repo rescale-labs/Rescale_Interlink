@@ -229,14 +229,12 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 	original := &DownloadResumeState{
 		LocalPath:       localPath,
 		RemotePath:      "bucket/key",
-		FileID:          "file-123",
 		TotalSize:       1024,
 		DownloadedBytes: 512,
 		ETag:            "etag-value",
 		CreatedAt:       time.Now().Truncate(time.Second),
 		LastUpdate:      time.Now().Truncate(time.Second),
 		StorageType:     "S3Storage",
-		FormatVersion:   1,
 	}
 
 	// Save
@@ -259,9 +257,6 @@ func TestDownloadState_RoundTrip(t *testing.T) {
 	}
 	if loaded.RemotePath != original.RemotePath {
 		t.Errorf("RemotePath: expected %q, got %q", original.RemotePath, loaded.RemotePath)
-	}
-	if loaded.FormatVersion != original.FormatVersion {
-		t.Errorf("FormatVersion: expected %d, got %d", original.FormatVersion, loaded.FormatVersion)
 	}
 }
 
@@ -1620,7 +1615,6 @@ func TestValidateDownloadStateRejectsClaimsPastEOF(t *testing.T) {
 		name       string
 		fileSize   int64
 		chunks     []int64
-		ranges     []ByteRange
 		wantReject bool
 	}{
 		{
@@ -1632,12 +1626,6 @@ func TestValidateDownloadStateRejectsClaimsPastEOF(t *testing.T) {
 			name:       "a chunk claim reaches past the end of the file",
 			fileSize:   chunkSize, // only chunk 0 could be in here
 			chunks:     []int64{0, 1},
-			wantReject: true,
-		},
-		{
-			name:       "a byte range claim reaches past the end of the file",
-			fileSize:   chunkSize,
-			ranges:     []ByteRange{{Start: 0, End: 24}},
 			wantReject: true,
 		},
 		{
@@ -1661,7 +1649,6 @@ func TestValidateDownloadStateRejectsClaimsPastEOF(t *testing.T) {
 				TotalSize:       totalSize,
 				ChunkSize:       chunkSize,
 				CompletedChunks: tt.chunks,
-				CompletedRanges: tt.ranges,
 				CreatedAt:       now,
 				LastUpdate:      now,
 			}

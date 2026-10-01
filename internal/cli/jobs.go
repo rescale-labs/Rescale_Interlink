@@ -18,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/parser"
+	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/util/analysis"
 	"github.com/rescale/rescale-int/internal/util/filter"
 	"github.com/rescale/rescale-int/internal/validation"
@@ -386,10 +387,10 @@ Examples:
 				return fmt.Errorf("either --job-file/--script OR --job-id is required")
 			}
 			if jobFile != "" && scriptFile != "" {
-				return fmt.Errorf("cannot specify both --job-file and --script")
+				return reporting.UsageError(fmt.Errorf("cannot specify both --job-file and --script"))
 			}
 			if hasJobSpec && hasJobID {
-				return fmt.Errorf("cannot specify both job specification (--job-file/--script) and --job-id")
+				return reporting.UsageError(fmt.Errorf("cannot specify both job specification (--job-file/--script) and --job-id"))
 			}
 
 			// Count workflow flags
@@ -1008,7 +1009,7 @@ Examples:
 	cmd.Flags().BoolVarP(&overwriteAll, "overwrite", "w", false, "Overwrite existing files without prompting")
 	cmd.Flags().BoolVarP(&skipAll, "skip", "S", false, "Skip existing files without prompting")
 	cmd.Flags().BoolVarP(&resumeAll, "resume", "r", false, "Resume interrupted downloads without prompting")
-	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, "Warn instead of failing when the checksum does not match (not recommended; the file-size check still applies)")
+	cmd.Flags().BoolVar(&skipChecksum, "skip-checksum", false, skipChecksumUsage)
 	cmd.Flags().StringVar(&filterPatterns, "filter", "", "Include only files matching these patterns (comma-separated glob patterns, e.g. \"*.dat,*.log\")")
 	cmd.Flags().StringVarP(&excludePatterns, "exclude", "x", "", "Exclude files matching these patterns (comma-separated glob patterns, e.g. \"debug*,temp*\")")
 	cmd.Flags().StringVarP(&searchTerms, "search", "s", "", "Include only files containing these terms in filename (comma-separated, case-insensitive)")

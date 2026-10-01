@@ -74,7 +74,7 @@ func streamLinkWalk(t *testing.T, root string) linkWalk {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	dirChan, fileChan, skippedChan, errChan := WalkStream(ctx, root, WalkOptions{IncludeHidden: true, FollowSymlinks: true})
+	dirChan, fileChan, skippedChan, errChan := WalkStream(ctx, root, WalkOptions{IncludeHidden: true})
 	w := linkWalk{skipped: map[string]string{}}
 	var seen atomic.Int64
 	var wg sync.WaitGroup
@@ -105,7 +105,7 @@ func streamLinkWalk(t *testing.T, root string) linkWalk {
 
 func collectLinkWalk(t *testing.T, root string) linkWalk {
 	t.Helper()
-	result, err := WalkCollect(root, WalkOptions{IncludeHidden: true, FollowSymlinks: true})
+	result, err := WalkCollect(root, WalkOptions{IncludeHidden: true})
 	if err != nil {
 		t.Fatalf("walk: %v", err)
 	}
@@ -165,8 +165,9 @@ func TestWalk_FollowsLinksButNotLoops(t *testing.T) {
 // TestWalk_FolderOnChainThroughAliasIsLoop covers a loop no link shows: a mount
 // alias or firmlink puts a folder the walk is inside at a second path (a link
 // to /System/Volumes/Data reaches /private that way), so a followed walk meets
-// it as a plain folder. It is left out as a loop. An alias cannot be made under
-// a temp dir, so the chain here holds sub as if one led to it.
+// it as a plain folder. It is left out as a loop, while the root's own walk
+// records it and goes in. An alias cannot be made under a temp dir, so the
+// chain here holds sub as if one led to it.
 func TestWalk_FolderOnChainThroughAliasIsLoop(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip(noDirLinksOnWindows)
@@ -178,23 +179,30 @@ func TestWalk_FolderOnChainThroughAliasIsLoop(t *testing.T) {
 	}
 	aliased := newAncestryMap()
 	aliased.entries[0], _ = getDirIdentity(info)
-	link, opts := filepath.Join(t.TempDir(), "link"), WalkOptions{IncludeHidden: true}
+	link, opts, ctx := filepath.Join(t.TempDir(), "link"), WalkOptions{IncludeHidden: true}, context.Background()
 
 	var streamed, collected WalkCollectResult
 	dirs, files, skipped := make(chan FileEntry, 9), make(chan FileEntry, 9), make(chan FileEntry, 9)
-	_ = walkSymlinkedDir(context.Background(), target, link, opts, aliased.below(target), dirs, files, skipped)
+	_ = walker{ctx: ctx, opts: opts, emit: sendTo(ctx, dirs, files, skipped)}.walk(target, link, aliased.below(target), true)
 	for list, ch := range map[*[]FileEntry]chan FileEntry{&streamed.Directories: dirs, &streamed.Files: files, &streamed.Symlinks: skipped} {
 		close(ch)
 		for e := range ch {
 			*list = append(*list, e)
 		}
 	}
-	_ = collectSymlinkedDir(target, link, opts, aliased.below(target), &collected)
+	_ = walker{ctx: ctx, opts: opts, emit: appendTo(&collected)}.walk(target, link, aliased.below(target), true)
 
 	want := linkWalk{files: []string{"y.txt"}, skipped: map[string]string{"sub": skipCycle}}
-	for name, got := range map[string]linkWalk{"walkSymlinkedDir": linksOf(link, &streamed), "collectSymlinkedDir": linksOf(link, &collected)} {
+	for name, got := range map[string]linkWalk{"streamed": linksOf(link, &streamed), "collected": linksOf(link, &collected)} {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%s:\n got %+v\nwant %+v", name, got, want)
 		}
+	}
+
+	var rooted WalkCollectResult
+	_ = walker{ctx: ctx, opts: opts, emit: appendTo(&rooted)}.walk(target, target, aliased.below(target), false)
+	want = linkWalk{dirs: []string{"sub"}, files: []string{"sub/x.txt", "y.txt"}, skipped: map[string]string{}}
+	if got := linksOf(target, &rooted); !reflect.DeepEqual(got, want) {
+		t.Errorf("the root's walk:\n got %+v\nwant %+v", got, want)
 	}
 }

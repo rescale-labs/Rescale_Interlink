@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -48,8 +47,8 @@ func runJobsDownload(t *testing.T, args ...string) ([]jobTransfer, error) {
 	}))
 	t.Cleanup(server.Close)
 
-	origClient, origList, origDownload := getAPIClientFn, listJobFilesFn, downloadFileFn
-	t.Cleanup(func() { getAPIClientFn, listJobFilesFn, downloadFileFn = origClient, origList, origDownload })
+	origClient, origList := getAPIClientFn, listJobFilesFn
+	t.Cleanup(func() { getAPIClientFn, listJobFilesFn = origClient, origList })
 
 	getAPIClientFn = func() (*api.Client, error) {
 		return api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"}), nil
@@ -59,22 +58,14 @@ func runJobsDownload(t *testing.T, args ...string) ([]jobTransfer, error) {
 	}
 	var mu sync.Mutex
 	var transfers []jobTransfer
-	downloadFileFn = func(_ context.Context, p download.DownloadParams) error {
+	_, err := runWithCancel(t, newJobsDownloadCmd(), func(_ context.Context, p download.DownloadParams) error {
 		_, targetErr := os.Stat(p.LocalPath)
 		_, encErr := os.Stat(p.LocalPath + ".encrypted")
 		mu.Lock()
 		transfers = append(transfers, jobTransfer{p.SkipChecksum, targetErr == nil, encErr == nil})
 		mu.Unlock()
 		return os.WriteFile(p.LocalPath, make([]byte, jobFileSize), 0o644)
-	}
-
-	cmd := newJobsDownloadCmd()
-	cmd.SetArgs(append([]string{"--job-id", "job123"}, args...))
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SilenceUsage = true
-
-	err := cmd.Execute()
+	}, append([]string{"--job-id", "job123"}, args...)...)
 	return transfers, err
 }
 
@@ -172,24 +163,19 @@ func runRefusedJobsDownload(t *testing.T, args ...string) error {
 		return nil, errors.New("no client for a refused command")
 	}
 	t.Cleanup(func() { getAPIClientFn = orig })
-
-	cmd := newJobsDownloadCmd()
-	cmd.SetArgs(append([]string{"--job-id", "job123"}, args...))
-	cmd.SetOut(io.Discard)
-	cmd.SetErr(io.Discard)
-	cmd.SilenceUsage = true
-	return cmd.Execute()
+	_, err := runWithCancel(t, newJobsDownloadCmd(), nil, append([]string{"--job-id", "job123"}, args...)...)
+	return err
 }
 
 // Each mode ignored the other's flags without a word, and --file-id with a
 // directory as --output, however spelled, wrote <dir>.file or <dir>/.file. All
-// are refused before any work starts, and nothing is written.
+// are refused before any work starts, and nothing is written. The spellings are
+// namesDirectory's, which config init shares; its test has each of them.
 func TestJobsDownloadRefusesTheOtherModesFlags(t *testing.T) {
 	t.Chdir(t.TempDir())
 	if err := os.Mkdir("results", 0o755); err != nil {
 		t.Fatal(err)
 	}
-	sep := string(filepath.Separator)
 	for _, tt := range []struct {
 		args []string
 		want string
@@ -201,9 +187,6 @@ func TestJobsDownloadRefusesTheOtherModesFlags(t *testing.T) {
 		{[]string{"--file-id", "f1", "--search", "final"}, "--search"},
 		{[]string{"--file-id", "f1", "--path-filter", "run_1/*"}, "--path-filter"},
 		{[]string{"--file-id", "f1", "--output", "results"}, "names a directory"},
-		{[]string{"--file-id", "f1", "--output", "new" + sep}, "names a directory"},
-		{[]string{"--file-id", "f1", "--output", "new" + sep + "."}, "names a directory"},
-		{[]string{"--file-id", "f1", "--output", "new" + sep + ".."}, "names a directory"},
 		{[]string{"-o", "results"}, "use --outdir"},
 		{[]string{"-m", "0"}, "--max-concurrent must be between 1 and 20, got 0"},
 		{[]string{"-m", "21"}, "got 21"},

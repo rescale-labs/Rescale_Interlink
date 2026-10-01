@@ -319,7 +319,7 @@ Use --force to overwrite an existing configuration or token file.`,
 
 			// Save API key to a separate token file (for security, not in config CSV).
 			// Use config.WriteTokenFile so the file picks up the Windows
-			// explicit-ACL tightening (spec §11.2) on par with the GUI path.
+			// explicit-ACL tightening on par with the GUI path.
 			// It creates the directory owner-only, as SaveConfigCSV does. Without
 			// --force the create is exclusive: a token that appeared during the
 			// prompts is refused, not replaced.

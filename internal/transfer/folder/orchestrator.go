@@ -129,11 +129,7 @@ func RunOrchestrator[T any](
 	discoveryCtx, stopDiscovery := context.WithCancel(ctx)
 
 	// Start streaming walk — directories and files arrive as they're discovered.
-	dirChan, fileChan, skippedChan, walkErrChan := localfs.WalkStream(discoveryCtx, cfg.RootPath, localfs.WalkOptions{
-		IncludeHidden:  cfg.IncludeHidden,
-		SkipHiddenDirs: true,
-		FollowSymlinks: true,
-	})
+	dirChan, fileChan, skippedChan, walkErrChan := localfs.WalkStream(discoveryCtx, cfg.RootPath, localfs.WalkOptions{IncludeHidden: cfg.IncludeHidden})
 
 	// Drain skippedChan to surface entries the walker chose to skip.
 	// Always drain (even when no callback is wired) so the walker is not

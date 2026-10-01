@@ -14,7 +14,6 @@ import (
 	"github.com/rescale/rescale-int/internal/cloud"
 	"github.com/rescale/rescale-int/internal/cloud/credentials"
 	"github.com/rescale/rescale-int/internal/cloud/providers"
-	"github.com/rescale/rescale-int/internal/cloud/state"
 	cloudtransfer "github.com/rescale/rescale-int/internal/cloud/transfer"
 	"github.com/rescale/rescale-int/internal/crypto"
 	"github.com/rescale/rescale-int/internal/models"
@@ -191,11 +190,6 @@ func DownloadFile(ctx context.Context, params DownloadParams) error {
 	checksumTimer.StopWithThroughput(fileInfo.DecryptedSize)
 
 	overallTimer.StopWithThroughput(fileInfo.DecryptedSize)
-
-	// Clean up resume state file on successful download.
-	// This prevents stale resume state from accumulating and ensures
-	// future downloads of the same file don't erroneously attempt to resume.
-	state.DeleteDownloadState(params.LocalPath)
 
 	return nil
 }

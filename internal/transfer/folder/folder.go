@@ -84,11 +84,7 @@ func (fc *FolderCache) Invalidate(folderID string) {
 // files, and the links it left out, each with its SkipReason.
 func BuildDirectoryTree(rootPath string, includeHidden bool) ([]string, []string, []localfs.FileEntry, error) {
 	// Use shared localfs.WalkCollect() for core directory walking
-	result, err := localfs.WalkCollect(rootPath, localfs.WalkOptions{
-		IncludeHidden:  includeHidden,
-		SkipHiddenDirs: true, // Skip hidden directories entirely
-		FollowSymlinks: true,
-	})
+	result, err := localfs.WalkCollect(rootPath, localfs.WalkOptions{IncludeHidden: includeHidden})
 	if err != nil {
 		return nil, nil, nil, err
 	}

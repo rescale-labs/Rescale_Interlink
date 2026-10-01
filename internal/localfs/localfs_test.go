@@ -187,7 +187,7 @@ func TestWalkCollect(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, ".hidden_dir", "file3.txt"), []byte("3"), 0644)
 
 	t.Run("exclude hidden files only", func(t *testing.T) {
-		result, err := WalkCollect(tmpDir, WalkOptions{IncludeHidden: false, SkipHiddenDirs: true})
+		result, err := WalkCollect(tmpDir, WalkOptions{IncludeHidden: false})
 		if err != nil {
 			t.Fatal(err)
 		}

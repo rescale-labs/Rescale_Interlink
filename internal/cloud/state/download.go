@@ -12,20 +12,12 @@ import (
 	"github.com/rescale/rescale-int/internal/validation"
 )
 
-// ByteRange represents a completed byte range in the output file.
-type ByteRange struct {
-	Start int64 `json:"start"` // Starting byte offset (inclusive)
-	End   int64 `json:"end"`   // Ending byte offset (exclusive)
-}
-
 // DownloadResumeState tracks the state of an in-progress download for resumption.
-// Supports both legacy (FormatVersion=0) and streaming (FormatVersion=1) encryption.
 type DownloadResumeState struct {
 	LocalPath       string    `json:"local_path"`       // Destination file path
 	EncryptedPath   string    `json:"encrypted_path"`   // Encrypted temp file path (.encrypted) - legacy v0 only
 	RemotePath      string    `json:"remote_path"`      // S3 object key or Azure blob path
-	FileID          string    `json:"file_id"`          // Rescale file ID
-	TotalSize       int64     `json:"total_size"`       // Total encrypted file size (v0) or original plaintext size (v1)
+	TotalSize       int64     `json:"total_size"`       // Total encrypted file size
 	DownloadedBytes int64     `json:"downloaded_bytes"` // Bytes downloaded so far
 	ETag            string    `json:"etag"`             // ETag for validation
 	CreatedAt       time.Time `json:"created_at"`
@@ -35,11 +27,6 @@ type DownloadResumeState struct {
 	// Concurrent download support
 	ChunkSize       int64   `json:"chunk_size,omitempty"`       // Size of each chunk (0 for sequential)
 	CompletedChunks []int64 `json:"completed_chunks,omitempty"` // List of completed chunk indices
-
-	// Byte range tracking for accurate resume
-	CompletedRanges []ByteRange `json:"completed_ranges,omitempty"` // Exact byte ranges written to disk
-
-	FormatVersion int `json:"format_version"` // 0=legacy, 1=streaming
 }
 
 // =============================================================================
@@ -177,9 +164,9 @@ func (s *DownloadResumeState) MarkChunkCompleted(chunkIndex int64, chunkSize int
 }
 
 // claimedEnd returns the offset one past the last byte this state claims is on
-// disk, taking the furthest of its completed chunks and its recorded byte
-// ranges. A chunk's claim ends at the chunk boundary or at TotalSize, whichever
-// comes first, because the last chunk of an object is short.
+// disk, taking the furthest of its completed chunks. A chunk's claim ends at the
+// chunk boundary or at TotalSize, whichever comes first, because the last chunk
+// of an object is short.
 func (s *DownloadResumeState) claimedEnd() int64 {
 	var end int64
 	if s.ChunkSize > 0 {
@@ -191,11 +178,6 @@ func (s *DownloadResumeState) claimedEnd() int64 {
 			if chunkEnd > end {
 				end = chunkEnd
 			}
-		}
-	}
-	for _, r := range s.CompletedRanges {
-		if r.End > end {
-			end = r.End
 		}
 	}
 	return end

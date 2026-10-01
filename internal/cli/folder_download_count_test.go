@@ -9,8 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/cloud/download"
@@ -257,5 +260,71 @@ func TestDownloadFolderRecursive_CountsFolders(t *testing.T) {
 				t.Errorf("counted %d folders created and printed\n%s\nwant %d and %q", result.FoldersCreated, printed, tc.created, tc.said)
 			}
 		})
+	}
+}
+
+// The scan's progress line counts everything found so far. Each folder used to
+// report its own subtree, so the line read "0 folders" once a subfolder had
+// been listed and dropped back as each one finished. A listing that fails ends
+// the download before any folder is made, without waiting for another listing
+// still out, and so does a cancel.
+func TestDownloadFolderRecursive_ScanCountsEverythingFound(t *testing.T) {
+	folder := func(id string) string { return `{"type":"folder","item":{"id":"` + id + `","name":"` + id + `"}}` }
+	file := func(id string) string {
+		return `{"type":"file","item":{"id":"` + id + `","name":"` + id + `.dat","decryptedSize":1}}`
+	}
+	for _, tc := range []string{"complete", "a listing fails", "cancelled"} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case strings.Contains(r.URL.Path, "/folder123/") && tc == "a listing fails":
+				fmt.Fprint(w, `{"results":[`+folder("sub")+`,`+folder("waits")+`]}`)
+			case strings.Contains(r.URL.Path, "/folder123/"):
+				fmt.Fprint(w, `{"results":[`+folder("sub")+`,`+file("a")+`,`+file("b")+`]}`)
+			case strings.Contains(r.URL.Path, "/waits/"): // answers only once the scan gives up on it
+				select {
+				case <-r.Context().Done():
+				case <-time.After(time.Minute):
+					t.Error("a listing still ran a minute after another had failed")
+				}
+			case tc == "a listing fails":
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprint(w, `{"detail":"FAKE refusal"}`)
+			default:
+				fmt.Fprint(w, `{"results":[`+file("c")+`,`+file("d")+`,`+file("e")+`]}`)
+			}
+		}))
+		client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+		ctx, cancel := context.WithCancel(context.Background())
+		if tc == "cancelled" {
+			cancel()
+		}
+		outDir := t.TempDir()
+		var err error
+		said := captureStderr(t, func() {
+			captureStdout(t, func() {
+				_, err = DownloadFolderRecursive(ctx, "folder123", "myfolder", outDir,
+					false, false, true, false, 1, true, false, client, logging.NewLoggerWithWriter(io.Discard),
+					resources.NewManager(resources.Config{AutoScale: true, MaxThreads: 4}))
+			})
+		})
+		cancel()
+		server.Close()
+		if tc != "complete" {
+			if _, statErr := os.Stat(filepath.Join(outDir, "myfolder")); err == nil || !os.IsNotExist(statErr) {
+				t.Errorf("%s: returned %v, root folder stat %v; want an error and no folder", tc, err, statErr)
+			}
+			continue
+		}
+		lines := regexp.MustCompile(`Scanning: \d+ folders, \d+ files`).FindAllString(said, -1)
+		if err != nil || len(lines) == 0 || !slices.Contains(lines, "Scanning: 1 folders, 5 files") {
+			t.Errorf("returned %v, progress %q; want the whole tree counted", err, lines)
+		}
+		for _, line := range lines {
+			if !strings.HasPrefix(line, "Scanning: 1 folders") {
+				t.Errorf("progress %q: the one folder was already found", lines)
+				break
+			}
+		}
 	}
 }

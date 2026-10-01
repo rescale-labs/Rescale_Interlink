@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -79,7 +80,6 @@ type DownloadError struct {
 }
 
 // DownloadFolderRecursive recursively downloads a folder and all its contents.
-// Exported for GUI reuse.
 // folderName: optional name for the downloaded folder. If empty, uses folderID.
 func DownloadFolderRecursive(
 	ctx context.Context,
@@ -169,12 +169,7 @@ func DownloadFolderRecursive(
 
 	// Scan the remote folder structure with live progress
 	fmt.Println("📡 Scanning remote folder structure...")
-	allFolders, allFiles, err := scan.ScanRemoteFolderRecursiveWithProgress(ctx, apiClient, folderID, "",
-		func(foldersFound, filesFound int, bytesFound int64) {
-			fmt.Fprintf(os.Stderr, "\r  Scanning: %d folders, %d files (%.1f MB)...",
-				foldersFound, filesFound, float64(bytesFound)/(1024*1024))
-		},
-	)
+	allFolders, allFiles, err := scanRemoteFolder(ctx, apiClient, folderID)
 	fmt.Fprintf(os.Stderr, "\r%80s\r", "") // Clear the progress line
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan remote folder: %w", err)
@@ -348,25 +343,20 @@ func DownloadFolderRecursive(
 			return nil // not started
 		}
 
-		localPath := filepath.Join(rootOutputDir, task.RelativePath)
-
-		// Check if path exists as a directory (name collision with folder)
-		if info, statErr := os.Lstat(localPath); statErr == nil && info.IsDir() {
-			originalPath := localPath
-			localPath = localPath + ".file"
+		wanted := filepath.Join(rootOutputDir, task.RelativePath)
+		localPath, info, err := downloadTarget(wanted)
+		if localPath != wanted {
 			logger.Warn().
-				Str("original_path", originalPath).
+				Str("original_path", wanted).
 				Str("renamed_to", localPath).
 				Msg("File name conflicts with existing directory, renaming file")
 		}
-		// Before any conflict handling, which would remove, follow or keep it.
-		if err := validation.ValidateDownloadTarget(localPath); err != nil {
+		if err != nil {
 			fmt.Fprintf(downloadUI.Writer(), "✗ %v\n", err)
 			return fail(localPath, task.FileID, err, false)
 		}
 
-		// Check if file exists and handle conflict
-		if info, err := os.Stat(localPath); err == nil && !info.IsDir() {
+		if info != nil {
 			// A conflict it cannot settle has no bar to say why it failed.
 			conflictFailed := func(err error, abort bool) error {
 				fail(localPath, task.FileID, err, abort) // stop before a write that can block
@@ -436,7 +426,7 @@ func DownloadFolderRecursive(
 
 		transferHandle := cliTransferMgr.AllocateTransfer(task.Size, numWorkers)
 
-		err := downloadFileFn(ctx, download.DownloadParams{
+		err = downloadFileFn(ctx, download.DownloadParams{
 			FileID:         task.FileID,
 			FileInfo:       task.CloudFile,
 			LocalPath:      localPath,
@@ -446,6 +436,7 @@ func DownloadFolderRecursive(
 				fileBar.UpdateProgress(fraction)
 			},
 			OnRetry:      retryReporter(fileBar, downloadUI.Writer()),
+			OutputWriter: timingWriter(downloadUI),
 			SkipChecksum: skipChecksum,
 		})
 		transferHandle.Complete()
@@ -453,8 +444,8 @@ func DownloadFolderRecursive(
 		if err != nil {
 			fileBar.Complete(err)
 
-			if state.DownloadResumeStateExists(localPath) {
-				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume, re-run the download command.\n", filepath.Base(localPath))
+			if state.DownloadResumeStateExists(localPath + ".encrypted") {
+				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume, run the download again with --merge.\n", filepath.Base(localPath))
 			}
 			return fail(localPath, task.FileID, err, false)
 		}
@@ -484,6 +475,51 @@ func DownloadFolderRecursive(
 	result.FilesNotStarted = len(allFiles) - result.FilesDownloaded - result.FilesSkipped - result.FilesFailed
 
 	return result, nil
+}
+
+// scanRemoteFolder lists the whole tree under folderID, with a running count
+// on stderr, and returns it in path order, entries at one path in the API's
+// order. The first listing that fails cancels the others: the download does
+// not start without all of it.
+func scanRemoteFolder(ctx context.Context, apiClient *api.Client, folderID string) ([]scan.RemoteFolderInfo, []scan.RemoteFileTask, error) {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	events, errs := scan.ScanRemoteFolderStreaming(ctx, apiClient, folderID, func(p scan.ScanProgress) {
+		fmt.Fprintf(os.Stderr, "\r  Scanning: %d folders, %d files (%.1f MB)...",
+			p.FoldersFound, p.FilesFound, float64(p.BytesFound)/(1024*1024))
+	})
+	var folders []scan.RemoteFolderInfo
+	var files []scan.RemoteFileTask
+	for events != nil {
+		select {
+		case err, ok := <-errs:
+			if !ok {
+				errs = nil // closed: the scan has ended, and what is left of events is buffered
+				continue
+			}
+			stop()
+			for range events { // let it end before the caller clears its progress line
+			}
+			return nil, nil, err
+		case event, ok := <-events:
+			switch {
+			case !ok:
+				events = nil
+			case event.Folder != nil:
+				folders = append(folders, *event.Folder)
+			default:
+				files = append(files, *event.File)
+			}
+		}
+	}
+	if errs != nil { // closed before events, so a failure not yet read waits in it
+		if err := <-errs; err != nil {
+			return nil, nil, err
+		}
+	}
+	slices.SortStableFunc(folders, func(a, b scan.RemoteFolderInfo) int { return strings.Compare(a.RelativePath, b.RelativePath) })
+	slices.SortStableFunc(files, func(a, b scan.RemoteFileTask) int { return strings.Compare(a.RelativePath, b.RelativePath) })
+	return folders, files, ctx.Err()
 }
 
 // folderDownloadWorkItem wraps scan.RemoteFileTask with index for BatchExecutor.

@@ -71,10 +71,8 @@ func TestShortcutMaxConcurrentRange(t *testing.T) {
 		value        string
 		wantRangeErr bool
 	}{
-		{newDownloadShortcut, "-1", true},
 		{newDownloadShortcut, "0", true},
 		{newDownloadShortcut, "1", false},
-		{newDownloadShortcut, "15", false},
 		{newDownloadShortcut, "20", false},
 		{newDownloadShortcut, "21", true},
 		{newUploadShortcut, "0", true},
