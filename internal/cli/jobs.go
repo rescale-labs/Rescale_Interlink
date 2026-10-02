@@ -771,8 +771,8 @@ Example:
 				return fmt.Errorf("--job-id (or --id) is required")
 			}
 
-			// Get API client
-			apiClient, err := getAPIClient()
+			// Get API client (via the test seam, so a command test can reach RunE)
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}

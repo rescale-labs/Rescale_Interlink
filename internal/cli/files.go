@@ -279,20 +279,13 @@ Examples:
 
 			logger.Info().Msg("Listing files")
 
-			// Get API client
-			apiClient, err := getAPIClient()
+			// Get API client (via the test seam, so a command test can reach RunE)
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
 
 			ctx := GetContext()
-
-			// Get file list
-			fmt.Println("Fetching file list from Rescale...")
-			allFiles, err := apiClient.ListFiles(ctx, limit)
-			if err != nil {
-				return fmt.Errorf("failed to list files: %w", err)
-			}
 
 			// Parse filter patterns
 			// Support legacy --filter flag or new flags
@@ -310,30 +303,36 @@ Examples:
 			if searchTerms != "" {
 				searchList = filter.ParsePatternList(searchTerms)
 			}
+			filterCfg := filter.Config{Include: filterList, Exclude: excludeList, Search: searchList}
+			filtering := len(filterList) > 0 || len(excludeList) > 0 || len(searchList) > 0
 
-			// Apply filters if any are specified
-			files := allFiles
-			if len(filterList) > 0 || len(excludeList) > 0 || len(searchList) > 0 {
-				var filtered []interface{}
-				for _, file := range allFiles {
-					if fileMap, ok := file.(map[string]interface{}); ok {
-						if name, ok := fileMap["name"].(string); ok {
-							filterCfg := filter.Config{
-								Include: filterList,
-								Exclude: excludeList,
-								Search:  searchList,
-							}
-							if filter.MatchesFilter(name, filterCfg) {
-								filtered = append(filtered, file)
-							}
-						}
-					}
+			// Pages are read until --limit files pass the filters, so a filter
+			// covers the whole library. The platform runs the search, and every
+			// name is still checked here. Unfiltered, every file passes, so
+			// pages of --limit files are all it takes.
+			pageSize := 0
+			if !filtering {
+				pageSize = limit
+			}
+			fmt.Println("Fetching file list from Rescale...")
+			var files []map[string]interface{}
+			checked := 0
+			err = apiClient.ListFiles(ctx, strings.Join(searchList, ","), pageSize, func(file map[string]interface{}) bool {
+				checked++
+				if name, _ := file["name"].(string); filter.MatchesFilter(name, filterCfg) {
+					files = append(files, file)
 				}
-				files = filtered
+				return limit <= 0 || len(files) < limit
+			})
+			if err != nil {
+				return fmt.Errorf("failed to list files: %w", err)
+			}
 
-				if len(files) < len(allFiles) {
-					fmt.Printf("Filtered: %d of %d files match filters\n", len(files), len(allFiles))
-				}
+			// Short of --limit, every file was checked; at --limit only those
+			// read so far were, and a count of them would pass for the library's.
+			stopped := limit > 0 && len(files) == limit
+			if filtering && !stopped && len(files) < checked {
+				fmt.Printf("Filtered: %d of %d files match filters\n", len(files), checked)
 			}
 
 			if len(files) == 0 {
@@ -346,32 +345,35 @@ Examples:
 			fmt.Printf("%-20s %-40s %-15s %s\n", "FILE ID", "NAME", "SIZE", "CREATED")
 			fmt.Println(strings.Repeat("-", 100))
 
-			for _, file := range files {
-				if fileMap, ok := file.(map[string]interface{}); ok {
-					id, _ := fileMap["id"].(string)
-					name, _ := fileMap["name"].(string)
-					if id == "" || name == "" {
-						continue
-					}
-					size := int64(0)
-					if s, ok := fileMap["decryptedSize"].(float64); ok {
-						size = int64(s)
-					}
-					created := ""
-					if c, ok := fileMap["dateUploaded"].(string); ok && len(c) >= 10 {
-						created = c[:10] // Just the date part
-					}
-
-					sizeMB := float64(size) / (1024 * 1024)
-					fmt.Printf("%-20s %-40s %10.2f MB   %s\n", id, name, sizeMB, created)
+			for _, fileMap := range files {
+				id, _ := fileMap["id"].(string)
+				name, _ := fileMap["name"].(string)
+				if id == "" || name == "" {
+					continue
 				}
+				size := int64(0)
+				if s, ok := fileMap["decryptedSize"].(float64); ok {
+					size = int64(s)
+				}
+				created := ""
+				if c, ok := fileMap["dateUploaded"].(string); ok && len(c) >= 10 {
+					created = c[:10] // Just the date part
+				}
+
+				sizeMB := float64(size) / (1024 * 1024)
+				fmt.Printf("%-20s %-40s %10.2f MB   %s\n", id, name, sizeMB, created)
+			}
+			// Whether more files exist is not known at --limit: finding out
+			// could mean reading the rest of the library.
+			if stopped {
+				fmt.Printf("(Stopped at --limit %d. Use --limit to change, 0 for all)\n", limit)
 			}
 
 			return nil
 		},
 	}
 
-	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "Maximum number of files to list")
+	cmd.Flags().IntVarP(&limit, "limit", "n", 20, "Maximum number of files to list (0 = all)")
 	cmd.Flags().StringVar(&filterName, "filter", "", "Filter files by name pattern (e.g., '*.tar.gz')")
 	cmd.Flags().MarkDeprecated("filter", "use --include instead")
 	cmd.Flags().StringVar(&filterPatterns, "include", "", "Include only files matching these patterns (comma-separated glob patterns, e.g. \"*.dat,*.log\")")

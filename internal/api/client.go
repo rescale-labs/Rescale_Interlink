@@ -1465,56 +1465,11 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*models.JobResponse,
 	return &job, nil
 }
 
+// ListJobs lists all of the user's jobs, 200 a page, the size the workspace
+// listing asks for: a page of 1000 jobs has not been timed against server and
+// proxy timeouts, and at 200 a history of 20,000 jobs still takes 100 requests.
 func (c *Client) ListJobs(ctx context.Context) ([]models.JobResponse, error) {
-	var allJobs []models.JobResponse
-	nextURL := "/api/v3/jobs/"
-	pageCount := 0
-
-	for nextURL != "" {
-		// Pagination safety: prevent infinite loops from malformed API responses
-		pageCount++
-		if pageCount > constants.MaxPaginationPages {
-			return nil, fmt.Errorf("jobs listing incomplete after %d pages", constants.MaxPaginationPages)
-		}
-		if pageCount == constants.PaginationWarningThreshold {
-			log.Printf("Warning: Approaching pagination limit (page %d of %d)", pageCount, constants.MaxPaginationPages)
-		}
-
-		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != nethttp.StatusOK {
-			body := readResponseBody(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("list jobs failed: status %d: %s", resp.StatusCode, body)
-		}
-
-		var result struct {
-			Count   int                  `json:"count"`
-			Next    *string              `json:"next"`
-			Results []models.JobResponse `json:"results"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decode jobs response: %w", err)
-		}
-
-		// Close body immediately after reading - don't use defer in loop
-		resp.Body.Close()
-
-		allJobs = append(allJobs, result.Results...)
-
-		if result.Next != nil && *result.Next != "" {
-			nextURL = extractAPIPath(*result.Next)
-		} else {
-			nextURL = ""
-		}
-	}
-
-	return allJobs, nil
+	return listAll[models.JobResponse](ctx, c, "jobs", "/api/v3/jobs/", 200)
 }
 
 // ListJobsPage fetches exactly one page of jobs ordered by newest first, and
@@ -1787,33 +1742,98 @@ func (c *Client) GetAnalyses(ctx context.Context) ([]models.Analysis, error) {
 	return allAnalyses, nil
 }
 
-func (c *Client) ListFiles(ctx context.Context, limit int) ([]interface{}, error) {
-	if limit <= 0 {
-		limit = 20
+// listPageSize is the largest page the platform's file listings serve. Their
+// default page is far smaller, and every page is a request against the rate
+// limit, so a listing that may read many pages asks for this one.
+const listPageSize = 1000
+
+// ListFiles passes the files of the user's library to keep, newest first, until
+// keep returns false or none is left. pageSize is how many to ask for at a
+// time; none above zero, or more than the platform serves, asks for its
+// largest. A search is run by the platform over the whole library; it also
+// splits terms at spaces, so a name it returns can still fail the caller's own
+// match.
+func (c *Client) ListFiles(ctx context.Context, search string, pageSize int, keep func(map[string]interface{}) bool) error {
+	if pageSize <= 0 || pageSize > listPageSize {
+		pageSize = listPageSize
 	}
+	query := neturl.Values{"page_size": {strconv.Itoa(pageSize)}}
+	if search != "" {
+		query.Set("search", search)
+	}
+	return listPages(ctx, c, "files", "/api/v3/files/?"+query.Encode(), keep)
+}
 
-	path := fmt.Sprintf("/api/v3/files/?limit=%d", limit)
-
-	resp, err := c.doRequest(ctx, "GET", path, nil)
+// listAll lists every result, pageSize a page, or returns nothing but the error
+// that ended the listing: a partial list would pass for a complete one.
+func listAll[T any](ctx context.Context, c *Client, what, path string, pageSize int) ([]T, error) {
+	var all []T
+	err := listPages(ctx, c, what, fmt.Sprintf("%s?page_size=%d", path, pageSize), func(result T) bool {
+		all = append(all, result)
+		return true
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	return all, nil
+}
 
-	if resp.StatusCode != nethttp.StatusOK {
-		body := readResponseBody(resp.Body)
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, body)
+// listPages GETs path and then each page's next link, passing every result to
+// keep until keep returns false or a page is empty or names no next one. The
+// platform numbers its pages over an ordered list, so nothing follows an empty
+// page, whatever its count promised, and a next link already followed can only
+// lead round a loop: that ends the listing with an error. So does the page
+// cap, which counts every page read. Both errors say how many results had been
+// listed.
+func listPages[T any](ctx context.Context, c *Client, what, path string, keep func(T) bool) error {
+	followed := make(map[string]bool)
+	listed := 0
+	for pages := 0; path != ""; pages++ {
+		switch {
+		case followed[path]:
+			return fmt.Errorf("%s listing stopped: the server repeated a page link (%d listed)", what, listed)
+		case pages == constants.MaxPaginationPages:
+			return fmt.Errorf("%s listing incomplete after %d pages (%d listed)", what, pages, listed)
+		case pages == constants.PaginationWarningThreshold:
+			notifyUser("warn", fmt.Sprintf("Warning: %s listing has read %d of at most %d pages (%d listed so far)",
+				what, pages, constants.MaxPaginationPages, listed))
+		}
+		followed[path] = true
+
+		resp, err := c.doRequest(ctx, "GET", path, nil)
+		if err != nil {
+			return err
+		}
+		if resp.StatusCode != nethttp.StatusOK {
+			body := readResponseBody(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("list %s failed: status %d: %s", what, resp.StatusCode, body)
+		}
+		var page struct {
+			Next    *string `json:"next"`
+			Results []T     `json:"results"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&page)
+		resp.Body.Close()
+		if err != nil {
+			return fmt.Errorf("failed to decode %s response: %w", what, err)
+		}
+		if len(page.Results) == 0 {
+			return nil
+		}
+
+		for _, result := range page.Results {
+			listed++
+			if !keep(result) {
+				return nil
+			}
+		}
+		path = ""
+		if page.Next != nil {
+			path = extractAPIPath(*page.Next)
+		}
 	}
-
-	var result struct {
-		Results []interface{} `json:"results"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return result.Results, nil
+	return nil
 }
 
 // LegacyFilesPage represents a page of legacy files listing (flat file list view).
@@ -2736,56 +2756,11 @@ func (c *Client) GetJobStatuses(ctx context.Context, jobID string) ([]models.Job
 	return result.Results, nil
 }
 
-// ListJobFiles lists output files for a job (with pagination).
-// Uses the v2 endpoint which has a much higher rate limit (jobs-usage scope)
-// compared to the v3 user scope.
+// ListJobFiles lists a job's output files. The v2 endpoint's jobs-usage scope
+// allows far more requests than the v3 user scope, and at the largest page a
+// job with tens of thousands of files takes a few dozen requests.
 func (c *Client) ListJobFiles(ctx context.Context, jobID string) ([]models.JobFile, error) {
-	var allFiles []models.JobFile
-	nextURL := fmt.Sprintf("/api/v2/jobs/%s/files/", jobID)
-	pageCount := 0
-
-	for nextURL != "" {
-		pageCount++
-		if pageCount > constants.MaxPaginationPages {
-			return nil, fmt.Errorf("job files listing incomplete after %d pages", constants.MaxPaginationPages)
-		}
-		if pageCount == constants.PaginationWarningThreshold {
-			log.Printf("Warning: Approaching pagination limit (page %d of %d)", pageCount, constants.MaxPaginationPages)
-		}
-
-		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != nethttp.StatusOK {
-			body := readResponseBody(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("list job files failed: status %d: %s", resp.StatusCode, body)
-		}
-
-		var result struct {
-			Count   int              `json:"count"`
-			Next    *string          `json:"next"`
-			Results []models.JobFile `json:"results"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decode job files response: %w", err)
-		}
-		resp.Body.Close()
-
-		allFiles = append(allFiles, result.Results...)
-
-		if result.Next != nil && *result.Next != "" {
-			nextURL = extractAPIPath(*result.Next)
-		} else {
-			nextURL = ""
-		}
-	}
-
-	return allFiles, nil
+	return listAll[models.JobFile](ctx, c, "job files", fmt.Sprintf("/api/v2/jobs/%s/files/", jobID), listPageSize)
 }
 
 // GetJobRuns lists runs for a job via the v2 API.
@@ -2839,49 +2814,7 @@ func (c *Client) GetJobRuns(ctx context.Context, jobID string) ([]models.JobRun,
 // GetRunFiles lists files for a run via the v2 API.
 // The endpoint is /api/v2/jobs/{jobID}/runs/{runID}/files/ (compound path).
 func (c *Client) GetRunFiles(ctx context.Context, jobID, runID string) ([]models.RunFile, error) {
-	var allFiles []models.RunFile
-	nextURL := fmt.Sprintf("/api/v2/jobs/%s/runs/%s/files/", jobID, runID)
-	pageCount := 0
-
-	for nextURL != "" {
-		pageCount++
-		if pageCount > constants.MaxPaginationPages {
-			return nil, fmt.Errorf("run files listing incomplete after %d pages", constants.MaxPaginationPages)
-		}
-
-		resp, err := c.doRequest(ctx, "GET", nextURL, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != nethttp.StatusOK {
-			body := readResponseBody(resp.Body)
-			resp.Body.Close()
-			return nil, fmt.Errorf("list run files failed: status %d: %s", resp.StatusCode, body)
-		}
-
-		var result struct {
-			Count   int              `json:"count"`
-			Next    *string          `json:"next"`
-			Results []models.RunFile `json:"results"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			resp.Body.Close()
-			return nil, fmt.Errorf("failed to decode run files response: %w", err)
-		}
-		resp.Body.Close()
-
-		allFiles = append(allFiles, result.Results...)
-
-		if result.Next != nil && *result.Next != "" {
-			nextURL = extractAPIPath(*result.Next)
-		} else {
-			nextURL = ""
-		}
-	}
-
-	return allFiles, nil
+	return listAll[models.RunFile](ctx, c, "run files", fmt.Sprintf("/api/v2/jobs/%s/runs/%s/files/", jobID, runID), listPageSize)
 }
 
 func (c *Client) DeleteJob(ctx context.Context, jobID string) error {

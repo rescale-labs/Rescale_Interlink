@@ -65,7 +65,7 @@ func TestAPITransportErrorsQuoteNoCredentials(t *testing.T) {
 			w.Header().Set("Location", "https://example.invalid/%zz?sv=2020-10-02&sig=FAKESIG")
 			w.WriteHeader(http.StatusFound)
 		case strings.Contains(r.URL.Path, "paged"):
-			io.WriteString(w, `{"results":[],"next":"https://example.invalid/api/v2/jobs/paged/files/%zz/?sig=FAKESIG"}`)
+			io.WriteString(w, `{"results":[{"id":"f1","name":"a.dat"}],"next":"https://example.invalid/api/v2/jobs/paged/files/%zz/?sig=FAKESIG"}`)
 		default:
 			http.Redirect(w, r, "http://127.0.0.1:1/signed?sv=2020-10-02&sig=FAKESIG", http.StatusFound)
 		}
