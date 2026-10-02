@@ -618,6 +618,9 @@ func (a *App) runConfig(jobs []models.JobSpec) (*config.Config, error) {
 	if err := cli.ValidateSubmitModes(jobs); err != nil {
 		return nil, err
 	}
+	if err := cli.ValidateJobFields(jobs); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 

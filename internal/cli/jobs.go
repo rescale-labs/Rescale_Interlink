@@ -19,6 +19,7 @@ import (
 	"github.com/rescale/rescale-int/internal/logging"
 	"github.com/rescale/rescale-int/internal/models"
 	"github.com/rescale/rescale-int/internal/pur/parser"
+	purvalidation "github.com/rescale/rescale-int/internal/pur/validation"
 	"github.com/rescale/rescale-int/internal/reporting"
 	"github.com/rescale/rescale-int/internal/util/analysis"
 	"github.com/rescale/rescale-int/internal/util/filter"
@@ -491,6 +492,9 @@ Examples:
 						Str("file", jobFile).
 						Strs("fields", ignored).
 						Msg("Job file contains fields Interlink does not support — they are NOT sent to Rescale")
+				}
+				if err := purvalidation.ValidatePublicKey(req.PublicKey); err != nil {
+					return reporting.UsageError(fmt.Errorf("%s: %w", jobFile, err))
 				}
 				jobReq = req
 			}
