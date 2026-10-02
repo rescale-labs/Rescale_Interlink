@@ -14,6 +14,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,9 @@ func ValidateJobSpec(job models.JobSpec) []string {
 	if err := ValidateLicensePair(job.LicenseFeatureName, job.LicensesPerJob); err != nil {
 		errors = append(errors, err.Error())
 	}
+	if err := ValidatePublicKey(job.PublicKey); err != nil {
+		errors = append(errors, err.Error())
+	}
 
 	// Validate submitMode using the same logic as pipeline.NormalizeSubmitMode.
 	if job.SubmitMode != "" {
@@ -84,6 +88,29 @@ func ValidateLicensePair(name string, count int) error {
 		// Not "> 0": CSV parsing accepts a negative integer, and treating that as
 		// "unset" would drop the half-pair silently instead of reporting it.
 		return fmt.Errorf("licenses per job is set to %d but no license feature name was given", count)
+	}
+	return nil
+}
+
+// publicKeyTypes are the SSH public-key types the platform accepts for a job.
+var publicKeyTypes = []string{"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-dss", "ssh-rsa"}
+
+// ValidatePublicKey reports a job's SSH public key the platform refuses: of a
+// type it does not accept, or with nothing after the type. Like the license
+// pair, the platform checks it only at job creation, after the uploads. An
+// empty key is none, which the platform accepts.
+func ValidatePublicKey(key string) error {
+	fields := strings.Fields(key)
+	switch {
+	case len(fields) == 0:
+		return nil
+	case !slices.Contains(publicKeyTypes, strings.ToLower(fields[0])):
+		// Only the start of the first word: enough to show a key type, not a
+		// key pasted into the wrong field.
+		return fmt.Errorf("public key type %.40q is not one the platform accepts; use one of %s",
+			fields[0], strings.Join(publicKeyTypes, ", "))
+	case len(fields) == 1:
+		return fmt.Errorf("public key %q has no key after its type", fields[0])
 	}
 	return nil
 }

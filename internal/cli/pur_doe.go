@@ -96,10 +96,8 @@ Examples:
 			if outputPath == "" && !preview {
 				return fmt.Errorf("--output is required unless --preview is set")
 			}
-			if outputPath != "" && !overwrite {
-				if _, err := os.Stat(outputPath); err == nil {
-					return reporting.UsageError(fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath))
-				}
+			if err := refuseExistingOutput(outputPath, overwrite); err != nil {
+				return err
 			}
 
 			templateJobs, err := config.LoadJobsCSV(templatePath)

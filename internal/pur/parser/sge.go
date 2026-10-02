@@ -547,13 +547,16 @@ type Lookup interface {
 
 // ToJobRequest converts SGE metadata to a Rescale API JobRequest, looking up a
 // project or core type the script gives by name. It refuses a license feature
-// the platform would take but no job can use, naming its line; loading the
-// script into the job template keeps such a feature, for the template's
-// validation to report.
+// the platform would take but no job can use, naming its line, and a public key
+// the platform would refuse; loading the script into the job template keeps
+// either, for the template's validation to report.
 func (m *SGEMetadata) ToJobRequest(ctx context.Context, lookup Lookup) (*models.JobRequest, error) {
 	if err := m.checkLicenseFeatures(); err != nil {
 		return nil, reporting.UsageError(fmt.Errorf("invalid RESCALE_USER_DEFINED_LICENSE_SETTINGS at line %d: %w",
 			m.licenseSettingsLine, err))
+	}
+	if err := validation.ValidatePublicKey(m.PublicKey); err != nil {
+		return nil, reporting.UsageError(fmt.Errorf("invalid RESCALE_PUBLIC_KEY: %w", err))
 	}
 	projectID, found, err := m.lookUpNames(ctx, lookup)
 	if err != nil {
@@ -567,12 +570,6 @@ func (m *SGEMetadata) ToJobRequest(ctx context.Context, lookup Lookup) (*models.
 		if m.coresDefaulted && len(found.Cores) > 0 {
 			cores = found.Cores[0]
 		}
-	}
-
-	// Set default slots if not specified
-	slots := m.Slots
-	if slots == 0 {
-		slots = 1
 	}
 
 	jobReq := &models.JobRequest{
@@ -589,7 +586,7 @@ func (m *SGEMetadata) ToJobRequest(ctx context.Context, lookup Lookup) (*models.
 						Code: coreType,
 					},
 					CoresPerSlot: cores,
-					Slots:        slots,
+					Slots:        m.requestSlots(),
 					Walltime:     m.Walltime,
 				},
 				EnvVars:           m.EnvVariables,
@@ -684,6 +681,21 @@ func (m *SGEMetadata) checkLicenseFeatures() error {
 	return nil
 }
 
+// requestSlots is the slot count a job from this script asks for: one when the
+// script sets none. The summary reads it here too, so it states what the
+// request sends.
+func (m *SGEMetadata) requestSlots() int {
+	return max(m.Slots, 1)
+}
+
+// plural is n with noun, which takes an s unless n is one.
+func plural(n int, noun string) string {
+	if n != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("%d %s", n, noun)
+}
+
 // String returns a human-readable representation of the metadata
 func (m *SGEMetadata) String() string {
 	var sb strings.Builder
@@ -693,8 +705,8 @@ func (m *SGEMetadata) String() string {
 	if m.AnalysisVersion != "" {
 		sb.WriteString(fmt.Sprintf(" (v%s)", m.AnalysisVersion))
 	}
-	sb.WriteString(fmt.Sprintf("\nHardware: %s (%d cores/slot, %d slots)\n",
-		m.CoreType, m.CoresPerSlot, m.Slots))
+	sb.WriteString(fmt.Sprintf("\nHardware: %s (%s/slot, %s)\n",
+		m.CoreType, plural(m.CoresPerSlot, "core"), plural(m.requestSlots(), "slot")))
 	sb.WriteString(fmt.Sprintf("Walltime: %d hours\n", m.Walltime))
 
 	if len(m.Tags) > 0 {
@@ -794,12 +806,6 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		walltimeHours = 1
 	}
 
-	// Set default slots if not specified
-	slots := job.Slots
-	if slots <= 0 {
-		slots = 1
-	}
-
 	m := &SGEMetadata{
 		Name:            job.JobName,
 		Command:         job.Command,
@@ -807,7 +813,7 @@ func JobSpecToSGEMetadata(job models.JobSpec) *SGEMetadata {
 		AnalysisVersion: job.AnalysisVersion,
 		CoreType:        job.CoreType,
 		CoresPerSlot:    job.CoresPerSlot,
-		Slots:           slots,
+		Slots:           job.Slots, // none reads as one, through requestSlots
 		Walltime:        walltimeHours,
 		Tags:            job.Tags,
 		ProjectID:       job.ProjectID,
@@ -835,12 +841,6 @@ func SGEMetadataToJobSpec(m *SGEMetadata) (models.JobSpec, error) {
 		walltimeHours = 1.0 // Default to 1 hour
 	}
 
-	// Set default slots if not specified
-	slots := m.Slots
-	if slots <= 0 {
-		slots = 1
-	}
-
 	spec := models.JobSpec{
 		JobName:         m.Name,
 		Command:         m.Command,
@@ -848,7 +848,7 @@ func SGEMetadataToJobSpec(m *SGEMetadata) (models.JobSpec, error) {
 		AnalysisVersion: m.AnalysisVersion,
 		CoreType:        m.CoreType,
 		CoresPerSlot:    m.CoresPerSlot,
-		Slots:           slots,
+		Slots:           m.requestSlots(),
 		WalltimeHours:   walltimeHours,
 		IsLowPriority:   m.IsLowPriority,
 		Tags:            m.Tags,

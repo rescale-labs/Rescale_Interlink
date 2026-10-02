@@ -584,17 +584,17 @@ func (e *Engine) RunFromSpecsWithOptions(ctx context.Context, jobs []models.JobS
 		reporting.ClassifyAndPublish(e.eventBus, err, reporting.CategoryPURPipeline, "run", "")
 	}
 
-	if err != nil {
-		if err == context.Canceled {
-			e.publishLog(events.InfoLevel, "Pipeline stopped by user", "run", "")
-		} else {
-			e.publishLog(events.ErrorLevel, fmt.Sprintf("Pipeline error: %v", err), "run", "")
-		}
-		return err
+	// A stopped run reads as stopped whatever the pipeline returned: nil, or
+	// the error of the common-file upload the stop cut off.
+	switch {
+	case ctx.Err() != nil:
+		e.publishLog(events.InfoLevel, "Pipeline stopped by user", "run", "")
+	case err != nil:
+		e.publishLog(events.ErrorLevel, fmt.Sprintf("Pipeline error: %v", err), "run", "")
+	default:
+		e.publishLog(events.InfoLevel, fmt.Sprintf("Pipeline completed successfully in %s", duration.Round(time.Second)), "run", "")
 	}
-
-	e.publishLog(events.InfoLevel, fmt.Sprintf("Pipeline completed successfully in %s", duration.Round(time.Second)), "run", "")
-	return nil
+	return err
 }
 
 // Stop cancels any running operations

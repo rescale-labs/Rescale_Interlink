@@ -627,6 +627,12 @@ func (p *Pipeline) ResolveSharedFiles(ctx context.Context) error {
 	return nil
 }
 
+// SharedFileIDs returns the IDs of the common input files resolved so far,
+// which no state file records.
+func (p *Pipeline) SharedFileIDs() []string {
+	return p.sharedFileIDs
+}
+
 // Run executes the pipeline
 func (p *Pipeline) Run(ctx context.Context) error {
 	p.pipelineStart = time.Now()
@@ -712,9 +718,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			// nothing identifies it to look it up by. The job is named here with
 			// what to check, and creating it again takes an explicit flag from
 			// someone who has checked.
+			stage := ResumeStage(state, jobSpec, p.skipTarUpload, p.recreateIndeterminate)
 			recreate := false
 			if mayAlreadyExist(state) {
-				if !p.recreateIndeterminate {
+				if stage == StageUnconfirmed {
 					p.logf("WARN", "job", state.JobName,
 						"Skipped: a previous run could not confirm whether %q was created (%s). "+
 							"Check the platform for a job of that name; once every unconfirmed job "+
@@ -793,47 +800,38 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				continue
 			}
 
-			// Determine which queue to start in based on current state
-			if state.TarStatus == "success" && state.UploadStatus == "success" && state.JobID != "" {
-				// Already uploaded and job created, check if we need to submit
-				if state.SubmitStatus == "pending" && shouldSubmit(jobSpec.SubmitMode) {
-					select {
-					case <-ctx.Done():
-						return
-					case p.jobQueue <- item:
-					}
-				}
-			} else if state.TarStatus == "success" && state.UploadStatus == "success" {
-				// Already uploaded, need to create job
-				select {
-				case <-ctx.Done():
-					return
-				case p.jobQueue <- item:
-				}
-			} else if state.TarStatus == "success" {
-				// Already tarred, need to upload
-				select {
-				case <-ctx.Done():
-					return
-				case p.uploadQueue <- item:
-				}
-			} else {
-				// Need to tar
-				select {
-				case <-ctx.Done():
-					return
-				case p.tarQueue <- item:
-				}
+			var queue chan *workItem
+			switch stage {
+			case StageTar:
+				queue = p.tarQueue
+			case StageUpload:
+				queue = p.uploadQueue
+			case StageCreate, StageSubmit:
+				queue = p.jobQueue
+			default:
+				continue // done, or a failed submit, which is not retried
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case queue <- item:
 			}
 		}
 	}()
 
-	// Wait for all workers to complete
+	// Wait for all workers to complete, and for the feeder: a cancel stops the
+	// workers while the feeder may still be writing a job's state.
 	wg.Wait()
+	<-p.feederDone
 	close(stopProgress)
 
-	p.logf("INFO", "pipeline", "", "Pipeline completed: %d/%d jobs finished in %v",
-		p.completedJobs, p.totalJobs, time.Since(p.pipelineStart))
+	outcome := "completed"
+	if ctx.Err() != nil {
+		outcome = "cancelled"
+	}
+	finished, total := p.FinishedJobs()
+	p.logf("INFO", "pipeline", "", "Pipeline %s: %d/%d jobs finished in %v",
+		outcome, finished, total, time.Since(p.pipelineStart))
 
 	// A job that may already exist is neither done nor failed, so it is counted
 	// and named on its own: only someone looking at the platform can say which
@@ -849,21 +847,27 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	// A run where jobs failed is not a successful run. Without this the CLI
 	// prints "Pipeline completed" and exits 0 even when every job failed.
 	// A cancelled run is the user's own doing, so it is not reported as failure.
-	if ctx.Err() == nil {
-		var problems []string
-		if failed := p.countFailedJobs(); failed > 0 {
-			problems = append(problems, fmt.Sprintf("%d of %d job(s) failed", failed, p.totalJobs))
-		}
-		if len(unconfirmed) > 0 {
-			problems = append(problems, fmt.Sprintf("%d job(s) could not be confirmed as created: %s",
-				len(unconfirmed), strings.Join(unconfirmed, ", ")))
-		}
-		if len(problems) > 0 {
-			return reporting.BatchError(strings.Join(problems, "; "), p.jobErrs)
-		}
+	if ctx.Err() != nil {
+		return nil
 	}
+	return p.Problems()
+}
 
-	return nil
+// Problems is what a run that was not cancelled reports at its end: the
+// batch's failed jobs and those whose creation could not be confirmed, or nil.
+func (p *Pipeline) Problems() error {
+	var problems []string
+	if failed := p.countFailedJobs(); failed > 0 {
+		problems = append(problems, fmt.Sprintf("%d of %d job(s) failed", failed, p.totalJobs))
+	}
+	if unconfirmed := p.indeterminateJobNames(); len(unconfirmed) > 0 {
+		problems = append(problems, fmt.Sprintf("%d job(s) could not be confirmed as created: %s",
+			len(unconfirmed), strings.Join(unconfirmed, ", ")))
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	return reporting.BatchError(strings.Join(problems, "; "), p.jobErrs)
 }
 
 // jobFailed keeps a job's error for the error the run returns, and returns
@@ -948,6 +952,17 @@ func (p *Pipeline) FailedJobs() []*models.JobState {
 		}
 	}
 	return failed
+}
+
+// FinishedJobs counts the batch's jobs ResumeStage finds done, this run's and
+// a previous run's alike, and the jobs in the batch.
+func (p *Pipeline) FinishedJobs() (finished, total int) {
+	for i, spec := range p.jobs {
+		if ResumeStage(p.stateMgr.GetState(i+1), spec, p.skipTarUpload, p.recreateIndeterminate) == StageNone {
+			finished++
+		}
+	}
+	return finished, p.totalJobs
 }
 
 // mayAlreadyExist reports a job whose creation a previous run could not
@@ -1650,10 +1665,11 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				// The outcome replaces the intent: the platform named the job,
 				// so there is nothing left for anyone to check for — including
 				// the unconfirmed creation a recreation was authorized to
-				// supersede, whose cause goes with it.
+				// supersede, or a creation that failed before, whose cause goes
+				// with it.
 				item.state.SubmitStatus = previousSubmitStatus
-				if item.recreate {
-					item.state.ErrorMessage = ""
+				if item.recreate || previousSubmitStatus == "failed" {
+					item.state.SubmitStatus, item.state.ErrorMessage = "pending", ""
 				}
 				// Before submission: a job whose ID exists only in memory is a
 				// job a restart creates and submits all over again.
@@ -1707,7 +1723,7 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 				}
 			}
 
-			if shouldSubmit(item.jobSpec.SubmitMode) && item.state.SubmitStatus != "success" {
+			if submitDue(item.state, item.jobSpec.SubmitMode) {
 				p.logf("INFO", "job", item.state.JobName, "Submitting job %s", item.state.JobID)
 				p.reportStateChange(item.state.JobName, "submit", "in_progress", item.state.JobID, "", 0.0)
 
@@ -1910,6 +1926,61 @@ func shouldSubmit(submitMode string) bool {
 		return false
 	}
 	return normalized == "submit"
+}
+
+// submitDue reports a created job the job worker submits: one its row asks to
+// submit and that is not submitted yet.
+func submitDue(st *models.JobState, submitMode string) bool {
+	return shouldSubmit(submitMode) && st.SubmitStatus != "success"
+}
+
+// Stage is what a run does first for a job, judged from its recorded state.
+type Stage int
+
+// The stages, in the order a job passes through them.
+const (
+	StageNone         Stage = iota // nothing: the job is done, or created and not to be submitted
+	StageTar                       // build the archive, then upload, create and submit
+	StageUpload                    // upload the archive, then create and submit
+	StageCreate                    // create, then submit
+	StageSubmit                    // submit
+	StageSubmitFailed              // nothing: the submit failed, and is not retried
+	StageUnconfirmed               // nothing: the creation could not be confirmed
+)
+
+// ResumeStage is the stage a run starts a job at, given its recorded state, nil
+// for none. skipTarUpload and recreate are PipelineOptions.SkipTarUpload and
+// RecreateIndeterminate. The feeder routes by it, and the job worker submits by
+// the submitDue it applies, so a dry run and a count of finished jobs that use
+// it say what a run does.
+//
+// A job with an archive of its own resumes at the first stage its statuses do
+// not record as done, and once created is submitted only if its submit was
+// never tried. Any other job goes to the job worker, which creates it if it has
+// no ID and submits it if submitDue.
+func ResumeStage(st *models.JobState, spec models.JobSpec, skipTarUpload, recreate bool) Stage {
+	s := models.JobState{TarStatus: "pending", UploadStatus: "pending", SubmitStatus: "pending"}
+	if st != nil {
+		s = *st
+		clearStaleFailures(&s) // as the feeder does first
+	}
+	ownArchive := hasLocalArchive(spec) && !(skipTarUpload && s.TarStatus != "success")
+	switch {
+	case mayAlreadyExist(&s) && !recreate:
+		return StageUnconfirmed
+	case ownArchive && s.TarStatus != "success":
+		return StageTar
+	case ownArchive && s.UploadStatus != "success":
+		return StageUpload
+	case s.JobID == "":
+		return StageCreate
+	case ownArchive && s.SubmitStatus == "pending" && shouldSubmit(spec.SubmitMode),
+		!ownArchive && submitDue(&s, spec.SubmitMode):
+		return StageSubmit
+	case s.SubmitStatus == "failed":
+		return StageSubmitFailed
+	}
+	return StageNone
 }
 
 // setActiveWorker updates the active worker count

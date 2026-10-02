@@ -9,19 +9,27 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/pur/pipeline"
 )
 
 // usePURConfig writes a config.csv holding the given "key,value" lines and
 // points the CLI's config loader at it for the rest of the test.
 //
-// Two things keep the run offline. The API key comes from the environment, so
-// loadConfig gets past its required-field check without reading the developer's
-// own key; and the platform URL is deliberately off the allowlist, so any
-// command that got past the preflight under test would be stopped by
-// api.NewClient rather than reach the network.
+// Three things keep the run off the developer's own setup and offline. The home
+// and profile folders are the test's own, so the loader finds no default token
+// file or other per-user file of theirs; the API key comes from the
+// environment, so loadConfig gets past its required-field check; and the
+// platform URL is deliberately off the allowlist, so any command that got past
+// the preflight under test would be stopped by api.NewClient rather than reach
+// the network.
 func usePURConfig(t *testing.T, lines ...string) {
 	t.Helper()
+
+	home := t.TempDir()
+	for _, env := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"} {
+		t.Setenv(env, home)
+	}
 
 	body := "key,value\napi_base_url,https://example.invalid\n"
 	for _, line := range lines {
@@ -40,6 +48,29 @@ func usePURConfig(t *testing.T, lines ...string) {
 	t.Setenv("RESCALE_API_KEY", "preflight-test-key")
 	t.Setenv("RESCALE_API_URL", "")
 	t.Setenv("HTTPS_PROXY", "")
+}
+
+// usePURConfig keeps a test off the developer's own setup: the run reads no
+// token file from the home and profile folders the test was started with.
+func TestUsePURConfigReadsNoRealTokenFile(t *testing.T) {
+	started := t.TempDir()
+	for _, env := range []string{"HOME", "USERPROFILE", "LOCALAPPDATA", "APPDATA"} {
+		t.Setenv(env, started)
+	}
+	decoy := config.GetDefaultTokenPath()
+	if os.MkdirAll(filepath.Dir(decoy), 0o700) != nil || os.WriteFile(decoy, []byte("DECOY-NOT-A-KEY\n"), 0o600) != nil {
+		t.Fatal("write the decoy token file")
+	}
+
+	usePURConfig(t)
+	printed := captureStderr(t, func() {
+		if err := runPURCommand(t, newRunCmd(), "--jobs-csv", writePreflightJobsCSV(t, "yes"), "--dry-run"); err != nil {
+			t.Errorf("pur run --dry-run: %v", err)
+		}
+	})
+	if strings.Contains(printed, "default token file") {
+		t.Errorf("the run read the token file in the home folder the test started with:\n%s", printed)
+	}
 }
 
 // writePreflightJobsCSV writes a one-row jobs CSV whose Submit column holds

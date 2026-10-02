@@ -135,12 +135,8 @@ Examples:
 			if outputPath == "" {
 				return fmt.Errorf("--output is required")
 			}
-
-			// Check if output exists
-			if !overwrite {
-				if _, err := os.Stat(outputPath); err == nil {
-					return reporting.UsageError(fmt.Errorf("output file %s already exists (use --overwrite to replace)", outputPath))
-				}
+			if err := refuseExistingOutput(outputPath, overwrite); err != nil {
+				return err
 			}
 
 			logger.Info().
@@ -353,10 +349,8 @@ Examples:
 			warnings := result.Warnings
 
 			if generate {
-				if !overwrite {
-					if _, err := os.Stat(outputPath); err == nil {
-						return reporting.UsageError(fmt.Errorf("output file %s exists (use --overwrite)", outputPath))
-					}
+				if err := refuseExistingOutput(outputPath, overwrite); err != nil {
+					return err
 				}
 
 				templateJobs, err := config.LoadJobsCSV(templatePath)
@@ -442,6 +436,16 @@ Examples:
 	cmd.MarkFlagRequired("primary")
 
 	return cmd
+}
+
+// refuseExistingOutput is how each PUR command that writes a jobs CSV refuses
+// to replace a file it was not told to overwrite. An empty path, doe's
+// --preview, names no file.
+func refuseExistingOutput(path string, overwrite bool) error {
+	if _, err := os.Stat(path); err != nil || overwrite {
+		return nil
+	}
+	return reporting.UsageError(fmt.Errorf("output file %s already exists (use --overwrite to replace)", path))
 }
 
 // newPlanCmd creates the 'plan' command.
@@ -720,7 +724,7 @@ func ValidateWorkerCounts(cfg *config.Config) error {
 		{"job_workers", cfg.JobWorkers},
 	} {
 		if w.value < 1 {
-			return fmt.Errorf("%s must be at least 1 (got %d)", w.key, w.value)
+			return reporting.UsageError(fmt.Errorf("%s must be at least 1 (got %d)", w.key, w.value))
 		}
 	}
 	return nil
@@ -737,6 +741,22 @@ func ValidateSubmitModes(jobs []models.JobSpec) error {
 	for i, job := range jobs {
 		if _, err := pipeline.NormalizeSubmitMode(job.SubmitMode); err != nil {
 			return reporting.UsageError(fmt.Errorf("job %d (%s): Invalid submit mode: %w", i+1, job.JobName, err))
+		}
+	}
+	return nil
+}
+
+// ValidateJobFields refuses a job whose license pair or SSH public key the
+// platform would refuse, which it does only as it creates the job: after the
+// job's inputs are uploaded.
+func ValidateJobFields(jobs []models.JobSpec) error {
+	for i, job := range jobs {
+		err := validation.ValidateLicensePair(job.LicenseFeatureName, job.LicensesPerJob)
+		if err == nil {
+			err = validation.ValidatePublicKey(job.PublicKey)
+		}
+		if err != nil {
+			return reporting.UsageError(fmt.Errorf("job %d (%s): %w", i+1, job.JobName, err))
 		}
 	}
 	return nil
@@ -787,10 +807,8 @@ func (f *purPipelineFlags) loadInputs(cmd *cobra.Command) (*config.Config, []mod
 	if err := ValidateSubmitModes(jobs); err != nil {
 		return nil, nil, err
 	}
-	for i, job := range jobs {
-		if err := validation.ValidateLicensePair(job.LicenseFeatureName, job.LicensesPerJob); err != nil {
-			return nil, nil, reporting.UsageError(fmt.Errorf("job %d (%s): %w", i+1, job.JobName, err))
-		}
+	if err := ValidateJobFields(jobs); err != nil {
+		return nil, nil, err
 	}
 
 	GetLogger().Info().Int("count", len(jobs)).Msg("Loaded jobs")
@@ -835,15 +853,59 @@ func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec
 		return fmt.Errorf("failed to create pipeline: %w", err)
 	}
 
-	if err := pipe.Run(ctx); err != nil {
+	// Without --state nothing else records a job's ID, and the pipeline's own
+	// log shows only with --verbose.
+	pipe.SetStateChangeCallback(func(jobName, stage, status, jobID, _ string, _ float64) {
+		if stage == "create" && status == "completed" {
+			fmt.Printf("✓ %s: created job %s\n", jobField(jobName, pattern.MaxJobNameLength), jobID)
+		}
+	})
+
+	if err = pipe.Run(ctx); err != nil {
+		err = fmt.Errorf("pipeline failed: %w", err)
+	}
+	if ids := pipe.SharedFileIDs(); len(ids) > 0 {
+		fmt.Printf("Common input file IDs: %s\n", strings.Join(ids, ", "))
+	}
+	if ctx.Err() != nil {
+		return endCancelled(pipe, err)
+	}
+	if err != nil {
 		printFailedJobs(os.Stderr, pipe.FailedJobs())
-		return fmt.Errorf("pipeline failed: %w", err)
+		return err
 	}
 
 	GetLogger().Info().Msg(doneMsg)
 	fmt.Println("\n✓ Pipeline completed")
 	return nil
 }
+
+// endCancelled ends a PUR command whose run the user cancelled. It names the
+// jobs the batch is left with failed or unconfirmed, as a run that ends that
+// way without a cancel does, says how far the run got, and returns runErr, the
+// command's error had it not been cancelled: nil unless the run itself failed.
+// This is the one place that decides a cancelled run's exit code.
+func endCancelled(pipe *pipeline.Pipeline, runErr error) error {
+	printFailedJobs(os.Stderr, pipe.FailedJobs())
+	// Unless runErr says them already: a run that failed does, but a cancel
+	// that cut off the common files' upload returns that upload's error.
+	if problems := pipe.Problems(); problems != nil &&
+		(runErr == nil || !strings.Contains(runErr.Error(), problems.Error())) {
+		fmt.Fprintln(os.Stderr, problems)
+	}
+	finished, total := pipe.FinishedJobs()
+	fmt.Printf("\nCancelled: %d of %d job(s) finished, %d did not\n", finished, total, total-finished)
+	return runErr
+}
+
+// jobField is a job's name or reason as one line of output, cut to width. A
+// name comes from the jobs CSV or the state file, and a reason can quote an API
+// response body: either can run to many lines, and a reason to a megabyte.
+func jobField(s string, width int) string {
+	return truncateField(reporting.RedactSecrets(oneLine.Replace(s)), width)
+}
+
+var oneLine = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
 
 // printFailedJobs names each failed job with the reason the run recorded for it,
 // one line each: at most ten, or every one with --verbose. Without these lines a
@@ -855,18 +917,12 @@ func printFailedJobs(w io.Writer, failed []*models.JobState) {
 	if VerboseOutput() {
 		shown = len(failed)
 	}
-	// A name comes from the jobs CSV or the state file, and a reason can quote an
-	// API response body: either can run to many lines, and a reason to a megabyte.
-	oneLine := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ")
-	field := func(s string, width int) string {
-		return truncateField(reporting.RedactSecrets(oneLine.Replace(s)), width)
-	}
 	for i, st := range failed {
 		if i == shown {
 			fmt.Fprintf(w, "... and %d more (--verbose lists them all)\n", len(failed)-shown)
 			return
 		}
-		fmt.Fprintf(w, "✗ %s: %s\n", field(st.JobName, pattern.MaxJobNameLength), field(st.ErrorMessage, 1000))
+		fmt.Fprintf(w, "✗ %s: %s\n", jobField(st.JobName, pattern.MaxJobNameLength), jobField(st.ErrorMessage, 1000))
 	}
 }
 
@@ -981,45 +1037,31 @@ Example:
 					return fmt.Errorf("failed to load state: %w", err)
 				}
 
-				needsTar, needsUpload, needsCreate, needsSubmit, complete := 0, 0, 0, 0, 0
+				// Counted by the stage the resume itself would start each job at.
+				// A job whose creation could not be confirmed is work only with
+				// --recreate-indeterminate, and is named either way.
+				stages := map[pipeline.Stage]int{}
 				var unconfirmed []string
-				for i := range jobs {
-					idx := i + 1
-					st := stateMgr.GetState(idx)
-					if st == nil {
-						needsTar++
-						continue
-					}
+				for i, job := range jobs {
+					st := stateMgr.GetState(i + 1)
 					if state.MayAlreadyExist(st) {
-						// Work this resume will not do: the platform may hold the
-						// job already, so only --recreate-indeterminate creates it.
 						unconfirmed = append(unconfirmed, st.JobName)
-						if f.recreateIndeterminate {
-							needsCreate++
-						}
-						continue
 					}
-					if st.TarStatus == "success" && st.UploadStatus == "success" && st.JobID != "" && st.SubmitStatus == "success" {
-						complete++
-					} else if st.TarStatus == "success" && st.UploadStatus == "success" && st.JobID != "" {
-						needsSubmit++
-					} else if st.TarStatus == "success" && st.UploadStatus == "success" {
-						needsCreate++
-					} else if st.TarStatus == "success" {
-						needsUpload++
-					} else {
-						needsTar++
-					}
+					stages[pipeline.ResumeStage(st, job, false, f.recreateIndeterminate)]++
 				}
 
 				fmt.Printf("\n=== DRY RUN: Resume Analysis ===\n\n")
 				fmt.Printf("Total jobs:       %d\n", len(jobs))
-				fmt.Printf("Already complete: %d\n", complete)
-				fmt.Printf("Need tar:         %d\n", needsTar)
-				fmt.Printf("Need upload:      %d\n", needsUpload)
-				fmt.Printf("Need job create:  %d\n", needsCreate)
-				fmt.Printf("Need submit:      %d\n", needsSubmit)
-				fmt.Printf("Remaining:        %d\n", needsTar+needsUpload+needsCreate+needsSubmit)
+				fmt.Printf("Already complete: %d\n", stages[pipeline.StageNone])
+				fmt.Printf("Need tar:         %d\n", stages[pipeline.StageTar])
+				fmt.Printf("Need upload:      %d\n", stages[pipeline.StageUpload])
+				fmt.Printf("Need job create:  %d\n", stages[pipeline.StageCreate])
+				fmt.Printf("Need submit:      %d\n", stages[pipeline.StageSubmit])
+				fmt.Printf("Remaining:        %d\n", stages[pipeline.StageTar]+stages[pipeline.StageUpload]+
+					stages[pipeline.StageCreate]+stages[pipeline.StageSubmit])
+				if n := stages[pipeline.StageSubmitFailed]; n > 0 {
+					fmt.Printf("\nSubmit failed:    %d (a resume does not retry these)\n", n)
+				}
 				if len(unconfirmed) > 0 {
 					fmt.Printf("\nCould not be confirmed as created: %d\n", len(unconfirmed))
 					for _, name := range unconfirmed {
@@ -1135,6 +1177,9 @@ Example:
 			if err := ValidateSubmitModes(jobs); err != nil {
 				return err
 			}
+			if err := ValidateJobFields(jobs); err != nil {
+				return err
+			}
 
 			// Preflight validation: submit-existing requires ExtraInputFileIDs
 			for i, job := range jobs {
@@ -1164,9 +1209,15 @@ Example:
 			// Note: The existing pipeline.Run() will handle the submit-existing logic
 			// It checks if jobs have ExtraInputFileIDs and skips tar/upload accordingly
 			ctx := GetContext()
-			if err := pipe.Run(ctx); err != nil {
+			if err = pipe.Run(ctx); err != nil {
+				err = fmt.Errorf("submit-existing failed: %w", err)
+			}
+			if ctx.Err() != nil {
+				return endCancelled(pipe, err)
+			}
+			if err != nil {
 				printFailedJobs(os.Stderr, pipe.FailedJobs())
-				return fmt.Errorf("submit-existing failed: %w", err)
+				return err
 			}
 
 			logger.Info().Msg("Submit-existing completed")
