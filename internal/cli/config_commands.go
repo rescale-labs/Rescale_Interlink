@@ -18,6 +18,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 // newConfigCmd creates the 'config' command group.
@@ -470,7 +471,7 @@ Use this to verify your API key and network connectivity.`,
 			cfg.MergeWithFlagsAndTokenFile(apiKey, tokenFile, apiBaseURL, "", "", 0)
 
 			if err := cfg.Validate(); err != nil {
-				return fmt.Errorf("invalid configuration: %w", err)
+				return reporting.UsageError(fmt.Errorf("invalid configuration: %w", err))
 			}
 
 			fmt.Printf("API URL: %s\n", cfg.APIBaseURL)

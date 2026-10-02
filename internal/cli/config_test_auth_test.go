@@ -19,7 +19,7 @@ import (
 // answer, an authentication failure the user fixes: no error report.
 func TestConfigTestRejectedKeySavesNoReport(t *testing.T) {
 	home := t.TempDir()
-	for _, env := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "LOCALAPPDATA"} {
+	for _, env := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA"} {
 		t.Setenv(env, home)
 	}
 	t.Setenv("RESCALE_API_KEY", "")
@@ -46,5 +46,27 @@ func TestConfigTestRejectedKeySavesNoReport(t *testing.T) {
 	}
 	if saved := reporting.HandleCLIError(err, "cli", "rescale-int config test", ""); saved != "" {
 		t.Errorf("a rejected key saved an error report to %s", saved)
+	}
+}
+
+// 'config test' refuses a configuration it cannot use, here an API URL that is
+// not a Rescale platform, before any request: a mistake the user fixes, so no
+// error report.
+func TestConfigTestRefusedConfigurationSavesNoReport(t *testing.T) {
+	home := t.TempDir()
+	for _, env := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "LOCALAPPDATA", "APPDATA"} {
+		t.Setenv(env, home)
+	}
+	defer func(c, k, tf, u string) { cfgFile, apiKey, tokenFile, apiBaseURL = c, k, tf, u }(cfgFile, apiKey, tokenFile, apiBaseURL)
+	cfgFile, apiKey, tokenFile, apiBaseURL = filepath.Join(home, "config.csv"), "FAKEKEY", "", "https://example.com"
+
+	cmd := newConfigTestCmd()
+	var err error
+	captureStdout(t, func() { err = cmd.RunE(cmd, nil) })
+	if err == nil || !strings.Contains(err.Error(), `invalid platform URL "https://example.com"`) {
+		t.Fatalf("config test returned %v, want the URL refused", err)
+	}
+	if saved := reporting.HandleCLIError(err, "cli", "rescale-int config test", ""); saved != "" {
+		t.Errorf("a refused configuration saved an error report to %s", saved)
 	}
 }

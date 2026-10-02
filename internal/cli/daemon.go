@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -499,7 +500,7 @@ Examples:
 
 			// Run daemon
 			if runOnce {
-				return d.RunOnce(ctx)
+				return runSinglePoll(ctx, d)
 			}
 
 			if err := d.Start(ctx); err != nil {
@@ -539,6 +540,22 @@ Examples:
 	cmd.Flags().BoolVar(&enableIPC, "ipc", false, "Enable IPC server for remote control (pause/resume/status/stop)")
 
 	return cmd
+}
+
+// runSinglePoll runs the one poll of 'daemon run --once'. The poll logs a scan
+// that failed and goes on, as the daemon does between polls, but a script or
+// cron job running this has only the exit code: the scan's failure is the run's.
+func runSinglePoll(ctx context.Context, d interface {
+	RunOnce(context.Context) error
+	LastScanError() (string, time.Time)
+}) error {
+	if err := d.RunOnce(ctx); err != nil {
+		return err
+	}
+	if scanErr, _ := d.LastScanError(); scanErr != "" {
+		return errors.New(scanErr)
+	}
+	return nil
 }
 
 // onWindows is a variable so a test on any system can see the Windows advice.
@@ -775,7 +792,7 @@ watch, so it cannot confirm the exit.`,
 					if force {
 						return forceKill()
 					}
-					fmt.Println("The daemon may not have been started with --ipc flag.")
+					fmt.Println("It was started without --ipc, or it is not answering.")
 					advice := fmt.Sprintf("Use 'rescale-int daemon stop --force' or 'kill %d' to terminate it", pid)
 					if onWindows {
 						advice = service.EarlierDaemonRunning

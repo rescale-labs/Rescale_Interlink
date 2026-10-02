@@ -8,12 +8,14 @@ import (
 
 // addPlaceholderCommands registers placeholder commands for rescale-cli
 // commands that are not yet implemented. Each returns a descriptive error
-// that goes through the standard error path (exit code 33).
+// that goes through the standard error path (exit code 33), with no account
+// needed to say so.
 func addPlaceholderCommands(rootCmd *cobra.Command) {
 	// SPUB (software publisher) placeholders — deferred to v5.0.0
 	spubCmd := &cobra.Command{
-		Use:   "spub",
-		Short: "Software publisher commands (not available in compat mode)",
+		Use:                "spub",
+		Short:              "Software publisher commands (not available in compat mode)",
+		Annotations:        map[string]string{"skipAuth": "true"},
 		FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
 		Args:               cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -25,8 +27,8 @@ func addPlaceholderCommands(rootCmd *cobra.Command) {
 	}
 	for _, name := range spubPlaceholders {
 		sub := &cobra.Command{
-			Use:   name,
-			Short: fmt.Sprintf("Software publisher %s (not available in compat mode)", name),
+			Use:                name,
+			Short:              fmt.Sprintf("Software publisher %s (not available in compat mode)", name),
 			FParseErrWhitelist: cobra.FParseErrWhitelist{UnknownFlags: true},
 			Args:               cobra.ArbitraryArgs,
 			RunE: func(cmd *cobra.Command, args []string) error {

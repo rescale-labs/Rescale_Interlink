@@ -1,9 +1,6 @@
 package compat
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 func TestExitCodeConstant(t *testing.T) {
 	if ExitCodeCompatError != 33 {
@@ -16,16 +13,10 @@ func TestExecuteCompat_SpubPlaceholder(t *testing.T) {
 	rootCmd, _ := NewCompatRootCmd()
 	rootCmd.SetArgs([]string{"spub", "register"})
 
+	// A placeholder needs no account: it says it is deferred, with no key found.
 	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error from spub placeholder, got nil")
-	}
-	// May fail on auth or on the placeholder message — both are valid
-	// The important thing is it doesn't succeed silently
-	errMsg := err.Error()
-	if errMsg != "compat command 'spub register' is deferred to v5.0.0" &&
-		!strings.Contains(errMsg, "API key") {
-		t.Errorf("error = %q, want deferred message or auth error", errMsg)
+	if err == nil || err.Error() != "compat command 'spub register' is deferred to v5.0.0" {
+		t.Errorf("error = %v, want the deferred message", err)
 	}
 }
 

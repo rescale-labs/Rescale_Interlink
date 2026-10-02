@@ -38,8 +38,7 @@ Exit codes:
 			// Store compat context in command context for subcommands
 			SetCompatContext(cmd, cc)
 
-			// Skip auth for commands that don't need it (e.g., check-for-update)
-			if cmd.Annotations != nil && cmd.Annotations["skipAuth"] == "true" {
+			if !needsAccount(cmd) {
 				return nil
 			}
 
@@ -108,4 +107,19 @@ Exit codes:
 	installArgparseHelp(rootCmd)
 
 	return rootCmd, cc
+}
+
+// needsAccount reports whether cmd uses the platform, so the pre-run must find a
+// key and authenticate before it runs. Help, shell completion and the commands
+// marked skipAuth, with their subcommands, use no account: they run with no key
+// and offline.
+func needsAccount(cmd *cobra.Command) bool {
+	for c := cmd; c.HasParent(); c = c.Parent() {
+		switch {
+		case c.Annotations["skipAuth"] == "true",
+			c.Name() == "help", c.Name() == "completion", c.Name() == cobra.ShellCompRequestCmd:
+			return false
+		}
+	}
+	return true
 }

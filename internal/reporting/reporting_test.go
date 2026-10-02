@@ -1,6 +1,7 @@
 package reporting
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -725,6 +726,50 @@ func TestFileTransport_Save(t *testing.T) {
 	}
 }
 
+// Reports written in the same second each keep a file of their own, the one
+// the user is told about: the name starts with the time, so a sort by name is
+// a sort by time, then the start of the Error ID. No save replaces a file, and
+// one that fails leaves none.
+func TestAutoFileTransportGivesEachReportItsOwnFile(t *testing.T) {
+	home := t.TempDir()
+	for _, env := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "LOCALAPPDATA"} {
+		t.Setenv(env, home)
+	}
+	orig := timeNow
+	timeNow = func() time.Time { return time.Date(2026, 10, 2, 12, 8, 37, 0, time.UTC) } // every save in one second
+	t.Cleanup(func() { timeNow = orig })
+	save := func(id, msg string) (string, error) {
+		return (&AutoFileTransport{}).Save(&ErrorReport{ErrorID: id, ErrorMessage: msg})
+	}
+	first, err := save("aaaaaaaa-0000-4000-8000-000000000001", "first")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	second, err := save("bbbbbbbb-0000-4000-8000-000000000002", "second")
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	firstData, _ := os.ReadFile(first)
+	secondData, _ := os.ReadFile(second)
+	if filepath.Base(first) != "report-2026-10-02T120837-aaaaaaaa.json" || filepath.Base(second) != "report-2026-10-02T120837-bbbbbbbb.json" ||
+		!bytes.Contains(firstData, []byte(`"errorMessage": "first"`)) || !bytes.Contains(secondData, []byte(`"errorMessage": "second"`)) {
+		t.Errorf("two reports saved as %s and %s, want each in report-<time>-<start of its Error ID>.json", first, second)
+	}
+	if _, err := save("aaaaaaaa-0000-4000-8000-000000000003", "third"); !errors.Is(err, os.ErrExist) {
+		t.Errorf("a report named as the first one: %v, want it refused as existing", err)
+	}
+	if data, _ := os.ReadFile(first); !bytes.Equal(data, firstData) {
+		t.Errorf("the first report's file changed to\n%s", data)
+	}
+	unwritable := &ErrorReport{ErrorID: "cccccccc-0000-4000-8000-000000000004", GeneratedAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)} // no JSON form
+	if _, err := (&AutoFileTransport{}).Save(unwritable); err == nil {
+		t.Error("a report with no JSON form was saved")
+	}
+	if files, _ := filepath.Glob(filepath.Join(filepath.Dir(first), "*")); len(files) != 2 {
+		t.Errorf("the report folder holds %v, want the two reports only", files)
+	}
+}
+
 func TestFormatTextSummary(t *testing.T) {
 	report := &ErrorReport{
 		Severity:     "error",
@@ -799,6 +844,15 @@ func TestIsCLIUsageError(t *testing.T) {
 		{"one flag twice", "use either --job-id or --id, not both: they are the same flag, so passing both discards one of the values", true},
 		{"flags that exclude", "cannot use both --ids and --jobs-csv", true},
 
+		// A platform URL the allowlist refuses, alone or behind the known wrappers
+		{"refused platform URL", `invalid platform URL "https://example.com": unrecognized platform URL. Valid platforms:`, true},
+		{"refused platform URL, client", `failed to create API client: invalid platform URL "https://example.com": unrecognized platform URL. Valid platforms:`, true},
+		{"refused platform URL, daemon run", `failed to create daemon: failed to create API client: invalid platform URL "https://example.com": unrecognized platform URL.`, true},
+		{"refused platform URL in config test", `invalid configuration: invalid platform URL "http://platform.rescale.com": platform URL must use HTTPS (got "http")`, true},
+		// Client creation's other failures keep their class
+		{"empty platform URL", "failed to create API client: API base URL is empty — check configuration (config.csv api_base_url)", false},
+		{"proxy mode", "failed to create API client: unsupported proxy mode: bogus", false},
+
 		// Real errors — should NOT be filtered
 		{"failure naming a flag", "failed to locate folder for XyZ: get file info failed: status 503: unavailable (use --permanent to delete by ID without trashing)", false},
 		{"server error", "API returned 500 internal server error", false},
@@ -824,10 +878,15 @@ func TestCategoryFromOperation(t *testing.T) {
 		{"rescale-int pur run", CategoryPURPipeline},
 		{"rescale-int pur submit-existing", CategoryPURPipeline},
 		{"rescale-int jobs submit", CategoryJobCreate},
-		{"rescale-int jobs download", CategoryJobCreate},
+		{"rescale-int jobs stop", CategoryJobCreate},
+		// Listing jobs or their files, and downloading the files, is no job creation.
+		{"rescale-int jobs list", CategoryTransfer},
+		{"rescale-int jobs listfiles", CategoryTransfer},
+		{"rescale-int jobs download", CategoryTransfer},
+		{"rescale-int jobs watch", CategoryTransfer},
+		{"job_download", CategoryTransfer},
 		{"rescale-int folders upload-dir", CategoryTransfer},
 		{"rescale-int files download", CategoryTransfer},
-		{"job_download", CategoryJobCreate},
 		{"", CategoryTransfer},
 	}
 	for _, tt := range tests {

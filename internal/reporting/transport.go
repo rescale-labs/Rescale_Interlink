@@ -2,10 +2,12 @@ package reporting
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/rescale/rescale-int/internal/config"
@@ -39,18 +41,32 @@ type AutoFileTransport struct{}
 // for as long as it keeps failing.
 const maxRetainedReports = 500
 
-// Save writes the report and returns the saved path.
+// timeNow stamps a report's file name. A variable so a test can hold two saves
+// within one second.
+var timeNow = time.Now
+
+// Save writes the report to a new file and returns its path: report-<time>-<the
+// start of the Error ID>.json, which sorts by time and gives reports from one
+// second a file each. A file is never replaced, and one not written is removed.
 func (t *AutoFileTransport) Save(report *ErrorReport) (string, error) {
 	if err := config.EnsureReportDirectory(); err != nil {
 		return "", fmt.Errorf("ensure report directory: %w", err)
 	}
 
-	filename := fmt.Sprintf("report-%s.json", time.Now().Format("2006-01-02T150405"))
+	id, _, _ := strings.Cut(report.ErrorID, "-")
+	filename := fmt.Sprintf("report-%s-%s.json", timeNow().Format("2006-01-02T150405"), id)
 	path := filepath.Join(config.ReportDirectory(), filename)
-
-	ft := &FileTransport{}
-	if err := ft.Save(report, path); err != nil {
-		return "", err
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return "", fmt.Errorf("write report: %w", err)
+	}
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err == nil {
+		_, err = f.Write(data)
+	}
+	if err = errors.Join(err, f.Close()); err != nil {
+		os.Remove(path)
+		return "", fmt.Errorf("write report: %w", err)
 	}
 
 	pruneOldReports(config.ReportDirectory(), maxRetainedReports)

@@ -77,6 +77,19 @@ func isCLIUsageError(msg string) bool {
 		return true
 	}
 
+	// A platform URL the local check refused, from a flag, the environment or
+	// the config file: in its own words (api.NewClient and Config.Validate both
+	// write `invalid platform URL %q: …`), alone or behind the wrappers of config
+	// test, of the commands that build a client and of daemon run. At the start
+	// only: the words quoted inside another failure, in a server's answer or in
+	// another setting's value, are no refusal, and that failure keeps its report.
+	for _, wrapper := range []string{"", "invalid configuration: ", "failed to create API client: ",
+		"failed to create daemon: failed to create API client: "} {
+		if strings.HasPrefix(msg, wrapper+`invalid platform URL "`) {
+			return true
+		}
+	}
+
 	// User chose conflicting options or cancelled the operation themselves
 	if strings.HasSuffix(lower, "upload cancelled") ||
 		strings.HasSuffix(lower, "download cancelled") ||
@@ -102,6 +115,10 @@ func categoryFromOperation(operation string) ErrorCategory {
 	switch {
 	case strings.Contains(lower, "pur"):
 		return CategoryPURPipeline
+	// Listing jobs or their files, and downloading the files ('jobs watch'
+	// downloads as it watches), creates no job.
+	case strings.Contains(lower, "list"), strings.Contains(lower, "download"), strings.Contains(lower, "watch"):
+		return CategoryTransfer
 	case strings.Contains(lower, "job"):
 		return CategoryJobCreate
 	default:

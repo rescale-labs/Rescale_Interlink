@@ -57,17 +57,18 @@ func TestDaemonStopForceEndsADaemonThatDoesNotStop(t *testing.T) {
 	t.Cleanup(func() { daemonStopWait = origWait })
 	for _, tc := range []struct {
 		name, says string // what --force says before it ends the daemon
-		fails      string // what the error says without --force
+		fails, why string // what the error says without --force, and what it says first
 		start      func(*testing.T)
 	}{
-		{"IPC does not answer", "but IPC not responding", "was not stopped. Use 'rescale-int daemon stop --force'", func(t *testing.T) {
+		// The daemon was started without --ipc, or is stuck: the reason covers both.
+		{"IPC does not answer", "but IPC not responding", "was not stopped. Use 'rescale-int daemon stop --force'", "It was started without --ipc, or it is not answering.", func(t *testing.T) {
 			if err := daemon.WritePIDFile(); err != nil {
 				t.Fatalf("WritePIDFile: %v", err)
 			}
 			t.Cleanup(daemon.RemovePIDFile)
 		}},
-		{"the shutdown is refused", "Graceful shutdown failed", "failed to send shutdown command", startRefusingDaemon},
-		{"the daemon does not exit", "Graceful shutdown timed out", "did not exit within", func(t *testing.T) { startStandInDaemon(t) }},
+		{"the shutdown is refused", "Graceful shutdown failed", "failed to send shutdown command", "", startRefusingDaemon},
+		{"the daemon does not exit", "Graceful shutdown timed out", "did not exit within", "", func(t *testing.T) { startStandInDaemon(t) }},
 	} {
 		for _, mode := range []struct {
 			force bool
@@ -88,8 +89,8 @@ func TestDaemonStopForceEndsADaemonThatDoesNotStop(t *testing.T) {
 				out, err := runDaemonCommand(t, newDaemonStopCmd(), args...)
 				switch {
 				case !mode.force:
-					if len(killed) != 0 || err == nil || !strings.Contains(err.Error(), tc.fails) {
-						t.Errorf("daemon stop without --force ended %v and returned %v, want nothing ended and an error containing %q\n%s", killed, err, tc.fails, out)
+					if len(killed) != 0 || err == nil || !strings.Contains(err.Error(), tc.fails) || !strings.Contains(out, tc.why) {
+						t.Errorf("daemon stop without --force ended %v and returned %v, want nothing ended and an error containing %q after %q\n%s", killed, err, tc.fails, tc.why, out)
 					}
 				case !slices.Equal(killed, []int{os.Getpid()}) || !strings.Contains(out, tc.says):
 					t.Errorf("daemon stop --force ended %v, want the daemon's PID %d after %q: %v\n%s", killed, os.Getpid(), tc.says, err, out)

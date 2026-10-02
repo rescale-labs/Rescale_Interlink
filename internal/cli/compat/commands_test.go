@@ -110,12 +110,19 @@ func TestCompatRootCmdExecute(t *testing.T) {
 		args    []string
 		wantErr bool
 		errWant string
+		wantOut string // a command that succeeds prints this
 	}{
 		// Auth may fail before the missing-flag check; either way it errors.
 		{name: "stop without job ID", args: []string{"stop"}, wantErr: true},
 		{name: "delete without job ID", args: []string{"delete"}, wantErr: true},
+		{name: "status still looks up a key first", args: []string{"status", "-j", "TEST123"}, wantErr: true, errWant: "no API key provided"},
 		{name: "check-for-update needs no API key", args: []string{"check-for-update"}},
 		{name: "check-for-update -i is deferred", args: []string{"check-for-update", "-i"}, wantErr: true, errWant: "not yet implemented"},
+		// Commands that need no account run with no key, and so offline.
+		{name: "spub says it is deferred", args: []string{"spub"}, wantErr: true, errWant: "compat command 'spub' is deferred to v5.0.0"},
+		{name: "completion needs no API key", args: []string{"completion", "zsh", "--no-descriptions"}, wantOut: "#compdef"},
+		{name: "a shell's completion request needs no API key", args: []string{"__complete", "st"}, wantOut: "status"},
+		{name: "help needs no API key", args: []string{"help", "status"}},
 	}
 
 	for _, tt := range tests {
@@ -129,6 +136,9 @@ func TestCompatRootCmdExecute(t *testing.T) {
 			if !tt.wantErr {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
+				}
+				if !strings.Contains(out.String(), tt.wantOut) {
+					t.Errorf("output = %q, want it to contain %q", out.String(), tt.wantOut)
 				}
 				return
 			}
@@ -231,31 +241,15 @@ func TestAllCommandsRegistered(t *testing.T) {
 		}
 	}
 }
+
+// Only the commands that need no account skip authentication: every other one
+// finds a key and authenticates first, as rescale-cli does.
 func TestRootCmd_AuthSkipAnnotation(t *testing.T) {
 	rootCmd, _ := NewCompatRootCmd()
-
-	// Find check-for-update command and verify annotation
-	var checkCmd *cobra.Command
 	for _, cmd := range rootCmd.Commands() {
-		if cmd.Name() == "check-for-update" {
-			checkCmd = cmd
-			break
-		}
-	}
-	if checkCmd == nil {
-		t.Fatal("check-for-update command not found")
-	}
-	if checkCmd.Annotations == nil || checkCmd.Annotations["skipAuth"] != "true" {
-		t.Error("check-for-update should have skipAuth annotation")
-	}
-
-	// Verify other commands do NOT have skipAuth
-	for _, cmd := range rootCmd.Commands() {
-		if cmd.Name() == "check-for-update" || cmd.Name() == "help" || cmd.Name() == "completion" {
-			continue
-		}
-		if cmd.Annotations != nil && cmd.Annotations["skipAuth"] == "true" {
-			t.Errorf("command %q should not have skipAuth annotation", cmd.Name())
+		want := cmd.Name() == "check-for-update" || cmd.Name() == "spub"
+		if got := cmd.Annotations["skipAuth"] == "true"; got != want {
+			t.Errorf("command %q skipAuth = %v, want %v", cmd.Name(), got, want)
 		}
 	}
 }
