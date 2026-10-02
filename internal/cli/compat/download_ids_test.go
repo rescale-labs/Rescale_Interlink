@@ -121,6 +121,7 @@ func TestCompatJobDownloadPrintsEveryRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer stderr.Close()
 	defer func(orig *os.File) { os.Stderr = orig }(os.Stderr)
 	os.Stderr = stderr
 	err = compatDownloadByJobID(context.Background(), "JOB1", compatDownloadOpts{OutputDir: t.TempDir()}, client, &CompatContext{Quiet: true})

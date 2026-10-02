@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -111,6 +112,9 @@ func TestDownloadRefusesALinkAtAnyPathItWrites(t *testing.T) {
 			localPath := filepath.Join(t.TempDir(), "results.dat")
 			at, want := localPath+tt.suffix, "symbolic link"
 			if tt.fifo {
+				if runtime.GOOS == "windows" {
+					t.Skip("no FIFOs to test with on Windows; Git Bash's mkfifo makes none Go can see")
+				}
 				if err := exec.Command("mkfifo", at).Run(); err != nil {
 					t.Skipf("mkfifo: %v", err)
 				}

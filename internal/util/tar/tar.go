@@ -109,7 +109,11 @@ func CreateTarGz(sourceDir, outputPath string, useAbsolutePaths bool, compressio
 // "-" is an option to every tar, and bsdtar also reads "@name" as an archive
 // to copy entries from and "-Cdir" as a directory change, even after "--".
 // Only such names get the "./", so every other archive keeps its entry names.
+// GNU tar also unquotes C escapes in a name ("\r" in C:\runs is a carriage
+// return), so a Windows path goes with forward slashes, which both tars there
+// accept and bsdtar writes its entry names with anyway.
 func tarOperand(path string) string {
+	path = filepath.ToSlash(path)
 	if strings.HasPrefix(path, "-") || strings.HasPrefix(path, "@") {
 		return "./" + path
 	}

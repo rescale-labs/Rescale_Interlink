@@ -67,8 +67,9 @@ func TestUploadReportRefusesALinkOrAFIFO(t *testing.T) {
 		t.Errorf("the link's target now holds %q", got)
 	}
 
+	// No FIFOs to test with on Windows; Git Bash's mkfifo makes none Go can see.
 	fifo := filepath.Join(dir, "fifo.json")
-	if exec.Command("mkfifo", fifo).Run() == nil {
+	if runtime.GOOS != "windows" && exec.Command("mkfifo", fifo).Run() == nil {
 		done := make(chan error, 1)
 		go func() { done <- writeUploadReport(fifo, files) }()
 		select {
