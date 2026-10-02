@@ -554,13 +554,17 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
         newPageCursors[currentPage + 1] = contents.nextCursor
       }
 
-      const newCache = new Map(state.pageCache)
-      newCache.set(currentPage, {
-        items: contents.items,
-        hasMore: contents.hasMore,
-        nextCursor: contents.nextCursor ?? '',
-        timestamp: Date.now(),
-      })
+      // A navigation starts a new cache. A failed answer stays out of it, so
+      // that Previous and Next ask for the page again rather than show it empty.
+      const newCache = isNewNavigation ? new Map<number, CachedPage>() : new Map(state.pageCache)
+      if (!contents.warning) {
+        newCache.set(currentPage, {
+          items: contents.items,
+          hasMore: contents.hasMore,
+          nextCursor: contents.nextCursor ?? '',
+          timestamp: Date.now(),
+        })
+      }
       // Limit cache size
       if (newCache.size > MAX_CACHED_PAGES) {
         const oldestKey = newCache.keys().next().value
@@ -590,22 +594,9 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
           currentPage,
           pageCursors: newPageCursors,
           knownTotalPages,
-          pageCache: isNewNavigation ? new Map() : newCache,  // Clear cache on new navigation
+          pageCache: newCache,
         }
       }))
-
-      if (isNewNavigation) {
-        const freshCache = new Map<number, CachedPage>()
-        freshCache.set(0, {
-          items: contents.items,
-          hasMore: contents.hasMore,
-          nextCursor: contents.nextCursor ?? '',
-          timestamp: Date.now(),
-        })
-        set(state => ({
-          remote: { ...state.remote, pageCache: freshCache }
-        }))
-      }
     } catch (error) {
       // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return

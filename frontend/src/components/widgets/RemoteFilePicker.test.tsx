@@ -13,9 +13,9 @@ const fileItem = (name: string) => ({
   id: name, name, isFolder: false, size: 1, modTime: '', path: name,
 }) as unknown as wailsapp.FileItemDTO
 
-const contents = (names: string[] = []) => ({
+const contents = (names: string[] = [], warning?: string) => ({
   folderId: 'folder', folderPath: 'path', items: names.map(fileItem),
-  hasMore: false, nextCursor: '',
+  hasMore: false, nextCursor: '', warning,
 }) as unknown as wailsapp.FolderContentsDTO
 
 function setAPIKey(apiKey: string) {
@@ -156,5 +156,21 @@ describe('RemoteFilePicker stale responses', () => {
 
     await act(async () => { releaseLibrary() })
     await waitFor(() => expect(screen.getByTitle('Refresh')).toBeEnabled())
+  })
+})
+
+describe('RemoteFilePicker failed listing', () => {
+  // The binding answers a failed listing with a warning and no items.
+  it('shows the warning instead of an empty library, until Refresh lists the folder', async () => {
+    const warning = 'Rate limit exceeded - please wait a moment and try again'
+    vi.mocked(App.ListRemoteFolder).mockResolvedValueOnce(contents([], warning))
+    renderPicker()
+    await screen.findByText(warning)
+    expect(screen.queryByText('Your library is empty')).toBeNull()
+
+    fireEvent.click(screen.getByTitle('Refresh'))
+    await screen.findByText('Your library is empty')
+    expect(App.ListRemoteFolder).toHaveBeenLastCalledWith('lib-a')
+    expect(screen.queryByText(warning)).toBeNull()
   })
 })

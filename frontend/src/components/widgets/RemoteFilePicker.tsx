@@ -148,6 +148,8 @@ export function RemoteFilePicker({
 
       setCurrentFolderId(folderId)
       setItems(contents.items)
+      // A failed listing resolves with a warning and no items instead of throwing.
+      setError(contents.warning || null)
       setIsLoading(false)
     } catch (err) {
       if (navGeneration.current !== myGen) return

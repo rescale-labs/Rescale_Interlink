@@ -624,6 +624,49 @@ describe.each(VIEW_NAMES)('a folder listing that fails in %s', (view) => {
   })
 })
 
+// Previous and Next serve pages from a cache, which must not turn a failed
+// page into an empty one.
+describe.each(VIEW_NAMES)('a failed second page in %s', (view) => {
+  const { root, sub } = VIEWS[view]
+  const warning = 'Rate limit exceeded - please wait a moment and try again'
+  // The first page says a second follows, and every request for the second fails.
+  const page = async (cursor: string) => cursor
+    ? mockContents({ warning })
+    : mockContents({ items: [mockFileItem({ id: 'f-1', name: 'first.dat' })], hasMore: true, nextCursor: 'page-2' })
+
+  beforeEach(() => {
+    resetRemote()
+    vi.clearAllMocks()
+    setRemote(at(view, 'root'))
+    vi.mocked(App.ListRemoteFolderPage).mockImplementation((_id, cursor) => page(cursor))
+    vi.mocked(App.SearchRemoteFolderContents).mockImplementation((_id, _query, cursor) => page(cursor))
+  })
+
+  afterEach(() => {
+    vi.mocked(App.ListRemoteFolderPage).mockReset()
+    vi.mocked(App.SearchRemoteFolderContents).mockReset()
+  })
+
+  it.each<[string, () => unknown, typeof App.ListRemoteFolderPage | typeof App.SearchRemoteFolderContents, (cursor: string) => unknown[]]>([
+    ['listing', () => store().navigateRemoteTo(sub.id, sub.name), App.ListRemoteFolderPage, (cursor) => [sub.id, cursor, 25]],
+    ['search', () => store().setLibrarySearchQuery('few-file1'), App.SearchRemoteFolderContents, (cursor) => [root.id, 'few-file1', cursor, 25]],
+  ])('of a %s shows its error again after Previous and Next', async (_, open, binding, args) => {
+    open()
+    await flush()
+    await store().goToNextRemotePage()
+    expect(store().remote).toMatchObject({ currentPage: 1, items: [], error: warning })
+
+    await store().goToPreviousRemotePage()
+    expect(store().remote).toMatchObject({ currentPage: 0, error: null })
+    expect(names()).toEqual(['first.dat'])
+
+    await store().goToNextRemotePage()
+    expect(store().remote).toMatchObject({ currentPage: 1, items: [], isLoading: false, error: warning })
+    // The first page came from the cache; the failed one was asked for again.
+    expect(vi.mocked(binding).mock.calls).toEqual([args(''), args('page-2'), args('page-2')])
+  })
+})
+
 describe('Legacy Files filters', () => {
   beforeEach(() => {
     resetRemote()
