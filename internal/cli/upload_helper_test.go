@@ -8,14 +8,18 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rescale/rescale-int/internal/api"
+	"github.com/rescale/rescale-int/internal/cloud/upload"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/constants"
 	"github.com/rescale/rescale-int/internal/logging"
+	"github.com/rescale/rescale-int/internal/models"
 )
 
 // uploadRecorder stands in for UploadFilesWithIDs and records every batch it is
@@ -132,6 +136,57 @@ func assertDryRunPreview(t *testing.T, out, fileName string) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry-run preview missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// Each file of an upload carries one number. The "Preparing" line numbered a
+// file by its place among the arguments and its progress line by the order the
+// transfers started, so with two at once one file could be [1/2] and [2/2].
+func TestUploadNumbersEachFileOnce(t *testing.T) {
+	defer func(orig func(context.Context, upload.UploadParams) (*models.CloudFile, error)) { uploadFileFn = orig }(uploadFileFn)
+	bStarted := make(chan struct{})
+	uploadFileFn = func(_ context.Context, p upload.UploadParams) (*models.CloudFile, error) {
+		// b's transfer starts first: the progress lines come in the opposite
+		// order to the arguments.
+		if filepath.Base(p.LocalPath) == "b.dat" {
+			p.ProgressCallback(0)
+			close(bStarted)
+		} else {
+			select {
+			case <-bStarted:
+			case <-time.After(10 * time.Second):
+				return nil, errors.New("the two uploads did not run at once")
+			}
+			p.ProgressCallback(0)
+		}
+		return &models.CloudFile{ID: "FAKEID"}, nil
+	}
+	files := []string{writeUploadFixture(t, "a.dat", 16), writeUploadFixture(t, "b.dat", 16)}
+	client := fakeTransferAPI(t)
+
+	var printed string
+	var err error
+	said := captureStderr(t, func() {
+		printed = captureStdout(t, func() {
+			_, err = UploadFilesWithIDs(context.Background(), files, "", 2, false, nil, client, GetLogger(), false)
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	number := regexp.MustCompile(`\[(\d+)/2\]`)
+	for _, name := range []string{"a.dat", "b.dat"} {
+		numbers := map[string]bool{}
+		for _, line := range strings.Split(said+printed, "\n") {
+			if strings.Contains(line, name) {
+				for _, m := range number.FindAllStringSubmatch(line, -1) {
+					numbers[m[1]] = true
+				}
+			}
+		}
+		if len(numbers) != 1 {
+			t.Errorf("%s is numbered %v, want one number; printed\n%s%s", name, numbers, said, printed)
 		}
 	}
 }

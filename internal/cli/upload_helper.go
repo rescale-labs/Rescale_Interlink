@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -42,6 +43,22 @@ func retryReporter(bar retryBar, w io.Writer) func(cloud.RetryEvent) {
 			fmt.Fprintf(w, "%s\n", msg)
 		}
 	}
+}
+
+// cancelledTransferError is how an upload or download the user cancelled ends.
+// When each of judged, the errors a report decision rests on, is the cancel, it
+// says so and counts the files never started, with no advice: the stop was the
+// user's. Otherwise something else failed, and err, the run's own error, stays
+// whole, only marked as cancelled, so its advice and report decision hold.
+func cancelledTransferError(ctx context.Context, what string, notStarted int, err error, judged []error) error {
+	if slices.ContainsFunc(judged, func(e error) bool { return !isCancellation(e) }) {
+		return fmt.Errorf("%s cancelled after an earlier failure: %w", what, err)
+	}
+	msg := what + " cancelled"
+	if notStarted > 0 {
+		msg += fmt.Sprintf(": %d file(s) not started", notStarted)
+	}
+	return fmt.Errorf("%s: %w", msg, ctx.Err())
 }
 
 // uploadFilesWithIDsFn is a test seam, following the pattern of the download
@@ -396,8 +413,9 @@ func UploadFilesWithIDs(
 		fPath := item.path
 		fileInfo, _ := os.Stat(fPath)
 
+		// Unnumbered: the progress line numbers each file, in the order transfers start.
 		if !silent {
-			fmt.Fprintf(uploadUI.Writer(), "[%d/%d] Preparing to upload %s...\n", item.idx+1, len(filePaths), filepath.Base(fPath))
+			fmt.Fprintf(uploadUI.Writer(), "Preparing to upload %s...\n", filepath.Base(fPath))
 		}
 
 		transferHandle := transferMgr.AllocateTransfer(item.size, numWorkers)
@@ -468,10 +486,14 @@ func UploadFilesWithIDs(
 		errs = append(errs, fmt.Errorf("%d file(s) not uploaded: %w", failed-len(errs), ctx.Err()))
 	}
 	if len(errs) > 0 {
-		if len(errs) == 1 {
-			return nil, errs[0]
+		err := errs[0]
+		if len(errs) > 1 {
+			err = reporting.BatchError(fmt.Sprintf("upload failed: %d file(s) failed (first error: %v)", failed, errs[0]), errs)
 		}
-		return nil, reporting.BatchError(fmt.Sprintf("upload failed: %d file(s) failed (first error: %v)", failed, errs[0]), errs)
+		if ctx.Err() != nil { // every error weighs on whether an upload files a report
+			err = cancelledTransferError(ctx, "upload", failed-len(batchResult.Errors), err, errs)
+		}
+		return nil, err
 	}
 
 	// Summary

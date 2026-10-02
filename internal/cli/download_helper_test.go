@@ -140,6 +140,52 @@ func TestFormatDownloadError(t *testing.T) {
 	}
 }
 
+// files download names each file it leaves in place, in the words jobs
+// download uses.
+func TestDownloadsNameEachSkippedFile(t *testing.T) {
+	const size = 4
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"id":"file123","name":"results.dat","decryptedSize":%d}`, size)
+	}))
+	defer server.Close()
+	client := api.NewClientForTest(&config.Config{APIBaseURL: server.URL, APIKey: "test"})
+	origClient, origList, origDownload := getAPIClientFn, listJobFilesFn, downloadFileFn
+	t.Cleanup(func() { getAPIClientFn, listJobFilesFn, downloadFileFn = origClient, origList, origDownload })
+	getAPIClientFn = func() (*api.Client, error) { return client, nil }
+	listJobFilesFn = func(context.Context, *api.Client, string) ([]models.JobFile, error) {
+		return []models.JobFile{{ID: "file123", Name: "results.dat", DecryptedSize: size}}, nil
+	}
+	kept := func(context.Context, download.DownloadParams) error {
+		t.Error("a complete file on disk was downloaded again")
+		return nil
+	}
+
+	for name, run := range map[string]func(out string) error{
+		"files download": func(out string) (err error) {
+			downloadFileFn = kept
+			captureStdout(t, func() {
+				err = executeFileDownload(context.Background(), []string{"file123"}, out, 1, false, true, false, false, client, GetLogger())
+			})
+			return err
+		},
+		"jobs download": func(out string) error {
+			_, err := runWithCancel(t, newJobsDownloadCmd(), kept, "--job-id", "job123", "--outdir", out, "--skip")
+			return err
+		},
+	} {
+		out := t.TempDir()
+		if err := os.WriteFile(filepath.Join(out, "results.dat"), make([]byte, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		said := captureStderr(t, func() { err = run(out) })
+		if err != nil || !strings.Contains(said, "⊘ Skipping existing file: results.dat\n") {
+			t.Errorf("%s --skip returned %v after writing\n%s\nwant the file named as skipped", name, err, said)
+		}
+	}
+}
+
 // --- skip-existing size gate ---
 
 // TestExistingFileIsComplete covers the gate that stops --skip and jobs watch

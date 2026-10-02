@@ -225,6 +225,7 @@ func executeFileDownload(
 		skipChecksum:     skipChecksum,
 		conflictMode:     initialDownloadConflictMode(overwriteAll, skipAll, resumeAll),
 		promptOnConflict: true,
+		announceSkip:     true,
 		announcePrepare:  true,
 		refused:          refused,
 		apiClient:        apiClient,
@@ -693,27 +694,26 @@ func runDownloadBatch(ctx context.Context, items []cliDownloadItem, opts downloa
 	// starts the files still queued, which leave no error of their own.
 	errs := batchResult.Errors
 	failed := len(items) - batchResult.Completed
-	if failed > len(errs) {
-		errs = append(errs, fmt.Errorf("%d file(s) not downloaded: %w", failed-len(errs), ctx.Err()))
+	notStarted := failed - len(errs)
+	if notStarted > 0 {
+		errs = append(errs, fmt.Errorf("%d file(s) not downloaded: %w", notStarted, ctx.Err()))
 	}
 	errs, failed = append(opts.refused, errs...), failed+len(opts.refused)
 
 	// Print summary
-	if len(errs) > 0 {
-		fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
-		if len(skippedFiles) > 0 {
-			fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
-		}
-		fmt.Printf("✗ Failed to download %d file(s)\n", failed)
-		// Return first error but continue with others (per project objectives)
-		return errs[0]
-	}
-
 	fmt.Printf("\n✓ Successfully downloaded %d file(s)\n", len(downloadedFiles))
 	if len(skippedFiles) > 0 {
 		fmt.Printf("⊘ Skipped %d file(s)\n", len(skippedFiles))
 	}
-	return nil
+	if len(errs) == 0 {
+		return nil
+	}
+	fmt.Printf("✗ Failed to download %d file(s)\n", failed)
+	if ctx.Err() != nil { // a download files a report, or not, on its first error alone
+		return cancelledTransferError(ctx, "download", notStarted, errs[0], errs[:1])
+	}
+	// Return first error but continue with others (per project objectives)
+	return errs[0]
 }
 
 // timingWriter is the writer a download's --timing lines go to: the progress
