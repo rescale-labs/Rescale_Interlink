@@ -57,6 +57,7 @@ export function RemoteBrowser() {
 
   const [showNewFolderDialog, setShowNewFolderDialog] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [newFolderError, setNewFolderError] = useState('')
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
 
   // Local state for search input (debounced before applying to store)
@@ -127,13 +128,15 @@ export function RemoteBrowser() {
     setRemoteSelection(ids, lastId)
   }, [setRemoteSelection])
 
-  // Handle create folder
+  // Handle create folder. A refused name stays in the dialog, to be changed.
   const handleCreateFolder = useCallback(async () => {
     if (!newFolderName.trim()) return
 
     setIsCreatingFolder(true)
     try {
-      await createRemoteFolder(newFolderName.trim())
+      const { error } = await createRemoteFolder(newFolderName.trim())
+      setNewFolderError(error ?? '')
+      if (error) return
       setShowNewFolderDialog(false)
       setNewFolderName('')
     } finally {
@@ -188,7 +191,7 @@ export function RemoteBrowser() {
         {/* New folder button (only in My Library) */}
         {canCreateFolder && !isTrash && (
           <button
-            onClick={() => setShowNewFolderDialog(true)}
+            onClick={() => { setNewFolderError(''); setShowNewFolderDialog(true) }}
             className="p-1.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 flex-shrink-0"
             title="Create new folder"
           >
@@ -304,7 +307,9 @@ export function RemoteBrowser() {
           mode={mode}
           showFileId
           emptyMessage={
-            mode === 'library'
+            librarySearchQuery
+              ? 'No files match your search.'
+              : mode === 'library'
               ? canGoBack ? 'This folder is empty' : 'Your library is empty'
               : mode === 'jobs'
               ? 'No job files found'
@@ -351,6 +356,7 @@ export function RemoteBrowser() {
                 if (e.key === 'Escape') setShowNewFolderDialog(false)
               }}
             />
+            {newFolderError && <p className="text-sm text-red-600 dark:text-red-400 mb-4">{newFolderError}</p>}
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as App from '../../wailsjs/go/wailsapp/App'
 import { wailsapp } from '../../wailsjs/go/models'
 import { RemoteBrowserState, selectRemoteDestination, useFileBrowserStore } from './fileBrowserStore'
@@ -281,13 +281,15 @@ function setRemote(patch: Partial<ReturnType<typeof useFileBrowserStore.getState
 }
 
 describe('My Library search', () => {
+  const atRoot = { currentFolderId: 'lib-folder-123', breadcrumb: [{ id: 'lib-folder-123', name: 'My Library' }] }
+
   beforeEach(() => {
     resetRemote()
     vi.clearAllMocks()
   })
 
   it('routes a non-empty query through the search binding, not the listing binding', async () => {
-    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    setRemote({ ...atRoot, librarySearchQuery: 'mesh' })
     vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
       mockContents({ folderId: 'lib-folder-123', items: [mockFileItem({ id: 'f-1', name: 'mesh.stl' })] })
     )
@@ -300,7 +302,7 @@ describe('My Library search', () => {
   })
 
   it('falls back to the listing binding when the query is empty', async () => {
-    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: '' })
+    setRemote({ ...atRoot, librarySearchQuery: '' })
     vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
 
     await useFileBrowserStore.getState().loadRemoteFolder()
@@ -311,7 +313,7 @@ describe('My Library search', () => {
 
   it('changing the query resets pagination state', async () => {
     setRemote({
-      currentFolderId: 'lib-folder-123',
+      ...atRoot,
       currentPage: 2,
       pageCursors: ['', 'c1', 'c2'],
       knownTotalPages: 3,
@@ -332,7 +334,7 @@ describe('My Library search', () => {
   })
 
   it('page two of a search reuses page one\'s cursor', async () => {
-    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    setRemote({ ...atRoot, librarySearchQuery: 'mesh' })
     vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
       mockContents({ folderId: 'lib-folder-123', hasMore: true, nextCursor: 'search-cursor-2' })
     )
@@ -348,7 +350,7 @@ describe('My Library search', () => {
   })
 
   it('discards a search response superseded by a newer navigation', async () => {
-    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    setRemote({ ...atRoot, librarySearchQuery: 'mesh' })
 
     let resolveSearch: (v: wailsapp.FolderContentsDTO) => void = () => {}
     vi.mocked(App.SearchRemoteFolderContents).mockImplementationOnce(
@@ -374,7 +376,7 @@ describe('My Library search', () => {
   })
 
   it('reports a search failure instead of rendering an empty library', async () => {
-    setRemote({ currentFolderId: 'lib-folder-123', librarySearchQuery: 'mesh' })
+    setRemote({ ...atRoot, librarySearchQuery: 'mesh' })
     vi.mocked(App.SearchRemoteFolderContents).mockResolvedValueOnce(
       mockContents({ folderId: 'lib-folder-123', items: [], warning: 'Server error - please try again later' })
     )
@@ -384,6 +386,241 @@ describe('My Library search', () => {
     const s = useFileBrowserStore.getState().remote
     expect(s.error).toBe('Server error - please try again later')
     expect(s.items).toHaveLength(0)
+  })
+})
+
+// A fake remote for replaying requests that overlap. Each listing and search is
+// held until the test answers it, and is answered with what the folder it named
+// holds, so a request sent to the wrong folder shows up as the wrong items.
+function fakeRemote(folders: Record<string, string[]>) {
+  const pending: Array<(answer?: wailsapp.FolderContentsDTO) => void> = []
+  const contents = (folderId: string, query = '') => mockContents({
+    folderId,
+    items: (folders[folderId] ?? [])
+      .filter((name) => name.includes(query))
+      .map((name) => mockFileItem({ id: `${folderId}/${name}`, name })),
+  })
+  const hold = (answer: wailsapp.FolderContentsDTO) =>
+    new Promise<wailsapp.FolderContentsDTO>((resolve) => pending.push((other) => resolve(other ?? answer)))
+  vi.mocked(App.ListRemoteFolderPage).mockImplementation((folderId) => hold(contents(folderId)))
+  vi.mocked(App.SearchRemoteFolderContents).mockImplementation((folderId, query) => hold(contents(folderId, query)))
+  return pending
+}
+
+// The two views that browse folders. Each root holds two files that match the
+// search term; each subfolder holds none.
+const VIEWS = {
+  'My Library': { mode: 'library', root: { id: 'lib-folder-123', name: 'My Library' }, sub: { id: 'sub-1', name: 'Sub' } },
+  'My Jobs': { mode: 'jobs', root: { id: 'jobs-folder-456', name: 'My Jobs' }, sub: { id: 'job-1', name: 'job-1' } },
+} as const
+type View = keyof typeof VIEWS
+const VIEW_NAMES = Object.keys(VIEWS) as View[]
+const FOLDERS: Record<string, string[]> = {
+  'lib-folder-123': ['few-file1-a.dat', 'few-file1-b.dat', 'other.dat'],
+  'sub-1': ['in-sub.dat'],
+  'jobs-folder-456': ['few-file1-run-a', 'few-file1-run-b', 'other-run'],
+  'job-1': ['in-job.dat'],
+}
+const store = () => useFileBrowserStore.getState()
+const names = () => store().remote.items.map((i) => i.name)
+
+// The view at its root, or in its subfolder with that folder's listing on screen.
+function at(view: View, where: 'root' | 'sub'): Partial<RemoteBrowserState> {
+  const { mode, root, sub } = VIEWS[view]
+  if (where === 'root') return { mode, currentFolderId: root.id, breadcrumb: [root] }
+  const items = FOLDERS[sub.id].map((name) => mockFileItem({ id: `${sub.id}/${name}`, name }))
+  return { mode, currentFolderId: sub.id, breadcrumb: [root, sub], items }
+}
+
+// Uploads may go to a library folder, never to a job's.
+const destinationIn = (view: View, folderId: string) => view === 'My Library'
+  ? { ready: true, destFolderId: folderId }
+  : { ready: false, reason: 'N/A in Jobs view' }
+
+// A search box, Refresh and a breadcrumb all stay live while a navigation's
+// listing is on its way, so each must act on the folder the user navigated to,
+// whichever request answers first.
+describe('requests that overlap a navigation', () => {
+  const { root } = VIEWS['My Library']
+  // Answers every held request, oldest first, including any an answer triggers.
+  const answerAll = async (pending: Array<() => void>) => {
+    while (pending.length) {
+      pending.shift()!()
+      await flush()
+    }
+  }
+  const inOrder = async (first: () => void, second: () => void) => {
+    first()
+    await flush()
+    second()
+    await flush()
+  }
+
+  beforeEach(() => {
+    resetRemote()
+    vi.clearAllMocks()
+  })
+
+  // fakeRemote replaces the default bindings, which later tests rely on.
+  afterEach(() => {
+    vi.mocked(App.ListRemoteFolderPage).mockReset()
+    vi.mocked(App.SearchRemoteFolderContents).mockReset()
+  })
+
+  describe.each(VIEW_NAMES)('in %s', (view) => {
+    const { mode, root, sub } = VIEWS[view]
+    const matches = FOLDERS[root.id].filter((name) => name.includes('few-file1'))
+
+    it.each<['breadcrumb click' | 'view switch', 'listing' | 'search']>([
+      ['breadcrumb click', 'listing'],
+      ['breadcrumb click', 'search'],
+      ['view switch', 'listing'],
+      ['view switch', 'search'],
+    ])('a search typed right after a %s runs in the folder navigated to (the %s answers first)', async (navigation, first) => {
+      const pending = fakeRemote(FOLDERS)
+      if (navigation === 'view switch') {
+        setRemote(at(view === 'My Library' ? 'My Jobs' : 'My Library', 'root'))
+        store().setRemoteMode(mode)
+      } else {
+        setRemote(at(view, 'sub'))
+        store().navigateRemoteToBreadcrumb(0)
+      }
+      store().setLibrarySearchQuery('few-file1')
+
+      expect(App.SearchRemoteFolderContents).toHaveBeenCalledWith(root.id, 'few-file1', '', 25)
+      // Nothing from the folder being left stays listed to be opened under the new path.
+      expect(names()).toEqual([])
+      const [listing, search] = pending.splice(0)
+      await (first === 'listing' ? inOrder(listing, search) : inOrder(search, listing))
+
+      const s = store().remote
+      expect(names()).toEqual(matches)
+      expect(s.breadcrumb).toEqual([root])
+      expect(s).toMatchObject({ mode, librarySearchQuery: 'few-file1', currentFolderId: root.id, isLoading: false, error: null })
+      expect(selectRemoteDestination(s)).toMatchObject(destinationIn(view, root.id))
+    })
+
+    it('a search typed right after opening a folder runs in that folder', async () => {
+      const pending = fakeRemote({ ...FOLDERS, [sub.id]: [...FOLDERS[sub.id], 'few-file1-sub.dat'] })
+      setRemote(at(view, 'root'))
+
+      store().navigateRemoteTo(sub.id, sub.name)
+      store().setLibrarySearchQuery('few-file1')
+      expect(App.SearchRemoteFolderContents).toHaveBeenCalledWith(sub.id, 'few-file1', '', 25)
+      await answerAll(pending)
+
+      const s = store().remote
+      expect(names()).toEqual(['few-file1-sub.dat'])
+      expect(s.breadcrumb).toEqual([root, sub])
+      expect(s).toMatchObject({ librarySearchQuery: 'few-file1', currentFolderId: sub.id })
+      expect(selectRemoteDestination(s)).toMatchObject(destinationIn(view, sub.id))
+    })
+
+    it('Refresh and clearing the search stay in the folder the breadcrumb led to', async () => {
+      const pending = fakeRemote(FOLDERS)
+      setRemote(at(view, 'sub'))
+
+      store().navigateRemoteToBreadcrumb(0)
+      store().setLibrarySearchQuery('few-file1')
+      await answerAll(pending)
+      store().refreshRemote()
+      await answerAll(pending)
+      expect(App.SearchRemoteFolderContents).toHaveBeenLastCalledWith(root.id, 'few-file1', '', 25)
+      expect(names()).toEqual(matches)
+
+      store().setLibrarySearchQuery('')
+      await answerAll(pending)
+      store().refreshRemote()
+      await answerAll(pending)
+
+      expect(App.ListRemoteFolderPage).toHaveBeenLastCalledWith(root.id, '', 25)
+      expect(names()).toEqual(FOLDERS[root.id])
+      expect(store().remote.breadcrumb).toEqual([root])
+      expect(selectRemoteDestination(store().remote)).toMatchObject(destinationIn(view, root.id))
+    })
+  })
+
+  it('a search superseded before it answers never replaces the listing', async () => {
+    const pending = fakeRemote(FOLDERS)
+    setRemote(at('My Library', 'sub'))
+
+    store().navigateRemoteToBreadcrumb(0)
+    store().setLibrarySearchQuery('matches-nothing')
+    store().setLibrarySearchQuery('')
+    // Newest first, so the superseded requests answer last.
+    while (pending.length) {
+      pending.pop()!()
+      await flush()
+    }
+
+    expect(names()).toEqual(FOLDERS[root.id])
+    expect(store().remote).toMatchObject({ currentFolderId: root.id, isLoading: false, error: null })
+  })
+
+  it.each(['listing', 'search'] as const)('a failed search shows its error, not an empty library (the %s answers first)', async (first) => {
+    const pending = fakeRemote(FOLDERS)
+    setRemote(at('My Library', 'sub'))
+
+    store().navigateRemoteToBreadcrumb(0)
+    store().setLibrarySearchQuery('few-file1')
+    const [listing, search] = pending.splice(0)
+    const fail = () => search(mockContents({ folderId: root.id, warning: 'Server error - please try again later' }))
+    await (first === 'listing' ? inOrder(listing, fail) : inOrder(fail, listing))
+
+    expect(store().remote).toMatchObject({ isLoading: false, error: 'Server error - please try again later' })
+  })
+
+  it.each(['listing', 'search'] as const)('a search typed just before a view switch does not land in the new view (the %s answers first)', async (first) => {
+    const jobsRoot = VIEWS['My Jobs'].root
+    const pending = fakeRemote(FOLDERS)
+    setRemote(at('My Library', 'root'))
+
+    store().setLibrarySearchQuery('few-file1')
+    store().setRemoteMode('jobs')
+    const [search, listing] = pending.splice(0)
+    await (first === 'listing' ? inOrder(listing, search) : inOrder(search, listing))
+    store().refreshRemote()
+    await answerAll(pending)
+
+    const s = store().remote
+    expect(names()).toEqual(FOLDERS[jobsRoot.id])
+    expect(s.breadcrumb).toEqual([jobsRoot])
+    expect(s).toMatchObject({ librarySearchQuery: '', currentFolderId: jobsRoot.id, isLoading: false, error: null })
+  })
+})
+
+// The listing binding reports a failed call as a warning beside an empty list,
+// as the search binding does, so the warning is all that tells a failure from
+// an empty folder.
+describe.each(VIEW_NAMES)('a folder listing that fails in %s', (view) => {
+  const { root, sub } = VIEWS[view]
+  const warning = 'Rate limit exceeded - please wait a moment and try again'
+
+  beforeEach(() => {
+    resetRemote()
+    vi.clearAllMocks()
+    setRemote({ ...at(view, 'root'), hasMore: true, pageCursors: ['', 'page-2'] })
+  })
+
+  it.each<[string, () => unknown, [string, string, number]]>([
+    ['opening a folder', () => store().navigateRemoteTo(sub.id, sub.name), [sub.id, '', 25]],
+    ['Refresh', () => store().refreshRemote(), [root.id, '', 25]],
+    ['the next page', () => store().goToNextRemotePage(), [root.id, 'page-2', 25]],
+  ])('shows its error after %s, and Refresh retries the same request', async (_, request, args) => {
+    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ items: [], warning }))
+    request()
+    await flush()
+
+    expect(App.ListRemoteFolderPage).toHaveBeenLastCalledWith(...args)
+    expect(store().remote).toMatchObject({ items: [], isLoading: false, error: warning })
+
+    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ items: [mockFileItem({ id: 'f-1', name: 'back.dat' })] }))
+    store().refreshRemote()
+    await flush()
+
+    expect(App.ListRemoteFolderPage).toHaveBeenLastCalledWith(...args)
+    expect(store().remote).toMatchObject({ isLoading: false, error: null })
+    expect(names()).toEqual(['back.dat'])
   })
 })
 
@@ -796,11 +1033,10 @@ describe('remote destination across navigation', () => {
     })
   })
 
-  it('offers no destination after a failed breadcrumb navigation is refreshed', async () => {
-    // The path is sliced before the load runs, the load fails, and Refresh —
-    // the only enabled recovery — re-fetches currentFolderId without restoring
-    // the path. The pane then shows the subfolder's contents under the root's
-    // path, and the label and the id name different folders.
+  it('Refresh after a failed breadcrumb navigation retries the folder the path names', async () => {
+    // The failed load leaves currentFolderId on the subfolder. Refresh is the
+    // only enabled recovery, and re-listing the subfolder would show its
+    // contents under the root's path.
     setRemote({
       currentFolderId: 'sub-1',
       breadcrumb: [{ id: 'lib-folder-123', name: 'My Library' }, { id: 'sub-1', name: 'Sub' }],
@@ -811,24 +1047,15 @@ describe('remote destination across navigation', () => {
     await flush()
     expect(dest()).toMatchObject({ ready: false, destFolderId: '' })
 
-    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(
-      mockContents({ folderId: 'sub-1', items: [mockFileItem({ id: 'f-1', name: 'in-sub.dat' })] })
-    )
+    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
     useFileBrowserStore.getState().refreshRemote()
     await flush()
 
     const s = useFileBrowserStore.getState().remote
+    expect(App.ListRemoteFolderPage).toHaveBeenLastCalledWith('lib-folder-123', '', 25)
     expect(s.isLoading).toBe(false)
     expect(s.error).toBeNull()
     expect(s.breadcrumb).toEqual([{ id: 'lib-folder-123', name: 'My Library' }])
-    expect(s.currentFolderId).toBe('sub-1')
-    expect(dest()).toMatchObject({ ready: false, destFolderId: '' })
-
-    // Navigating there for real puts the path and the folder back in agreement.
-    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
-    useFileBrowserStore.getState().navigateRemoteToBreadcrumb(0)
-    await flush()
-
     expect(dest()).toEqual({
       destFolderId: 'lib-folder-123',
       destLabel: 'My Library',
@@ -837,7 +1064,7 @@ describe('remote destination across navigation', () => {
     })
   })
 
-  it('does not strand the spinner when a search supersedes an unfinished mode switch', async () => {
+  it('a search typed during an unfinished view switch runs in the new view\'s root', async () => {
     setRemote(inJobOutput)
     vi.mocked(App.ListRemoteFolderPage).mockImplementationOnce(
       () => new Promise<wailsapp.FolderContentsDTO>(() => {})
@@ -847,27 +1074,34 @@ describe('remote destination across navigation', () => {
     expect(useFileBrowserStore.getState().remote.isLoading).toBe(true)
 
     // The search box is live while the folder loads. This bumps navGeneration,
-    // so the load already running will be discarded when it answers.
+    // so the load already running will be discarded when it answers, and the
+    // search has to run in the folder that load was for.
     useFileBrowserStore.getState().setLibrarySearchQuery('mesh')
     await flush()
 
-    const s = useFileBrowserStore.getState().remote
     // isLoading false is what keeps Refresh, pagination and Back usable.
-    expect(s.isLoading).toBe(false)
-    expect(s.error).toBe('Folder not loaded')
-    expect(App.SearchRemoteFolderContents).not.toHaveBeenCalled()
-    expect(dest()).toMatchObject({ ready: false, destFolderId: '' })
-
-    vi.mocked(App.ListRemoteFolderPage).mockResolvedValueOnce(mockContents({ folderId: 'lib-folder-123' }))
-    useFileBrowserStore.getState().setRemoteMode('library')
-    await flush()
-
+    expect(useFileBrowserStore.getState().remote.isLoading).toBe(false)
+    expect(App.SearchRemoteFolderContents).toHaveBeenCalledWith('lib-folder-123', 'mesh', '', 25)
     expect(dest()).toEqual({
       destFolderId: 'lib-folder-123',
       destLabel: 'My Library',
       ready: true,
       reason: '',
     })
+  })
+
+  it('clears the spinner and says so when a search has no folder to run in', () => {
+    // A view whose root id never resolved starts no load and has no path.
+    // Left on, the spinner would disable Refresh, and an empty answer would
+    // read as an empty library.
+    setRemote({ mode: 'library', breadcrumb: [], currentFolderId: '', myLibraryId: null, isLoading: true })
+
+    useFileBrowserStore.getState().setLibrarySearchQuery('mesh')
+
+    const s = useFileBrowserStore.getState().remote
+    expect(s.isLoading).toBe(false)
+    expect(s.error).toBe('Folder not loaded')
+    expect(App.SearchRemoteFolderContents).not.toHaveBeenCalled()
   })
 
   it('leaves the Legacy Files listing alone when its breadcrumb is clicked', () => {
@@ -910,29 +1144,38 @@ describe('createRemoteFolder destination', () => {
     setRemote({ currentFolderId: 'sub-1', breadcrumb: [{ id: 'sub-1', name: 'Sub' }] })
     vi.mocked(App.ListRemoteFolderPage).mockResolvedValue(mockContents({ folderId: 'sub-1' }))
 
-    const id = await useFileBrowserStore.getState().createRemoteFolder('new')
+    const result = await useFileBrowserStore.getState().createRemoteFolder('new')
 
     expect(App.CreateRemoteFolder).toHaveBeenCalledWith('new', 'sub-1')
-    expect(id).toBe('new-folder-789')
+    expect(result).toEqual({ folderId: 'new-folder-789' })
   })
 
-  it('refuses while the mode switch load is in flight', async () => {
+  it('passes on a refusal from the binding as it is worded', async () => {
+    setRemote({ currentFolderId: 'sub-1', breadcrumb: [{ id: 'sub-1', name: 'Sub' }] })
+    // The bridge rejects with the text of the Go error.
+    vi.mocked(App.CreateRemoteFolder).mockRejectedValueOnce('A folder named "runs" already exists')
+
+    const result = await useFileBrowserStore.getState().createRemoteFolder('runs')
+
+    expect(result).toEqual({ error: 'A folder named "runs" already exists' })
+  })
+
+  it('refuses while the mode switch load is in flight, and says why', async () => {
     setRemote({ mode: 'jobs', currentFolderId: 'output-folder-9' })
     vi.mocked(App.ListRemoteFolderPage).mockImplementationOnce(() => new Promise<wailsapp.FolderContentsDTO>(() => {}))
 
     useFileBrowserStore.getState().setRemoteMode('library')
-    const id = await useFileBrowserStore.getState().createRemoteFolder('new')
+    const result = await useFileBrowserStore.getState().createRemoteFolder('new')
 
-    expect(id).toBeNull()
+    expect(result).toEqual({ error: 'Loading folder...' })
     expect(App.CreateRemoteFolder).not.toHaveBeenCalled()
   })
 
   it('refuses in Legacy Files, which has no folder to nest into', async () => {
     setRemote({ mode: 'legacy', currentFolderId: '', breadcrumb: [{ id: '', name: 'Legacy Files' }] })
 
-    const id = await useFileBrowserStore.getState().createRemoteFolder('new')
+    await useFileBrowserStore.getState().createRemoteFolder('new')
 
-    expect(id).toBeNull()
     expect(App.CreateRemoteFolder).not.toHaveBeenCalled()
   })
 })

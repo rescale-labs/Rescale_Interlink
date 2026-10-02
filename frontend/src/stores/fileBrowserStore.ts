@@ -133,13 +133,9 @@ export function selectRemoteDestination(remote: RemoteBrowserState): RemoteDesti
       // leaves behind whatever the previous view had resolved.
       if (remote.isLoading) return notReady('Loading folder...')
       if (remote.error) return notReady('Folder unavailable')
-      // The path and the folder id are written together only by a navigation.
-      // Breadcrumb navigation slices the path before its load runs, and every
-      // no-argument reload (refresh, page size, search) re-fetches the folder
-      // id while leaving the path alone — so a failed navigation followed by a
-      // refresh ends up showing one folder's path above another folder's
-      // contents. Naming a folder the transfer would not touch is the whole
-      // defect, so the tail of the path has to be the loaded folder.
+      // A navigation writes the path when it starts and the folder id only
+      // when its listing arrives. Naming a folder the transfer would not touch
+      // is the whole defect, so the tail of the path has to be the loaded folder.
       const tail = remote.breadcrumb[remote.breadcrumb.length - 1]
       if (!remote.currentFolderId || !tail || tail.id !== remote.currentFolderId) {
         return notReady('Folder not loaded')
@@ -183,7 +179,7 @@ interface FileBrowserStore {
   refreshRemote: () => void
   setRemoteSelection: (ids: Set<string>, lastId?: string | null) => void
   clearRemoteSelection: () => void
-  createRemoteFolder: (name: string) => Promise<string | null>
+  createRemoteFolder: (name: string) => Promise<{ folderId?: string; error?: string }>
   deleteRemoteItems: (items: wailsapp.FileItemDTO[]) => Promise<{ deleted: number; failed: number }>
   recoverTrashItems: (items: wailsapp.FileItemDTO[]) => Promise<{ recovered: number; failed: number; error?: string }>
   purgeTrashItems: (items: wailsapp.FileItemDTO[]) => Promise<{ deleted: number; failed: number; error?: string }>
@@ -480,7 +476,10 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
   // Otherwise, reloads the current page. Items are REPLACED, not appended.
   loadRemoteFolder: async (folderId?: string, folderName?: string) => {
     const state = get().remote
-    const targetId = folderId ?? state.currentFolderId
+    // A reload goes to the end of the path. A navigation writes the path when
+    // it starts but currentFolderId only when its listing arrives, and a
+    // search or Refresh sent in between must not go to the folder being left.
+    const targetId = folderId ?? state.breadcrumb[state.breadcrumb.length - 1]?.id
     if (!targetId) {
       // A caller reloading "the current folder" (refresh, page size, search)
       // gets here with nothing to request, and has usually just bumped
@@ -524,8 +523,20 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     // Stale response guard: capture generation before async call
     const myGen = get().remote.navGeneration
 
+    // A navigation writes its path when it starts, and drops the listing it
+    // leaves: the folders in it would otherwise open under the new path.
+    let breadcrumb = state.breadcrumb
+    if (isNewNavigation) {
+      const existingIndex = breadcrumb.findIndex(b => b.id === targetId)
+      if (existingIndex >= 0) {
+        breadcrumb = breadcrumb.slice(0, existingIndex + 1)
+      } else {
+        breadcrumb = [...breadcrumb, { id: targetId, name: folderName! }]
+      }
+    }
+
     set(state => ({
-      remote: { ...state.remote, isLoading: true, error: null }
+      remote: { ...state.remote, isLoading: true, error: null, breadcrumb, items: isNewNavigation ? [] : state.remote.items }
     }))
 
     try {
@@ -537,17 +548,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
 
       // Stale response guard: discard if navigation changed during async call
       if (get().remote.navGeneration !== myGen) return
-
-      // Update breadcrumb only on new navigation
-      let breadcrumb = state.breadcrumb
-      if (isNewNavigation) {
-        const existingIndex = breadcrumb.findIndex(b => b.id === targetId)
-        if (existingIndex >= 0) {
-          breadcrumb = breadcrumb.slice(0, existingIndex + 1)
-        } else {
-          breadcrumb = [...breadcrumb, { id: targetId, name: folderName! }]
-        }
-      }
 
       const newPageCursors = [...pageCursors]
       if (contents.hasMore && contents.nextCursor) {
@@ -587,7 +587,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
           error: contents.warning || null,
           hasMore: contents.hasMore,
           nextCursor: contents.nextCursor ?? '',
-          breadcrumb,
           currentPage,
           pageCursors: newPageCursors,
           knownTotalPages,
@@ -892,7 +891,6 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     set(state => ({
       remote: {
         ...state.remote,
-        breadcrumb: breadcrumb.slice(0, index + 1),
         selection: { selectedIds: new Set(), lastSelectedId: null },
         currentPage: 0,
         pageCursors: [''],
@@ -967,21 +965,22 @@ export const useFileBrowserStore = create<FileBrowserStore>((set, get) => ({
     // such folder — its upload destination is the library root, which is not
     // where the user pointed "New Folder".
     if (get().remote.mode === 'legacy') {
-      return null
+      return {}
     }
     const dest = selectRemoteDestination(get().remote)
     if (!dest.ready) {
-      return null
+      return { error: dest.reason }
     }
 
     try {
       const folderId = await App.CreateRemoteFolder(name, dest.destFolderId)
       // Refresh to show new folder
       get().refreshRemote()
-      return folderId
+      return { folderId }
     } catch (error) {
       console.error('Failed to create folder:', error)
-      return null
+      // Passed on unchanged: it says what to change, such as a name in use.
+      return { error: error instanceof Error ? error.message : String(error) }
     }
   },
 
