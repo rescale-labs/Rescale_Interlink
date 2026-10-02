@@ -75,7 +75,7 @@ func ResolveOrCreatePath(ctx context.Context, apiClient *api.Client, parentID, p
 
 		newID, err := apiClient.CreateFolder(ctx, name, currentID)
 		if err != nil {
-			return "", fmt.Errorf("failed to create folder %q: %w", name, err)
+			return "", api.ExplainFolderNameTaken(fmt.Errorf("failed to create folder %q: %w", name, err))
 		}
 
 		// A folder we just created is empty; drop any cached contents for it so a

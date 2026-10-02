@@ -29,7 +29,7 @@ type DownloadResult struct {
 	FilesDownloaded int
 	FilesSkipped    int
 	FilesFailed     int
-	FilesNotStarted int // a cancel, an Abort, or a failure without --continue-on-error, stopped the download first
+	FilesNotStarted int // not downloaded because the download stopped: never started, or cut off by an Abort or a failure
 	TotalBytes      int64
 	Errors          []DownloadError
 }
@@ -335,6 +335,9 @@ func DownloadFolderRecursive(
 		}
 		return false, removeFile(localPath)
 	}
+	// cutOff reports a file the download's own stop (a failure or an Abort, not
+	// the user's cancel) cut off: it did not fail, it was not downloaded.
+	cutOff := func(err error) bool { return isCancellation(err) && downloadCtx.Err() != nil && ctx.Err() == nil }
 
 	batchResult := transfer.RunBatch(downloadCtx, items, cfg, func(ctx context.Context, item folderDownloadWorkItem) error {
 		task := item.task
@@ -442,10 +445,17 @@ func DownloadFolderRecursive(
 		transferHandle.Complete()
 
 		if err != nil {
+			stopped := cutOff(err)
+			if stopped {
+				err = errors.New("not downloaded: the download stopped")
+			}
 			fileBar.Complete(err)
 
 			if state.DownloadResumeStateExists(localPath + ".encrypted") {
 				fmt.Fprintf(downloadUI.Writer(), "\n💡 Resume state saved for %s. To resume, run the download again with --merge.\n", filepath.Base(localPath))
+			}
+			if stopped {
+				return nil // counted with the files the stop left not downloaded
 			}
 			return fail(localPath, task.FileID, err, false)
 		}

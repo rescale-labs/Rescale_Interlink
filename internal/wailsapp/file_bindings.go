@@ -256,19 +256,23 @@ func (a *App) ListRemoteFolder(folderID string) FolderContentsDTO {
 func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int) FolderContentsDTO {
 	fs, err := a.fileService()
 	if err != nil {
-		return FolderContentsDTO{}
+		return failedListing(folderID, err)
 	}
 
 	ctx := context.Background()
 	contents, err := fs.ListFolderPage(ctx, folderID, cursor, pageSize)
 	if err != nil {
-		return FolderContentsDTO{
-			FolderID: folderID,
-			Items:    []FileItemDTO{},
-		}
+		return failedListing(folderID, err)
 	}
 
 	return folderContentsToDTO(contents)
+}
+
+// failedListing answers a folder listing or search that failed: no items and
+// a warning that says why, so that the File Browser does not call the folder
+// empty.
+func failedListing(folderID string, err error) FolderContentsDTO {
+	return FolderContentsDTO{FolderID: folderID, Items: []FileItemDTO{}, Warning: translateAPIError(err)}
 }
 
 // SearchRemoteFolderContents searches within a folder for files/folders matching the query.
@@ -277,17 +281,13 @@ func (a *App) ListRemoteFolderPage(folderID string, cursor string, pageSize int)
 func (a *App) SearchRemoteFolderContents(folderID string, searchQuery string, cursor string, pageSize int) FolderContentsDTO {
 	fs, err := a.fileService()
 	if err != nil {
-		return FolderContentsDTO{}
+		return failedListing(folderID, err)
 	}
 
 	ctx := context.Background()
 	contents, err := fs.SearchFolderContents(ctx, folderID, searchQuery, cursor, pageSize)
 	if err != nil {
-		return FolderContentsDTO{
-			FolderID: folderID,
-			Items:    []FileItemDTO{},
-			Warning:  translateAPIError(err),
-		}
+		return failedListing(folderID, err)
 	}
 
 	return folderContentsToDTO(contents)
@@ -475,7 +475,8 @@ func (a *App) CreateRemoteFolder(name string, parentID string) (string, error) {
 	}
 
 	ctx := context.Background()
-	return fs.CreateFolder(ctx, name, parentID)
+	folderID, err := fs.CreateFolder(ctx, name, parentID)
+	return folderID, api.ExplainFolderNameTaken(err)
 }
 
 // DeleteRemoteItems moves multiple files and/or folders to the user's Trash
@@ -1160,25 +1161,23 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 		a.logInfo("folder-upload", fmt.Sprintf("Creating root folder '%s'...", rootFolderName))
 		rootFolderID, err = apiClient.CreateFolder(ctx, rootFolderName, parentID)
 		if err != nil {
-			// Handle "folder already exists" error with clear user guidance
-			if api.IsFileExistsError(err) {
+			// The name is taken: by a folder another upload created since the
+			// check, which this one merges into, or by a folder in Trash.
+			if api.IsFolderNameTakenError(err) {
 				a.logWarn("folder-upload", fmt.Sprintf("Folder '%s' already exists, checking if visible...", rootFolderName))
 				cache.Invalidate(parentID)
 				existingID, found, findErr := folder.CheckFolderExists(ctx, apiClient, cache, parentID, rootFolderName)
 				if findErr != nil {
 					a.logError("folder-upload", fmt.Sprintf("Failed to find existing folder: %v", findErr))
-					deferredError = "A folder named '" + rootFolderName + "' already exists but couldn't be accessed"
-					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but couldn't be accessed. Please check your Rescale Trash and permanently delete it, then try again."}
 				}
-				if found {
-					rootFolderID = existingID
-					mergedIntoFolder = rootFolderName
-					a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
-				} else {
-					a.logError("folder-upload", fmt.Sprintf("Folder '%s' exists but is not visible - may be in Trash", rootFolderName))
-					deferredError = "Folder exists but is not visible - may be in Trash"
-					return FolderUploadResultDTO{Error: "A folder named '" + rootFolderName + "' already exists but is not visible. Please check your Rescale Trash and permanently delete it, then try again."}
+				if !found {
+					deferredError = "Failed to create folder '" + rootFolderName + "': " + api.ExplainFolderNameTaken(err).Error()
+					a.logError("folder-upload", deferredError)
+					return FolderUploadResultDTO{Error: deferredError}
 				}
+				rootFolderID = existingID
+				mergedIntoFolder = rootFolderName
+				a.logInfo("folder-upload", fmt.Sprintf("Found existing folder '%s' (ID: %s) - uploading files into it", rootFolderName, rootFolderID))
 			} else {
 				a.logError("folder-upload", fmt.Sprintf("Failed to create root folder: %v", err))
 				deferredError = translateAPIError(err)
@@ -1310,9 +1309,10 @@ func (a *App) StartFolderUpload(localPath string, destFolderID string, uploadTag
 					errMsg = r.WalkError.Error()
 				}
 				if r.FolderError != nil {
-					emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", r.FolderError))
+					folderErr := api.ExplainFolderNameTaken(r.FolderError)
+					emitLog(events.ErrorLevel, fmt.Sprintf("Folder creation error: %v", folderErr))
 					if errMsg == "" {
-						errMsg = "Folder creation failed: " + r.FolderError.Error()
+						errMsg = "Folder creation failed: " + folderErr.Error()
 					}
 				} else {
 					emitLog(events.InfoLevel, fmt.Sprintf("Created %d remote folders", r.FoldersCreated))

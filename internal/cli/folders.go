@@ -65,7 +65,7 @@ Example:
 			logger.Info().Str("name", name).Str("parent", parentID).Msg("Creating folder")
 
 			// Get API client
-			apiClient, err := getAPIClient()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
 				return err
 			}
@@ -85,7 +85,7 @@ Example:
 			// Create folder
 			folderID, err := apiClient.CreateFolder(ctx, name, parentID)
 			if err != nil {
-				return fmt.Errorf("failed to create folder: %w", err)
+				return api.ExplainFolderNameTaken(fmt.Errorf("failed to create folder: %w", err))
 			}
 
 			logger.Info().Str("folder_id", folderID).Msg("Folder created")
@@ -267,20 +267,12 @@ Examples:
 				mergeFolderConflicts = true
 			}
 
-			// Load config
-			cfg, err := loadConfig()
+			apiClient, err := getAPIClientFn()
 			if err != nil {
-				return fmt.Errorf("failed to load config: %w", err)
+				return err
 			}
-
-			// Apply CLI flag to config
+			cfg := apiClient.GetConfig()
 			cfg.CheckConflictsBeforeUpload = checkConflicts
-
-			// Create API client
-			apiClient, err := api.NewClient(cfg)
-			if err != nil {
-				return fmt.Errorf("failed to create API client: %w", err)
-			}
 
 			ctx := GetContext()
 
@@ -308,7 +300,8 @@ Examples:
 			}
 
 			// Resolve symlinks in root path so filesystem operations use the real directory.
-			// Keep original localPath for display name (rootFolderName) and user-facing messages.
+			// Keep original localPath for display name (rootFolderName); the walk's paths,
+			// and so the names of failed files, are under resolvedLocalPath.
 			resolvedLocalPath, err := pathutil.ResolveAbsolutePath(localPath)
 			if err != nil {
 				return fmt.Errorf("failed to resolve directory path: %w", err)
@@ -363,7 +356,7 @@ Examples:
 				fmt.Printf("📁 Creating root folder '%s'...\n", rootFolderName)
 				rootFolderID, err = apiClient.CreateFolder(ctx, rootFolderName, parentID)
 				if err != nil {
-					return fmt.Errorf("failed to create root folder: %w", err)
+					return api.ExplainFolderNameTaken(fmt.Errorf("failed to create root folder: %w", err))
 				}
 				// Populate cache for root folder
 				_, err = cache.Get(ctx, apiClient, rootFolderID)
@@ -412,7 +405,7 @@ Examples:
 				mapping, created, err := CreateFolderStructure(
 					ctx, apiClient, cache, resolvedLocalPath, directories, rootFolderID, &folderConflictMode, folderConcurrency, logger, nil, os.Stdout)
 				if err != nil {
-					return fmt.Errorf("failed to create folder structure: %w", err)
+					return api.ExplainFolderNameTaken(fmt.Errorf("failed to create folder structure: %w", err))
 				}
 				foldersCreated = created
 				fmt.Printf("✓ Folder structure created (%d new folders)\n", foldersCreated)
@@ -534,7 +527,7 @@ Examples:
 					fmt.Println("\n💾 Disk space errors:")
 					for _, e := range reportable {
 						if diskspace.IsInsufficientSpaceError(e.Error) {
-							printUploadFailure(localPath, e)
+							printUploadFailure(resolvedLocalPath, e)
 						}
 					}
 				}
@@ -544,7 +537,7 @@ Examples:
 					fmt.Println("\n❌ Other upload failures:")
 					for _, e := range reportable {
 						if !diskspace.IsInsufficientSpaceError(e.Error) {
-							printUploadFailure(localPath, e)
+							printUploadFailure(resolvedLocalPath, e)
 						}
 					}
 				}
@@ -595,9 +588,10 @@ Examples:
 	return cmd
 }
 
-// printUploadFailure prints one line of upload-dir's list of failed files.
-func printUploadFailure(localPath string, e UploadError) {
-	relPath, _ := filepath.Rel(localPath, e.FilePath)
+// printUploadFailure prints one line of upload-dir's list of failed files,
+// naming the file relative to root, the resolved folder the upload walked.
+func printUploadFailure(root string, e UploadError) {
+	relPath, _ := filepath.Rel(root, e.FilePath)
 	fmt.Printf("  - %s: %s\n", relPath, reporting.RedactSecrets(e.Error.Error()))
 }
 
@@ -797,9 +791,11 @@ Examples:
 				fmt.Printf("  Files failed:       %d\n", result.FilesFailed)
 			}
 			if result.FilesNotStarted > 0 {
-				fmt.Printf("  Files not started:  %d\n", result.FilesNotStarted)
+				fmt.Printf("  Not downloaded:     %d\n", result.FilesNotStarted)
 			}
-			if ctx.Err() != nil {
+			// An Abort or a failure without --continue-on-error stops the download
+			// too: the files it cut off, and those it never started, are not downloaded.
+			if ctx.Err() != nil || result.FilesNotStarted > 0 {
 				fmt.Println("  Stopped:            cancelled before every file was downloaded")
 			}
 			fmt.Printf("  Total data:         %.2f MB\n", float64(result.TotalBytes)/(1024*1024))

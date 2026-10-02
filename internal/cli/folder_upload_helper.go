@@ -403,11 +403,12 @@ func uploadDirectoryPipelined(
 		recordError(rootPath, orchResult.WalkError)
 	}
 	if orchResult.FolderError != nil {
-		logger.Error().Err(orchResult.FolderError).Msg("Folder creation failed")
-		if errors.Is(orchResult.FolderError, folder.ErrAbortedByUser) {
+		folderErr := api.ExplainFolderNameTaken(orchResult.FolderError)
+		logger.Error().Err(folderErr).Msg("Folder creation failed")
+		if errors.Is(folderErr, folder.ErrAbortedByUser) {
 			abortUpload()
 		} else {
-			recordError(rootPath, orchResult.FolderError)
+			recordError(rootPath, folderErr)
 		}
 	}
 	foldersCreatedMutex.Lock()

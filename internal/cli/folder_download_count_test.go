@@ -173,7 +173,7 @@ func TestDownloadFolderRecursive_CountsEveryFile(t *testing.T) {
 	said := captureStderr(t, func() {
 		printed, err = runWithCancel(t, newFoldersCmd(), unexpected, "download-dir", "folder123", "--outdir", out, "--merge", "--max-concurrent", "1")
 	})
-	if err == nil || !strings.Contains(printed, "Files failed:       1\n") || !strings.Contains(printed, "Files not started:  2\n") ||
+	if err == nil || !strings.Contains(printed, "Files failed:       1\n") || !strings.Contains(printed, "Not downloaded:     2\n") ||
 		!strings.Contains(said, "failed to remove incomplete existing file: FAKE removal refused") {
 		t.Errorf("folders download-dir returned %v after printing\n%s%s\nwant it to stop at the first file, fail and say why", err, printed, said)
 	}

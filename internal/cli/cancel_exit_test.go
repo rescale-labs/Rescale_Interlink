@@ -55,7 +55,7 @@ func TestFoldersDownloadDirFailsWhenCancelled(t *testing.T) {
 		return ctx.Err()
 	}, "download-dir", "sub2", "--outdir", out, "--merge", "--max-concurrent", "1")
 	if !errors.Is(err, context.Canceled) || !strings.Contains(printed, "Files skipped:      1\n") ||
-		!strings.Contains(printed, "Files failed:       1\n") || !strings.Contains(printed, "Files not started:  1\n") ||
+		!strings.Contains(printed, "Files failed:       1\n") || !strings.Contains(printed, "Not downloaded:     1\n") ||
 		!strings.Contains(printed, "Stopped:            cancelled before every file was downloaded\n") {
 		t.Errorf("folders download-dir returned %v after printing\n%s\nwant it to fail, every file counted and the stop stated", err, printed)
 	}
