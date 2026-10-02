@@ -48,7 +48,7 @@ func TestFoldersDownloadDirSaysAFailureStoppedIt(t *testing.T) {
 
 	for workers, fn := range map[string]func(context.Context, download.DownloadParams) error{"3": cutOff, "1": notStarted} {
 		printed, err := runWithCancel(t, newFoldersCmd(), fn, "download-dir", "sub2", "--outdir", t.TempDir(), "--max-concurrent", workers)
-		for _, want := range []string{"Files failed:       1\n", "Not downloaded:     2\n", "Stopped:            cancelled before every file was downloaded\n"} {
+		for _, want := range []string{"Files failed:       1\n", "Not downloaded:     2\n", "Stopped:            before every file was downloaded\n"} {
 			if err == nil || !strings.Contains(printed, want) || strings.Contains(printed, "credentials") {
 				t.Errorf("folders download-dir with %s worker(s) returned %v after printing\n%s\nwant it to fail, %q and no failure for the files it stopped",
 					workers, err, printed, want)

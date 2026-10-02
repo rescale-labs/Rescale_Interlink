@@ -1729,6 +1729,14 @@ func (p *Pipeline) jobWorker(ctx context.Context, wg *sync.WaitGroup, workerID i
 
 				err := p.apiClient.SubmitJob(ctx, item.state.JobID)
 				if err != nil {
+					if ctx.Err() != nil {
+						// The cancel cut the submit off, which says nothing of the
+						// job: left pending rather than failed, a resume submits it.
+						p.logf("WARN", "job", item.state.JobName, "Submit of job %s cancelled; it stays pending", item.state.JobID)
+						p.reportStateChange(item.state.JobName, "submit", "pending", item.state.JobID, "", 0.0)
+						p.setActiveWorker("job", -1)
+						continue
+					}
 					p.logf("ERROR", "job", item.state.JobName, "Failed to submit: %v", err)
 					item.state.SubmitStatus = "failed"
 					item.state.ErrorMessage = p.jobFailed(err)

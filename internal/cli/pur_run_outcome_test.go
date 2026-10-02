@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/rescale/rescale-int/internal/api"
 	"github.com/rescale/rescale-int/internal/config"
 	"github.com/rescale/rescale-int/internal/pur/state"
+	"github.com/rescale/rescale-int/internal/reporting"
 )
 
 const (
@@ -239,7 +241,7 @@ func resumedStage(t *testing.T, fake *fakePlatform, before string, err error) st
 
 // A run the user cancels says so, with how many of its jobs finished and how
 // many did not, counting the jobs a previous run finished, and never that it
-// completed. Its exit code is the run's own: here 0.
+// completed. It fails, as a cancelled transfer does, without an error report.
 func TestPURRunCancelledSaysHowFarItGot(t *testing.T) {
 	usePURConfig(t)
 	t.Chdir(t.TempDir())
@@ -258,10 +260,10 @@ func TestPURRunCancelledSaysHowFarItGot(t *testing.T) {
 		printed := captureStdout(t, func() {
 			err = runPURCommand(t, cmd, "--jobs-csv", "jobs.csv", "--state", "state.csv")
 		})
-		if err != nil || !strings.Contains(printed, "Cancelled: 1 of 2 job(s) finished, 1 did not\n") ||
-			strings.Contains(printed, "✓") {
-			t.Errorf("pur %s, cancelled: returned %v after printing\n%s\nwant the cancel stated and no success line",
-				cmd.Name(), err, printed)
+		if !errors.Is(err, context.Canceled) || reporting.IsReportable(err, reporting.CategoryPURPipeline) ||
+			!strings.Contains(printed, "Cancelled: 1 of 2 job(s) finished, 1 did not\n") || strings.Contains(printed, "✓") {
+			t.Errorf("pur %s, cancelled: returned %v after printing\n%s\nwant it to fail without a report, "+
+				"the cancel stated and no success line", cmd.Name(), err, printed)
 		}
 	}
 }
@@ -322,8 +324,8 @@ func TestPURCancelNamesTheJobsItLeaves(t *testing.T) {
 			t.Errorf("the cancelled run printed\n%s\nwithout %q", named, want)
 		}
 	}
-	if err != nil || !strings.Contains(printed, "Cancelled: 0 of 2 job(s) finished, 2 did not\n") {
-		t.Errorf("returned %v after printing\n%s\nwant the cancel line and the run's own exit code, 0", err, printed)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(printed, "Cancelled: 0 of 2 job(s) finished, 2 did not\n") {
+		t.Errorf("returned %v after printing\n%s\nwant the cancel line and exit 1", err, printed)
 	}
 }
 

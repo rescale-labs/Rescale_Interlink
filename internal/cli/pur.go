@@ -882,9 +882,10 @@ func (f *purPipelineFlags) runPipeline(cfg *config.Config, jobs []models.JobSpec
 
 // endCancelled ends a PUR command whose run the user cancelled. It names the
 // jobs the batch is left with failed or unconfirmed, as a run that ends that
-// way without a cancel does, says how far the run got, and returns runErr, the
-// command's error had it not been cancelled: nil unless the run itself failed.
-// This is the one place that decides a cancelled run's exit code.
+// way without a cancel does, says how far the run got, and fails the command,
+// as a cancelled transfer does: with runErr where the run itself failed, else
+// with the cancel. This is the one place that decides a cancelled run's exit
+// code.
 func endCancelled(pipe *pipeline.Pipeline, runErr error) error {
 	printFailedJobs(os.Stderr, pipe.FailedJobs())
 	// Unless runErr says them already: a run that failed does, but a cancel
@@ -895,6 +896,9 @@ func endCancelled(pipe *pipeline.Pipeline, runErr error) error {
 	}
 	finished, total := pipe.FinishedJobs()
 	fmt.Printf("\nCancelled: %d of %d job(s) finished, %d did not\n", finished, total, total-finished)
+	if runErr == nil {
+		runErr = fmt.Errorf("run cancelled: %w", context.Canceled)
+	}
 	return runErr
 }
 

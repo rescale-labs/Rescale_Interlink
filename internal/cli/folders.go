@@ -796,7 +796,7 @@ Examples:
 			// An Abort or a failure without --continue-on-error stops the download
 			// too: the files it cut off, and those it never started, are not downloaded.
 			if ctx.Err() != nil || result.FilesNotStarted > 0 {
-				fmt.Println("  Stopped:            cancelled before every file was downloaded")
+				fmt.Println("  Stopped:            before every file was downloaded")
 			}
 			fmt.Printf("  Total data:         %.2f MB\n", float64(result.TotalBytes)/(1024*1024))
 			fmt.Printf("  Elapsed time:       %s\n", time.Since(startTime).Round(time.Second))
