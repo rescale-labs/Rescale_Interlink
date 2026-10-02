@@ -291,7 +291,7 @@ Additional configuration options for specialized use cases:
 `--tar-workers` / `--upload-workers` / `--job-workers` override has been applied,
 so they judge the value the pipeline would actually be built with. A `0` or
 negative count stops the command before any archive is built, with the key and
-the value named:
+the value named, and writes no error report:
 
 ```
 Error: tar_workers must be at least 1 (got 0)
@@ -455,12 +455,18 @@ failure:
 - `files upload`, `files download`, and `jobs download` fail when any file in the batch
   failed, including a file whose name the platform supplied was refused as unsafe,
   and when you cancel them. Files you chose to skip are reported separately and are
-  not failures.
+  not failures. A cancel ends with `Error: upload cancelled: N file(s) not started:
+  context canceled` (or `download cancelled`), without the count when every file had
+  started; when a file had already failed or been refused, the error is `upload
+  cancelled after an earlier failure:` (or `download cancelled …`) followed by that
+  failure.
 - `folders upload-dir` fails when any file, directory walk, or folder creation failed.
 - `folders download-dir` fails when any file failed, including a file conflict it
   could not resolve, and when you cancel it.
-- `pur run` and `pur resume` fail when any job in the pipeline failed. A run you
-  cancelled is not a failure.
+- `pur run` and `pur resume` fail when any job in the pipeline failed, and when you
+  cancel them: a cancelled run exits `1` with `Error: run cancelled: context canceled`,
+  or with the error of the step the cancel cut off; see [`pur run`](#pur-run) for how a
+  cancelled run ends.
 - `jobs watch -j` fails when the job it was watching ends as anything other than
   `Completed` — `Failed`, `Stopped`, `Force Stopped` and `Terminated` all exit
   non-zero, because none of them produced the result the job was asked for.
@@ -476,9 +482,13 @@ failure:
   job that then ends as `Failed`, or monitoring that stops early, is reported on
   stderr but does not change the exit code — the job is still on the platform.
   Check the outcome with `jobs get` or `jobs watch -j`.
-- `daemon run --once` exits `0` whenever it managed to write its state file. A
-  poll that listed no jobs, failed against the API, or failed a download is
-  visible in the log and in `daemon status`, not in the exit code.
+- `daemon run --once` exits `1` with the scan's error when its scan failed: the jobs
+  or the workspace folders could not be listed, including a listing that the scan's
+  time budget cut short. It also exits `1` when it cannot write its state file. It
+  exits `0` when the scan worked, whether or not it found jobs; when the budget ran out
+  while the jobs were being checked (a partial scan: the jobs left unchecked wait for
+  the next poll); and when only a job's download failed, which shows in the log, in
+  `daemon status` and in `daemon list --failed`.
 - `daemon stop` exits `1` when the daemon is still running 10 seconds after the
   shutdown request, and when a daemon found by its PID file does not answer over IPC
   and `--force` is not given.
@@ -685,6 +695,10 @@ Verifies:
 - API credentials work
 - Network connectivity
 - Returns user information
+
+A configuration it refuses, such as a missing key, a platform URL Interlink does not
+accept or a worker count below 1, ends with `Error: invalid configuration: <reason>`
+and exit `1`, and writes no error report.
 
 #### config path
 Show configuration file path
@@ -1082,6 +1096,8 @@ reports a SHA-512 it hashes the existing file before adopting it, and re-fetches
 one that is the right length but fails its checksum. Each such verification is
 remembered for the rest of that daemon's run, keyed by path, size, modification
 time and expected checksum, so the file is not re-hashed on every poll.
+`files download` and `jobs download` name each file they skip:
+`⊘ Skipping existing file: <name>`.
 
 **Links at the destination are left alone.** Before it overwrites, skips or
 resumes, and again before it puts the finished file in place, a download refuses
@@ -1096,16 +1112,21 @@ rescale-int files list [flags]
 ```
 
 **Flags:**
-- `-n, --limit int` - Maximum number of files to list (default 20)
+- `-n, --limit int` - Maximum number of files to list (`0` = all; default 20)
 - `--include string` - Include only files matching these glob patterns (comma-separated, e.g. `"*.dat,*.log"`)
 - `-x, --exclude string` - Exclude files matching these glob patterns (comma-separated, e.g. `"debug*,temp*"`)
-- `-s, --search string` - Include only files whose name contains one of these terms (comma-separated, case-insensitive)
+- `-s, --search string` - Include only files whose name contains every one of these terms (comma-separated, case-insensitive)
 - `--filter string` - Deprecated single-pattern form of `--include`; prints a deprecation notice, takes one pattern, and is overridden by `--include` when both are given
 
-`--limit` bounds the request, and the filters are applied to what comes back. So
-a pattern that matches nothing in the first 20 files reports nothing even when
-matching files exist further down the list — raise `--limit` when filtering.
-A run that filtered anything out prints `Filtered: N of M files match filters`.
+`--limit` is the number of matching files listed: the command reads the library
+page by page until that many files have passed the filters, so the filters cover
+the whole library. `0`, or a negative number, lists every file, up to 1,000,000.
+`--search` is run by the platform, and the CLI then checks each name it returns. A
+listing that checked every file and filtered some out prints `Filtered: N of M
+files match filters`, where M is the number of files it read (with `--search`, the
+files the search returned). A listing that stopped at `--limit` ends with
+`(Stopped at --limit N. Use --limit to change, 0 for all)`; it does not say whether
+more files match.
 
 **Example:**
 ```bash
@@ -1181,6 +1202,12 @@ rescale-int folders create -n <name> [--parent-id ID]
 - `-n, --name string` - Folder name (required)
 - `--parent-id string` - Parent folder ID (optional; omit for root)
 
+A name that a folder in the parent already holds, including a folder in Trash, which
+listings do not show, is refused with `Error: failed to create folder: a folder of that
+name already exists in this location, possibly in Trash (restore it or delete it
+permanently from Trash in the Rescale web UI, or use another name)`. Other refusals,
+such as an invalid name, keep the platform's own text.
+
 **Examples:**
 ```bash
 # Create root-level folder
@@ -1237,6 +1264,12 @@ rescale-int folders upload-dir <directory> [flags]
 
 Only one of `--skip-folder-conflicts`, `--merge-folder-conflicts` and
 `--skip-existing` may be given; passing two fails with an error naming all three.
+
+A folder in Trash keeps its name taken, but the conflict check cannot see it. When the
+upload cannot create a folder for that reason, it fails with `Error: failed to create
+root folder: a folder of that name already exists in this location, possibly in Trash
+(…)`, or, for a subfolder, with `failed to create folder <name>: a folder of that
+name …`.
 
 **Symbolic links:** a link is followed wherever it points. A link that leads back into the
 folder being uploaded or into a folder containing it, a broken link, and on Windows a
@@ -1319,8 +1352,11 @@ cause, and a name from the platform that is not safe on this computer is refused
 for that file, or for that folder and everything in it (see
 [jobs download](#jobs-download)). Without `--continue-on-error`
 the first failure stops the download, and Abort at a prompt always does. Once the
-download has stopped no file is removed, and files that never started are counted
-as such. The command exits `1` when any file failed or the download was cancelled.
+download has stopped no file is removed. A file the stop cut off says `not
+downloaded: the download stopped`; it and the files that never started are counted
+under `Not downloaded:` in the summary, which then adds the line
+`Stopped:            before every file was downloaded`, as after Ctrl-C. The command
+exits `1` when any file failed or the download was cancelled.
 A conflict prompt that is already waiting for your answer does not notice that
 another file's failure has stopped the download; answer it to finish.
 
@@ -1393,7 +1429,9 @@ rescale-int jobs list --limit 50
 
 `--limit` truncates the display, not the request: the whole job list is fetched
 either way, and a truncated listing ends with `(Showing N of M jobs. Use --limit
-to change)`.
+to change)`. The list is fetched 200 jobs a request. A list longer than 1000 such
+requests (200,000 jobs) fails with `failed to list jobs: jobs listing incomplete
+after 1000 pages (N listed)` rather than showing part of it.
 
 Each job prints as a block:
 
@@ -1501,6 +1539,11 @@ rescale-int jobs listfiles -j <job-id>
 **Flags:**
 - `-j, --job-id string` - Job ID (required)
 
+The files are fetched 1000 a request, so a job with tens of thousands of files lists
+in a few dozen requests; `jobs download` lists a job's files the same way. A job with
+more than 1,000,000 files fails with `failed to list job files: job files listing
+incomplete after 1000 pages (N listed)` rather than listing part of them.
+
 **Example:**
 ```bash
 rescale-int jobs listfiles -j GgHhI
@@ -1531,7 +1574,7 @@ Whole-job mode only — each of these is refused with `--file-id`, and so is an
 
 - `-d, --outdir string` - Output directory for all of a job's files
 - `-m, --max-concurrent int` - Maximum concurrent downloads, 1-20 (default 5). Actual concurrency adapts to file size within this cap
-- `-s, --search string` - Include only files whose name contains one of these terms (comma-separated, case-insensitive)
+- `-s, --search string` - Include only files whose name contains every one of these terms (comma-separated, case-insensitive)
 - `-x, --exclude string` - Exclude files matching these glob patterns (comma-separated)
 - `--filter string` - Include only files matching these glob patterns; comma-separated. Matched against the filename
 - `--path-filter string` - Include only files matching these path patterns. Matched against the file's path within the job, and supports `**` for recursive matching (e.g. `"run_1/*.dat"`, `"**/results/*.csv"`). Each part between slashes also matches a name that is literally the same, so `"case [1]/**"` reaches a folder named `case [1]`
@@ -1777,6 +1820,16 @@ Three fields carry it, and all three reach the Rescale API:
 All three are omitted from the request when unset, so a specification that does not
 use them adds nothing to the payload.
 
+The platform accepts a public key of type `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`,
+`ecdsa-sha2-nistp521`, `ssh-dss` or `ssh-rsa`, followed by the key. A job file's
+`publicKey` or a script's `#RESCALE_PUBLIC_KEY` of another type, or with nothing after
+its type, is refused before any request, the `--files` uploads included, and writes no
+error report. A job file gets `Error: <file>: public key type "ssh-ed25519" is not one
+the platform accepts; use one of ecdsa-sha2-nistp256, ecdsa-sha2-nistp384,
+ecdsa-sha2-nistp521, ssh-dss, ssh-rsa`; a script gets `failed to parse SGE script:
+invalid RESCALE_PUBLIC_KEY:` followed by the same reason (compat mode's `submit`, which
+signs in first, says `failed to parse script: …`).
+
 **Unknown keys in `--job-file`:** Top-level JSON keys that Interlink does not model
 are not sent to Rescale. They are named in a warning and the submit continues, so
 a typo'd or unsupported field is visible instead of vanishing silently.
@@ -1904,8 +1957,8 @@ names the process it prints that the exit cannot be confirmed and exits `0`. If
 no daemon is running it prints
 "No running daemon detected." and exits `0`. If a daemon process exists but IPC is not
 responding and `--force` is not given, it is not stopped: the command prints `Daemon
-process found (PID N) but IPC not responding.` and `The daemon may not have been
-started with --ipc flag.`, and exits `1` with `daemon (PID N) was not stopped. Use
+process found (PID N) but IPC not responding.` and `It was started without --ipc, or
+it is not answering.`, and exits `1` with `daemon (PID N) was not stopped. Use
 'rescale-int daemon stop --force' or 'kill N' to terminate it`, and writes no error
 report. On Windows the error names `daemon stop --force` and ending the `rescale-int`
 process in Task Manager, which also ends a daemon an earlier version of Interlink
@@ -2388,7 +2441,11 @@ so it can reach your mapped network drives. A service installed by an earlier ve
 removes itself the next time Windows starts it, and uninstalling Interlink also tries to
 remove it. To remove it at once, run this hidden command from an elevated
 (Administrator) prompt; it does nothing when there is no service. The other `service`
-commands have been removed.
+commands have been removed: `service install`, `start`, `stop`, `status` and
+`install-and-start` exit `1` on every system with `Error: service mode was removed:
+auto-download now runs from the Interlink app or with 'rescale-int daemon run'; only
+'rescale-int service uninstall' remains, which removes a Windows service from an
+earlier version`.
 
 ```bash
 rescale-int service uninstall
@@ -2539,8 +2596,8 @@ case-insensitively. (`pur submit-existing --ids` reads no CSV, and
 | `Automations` | Automation IDs, `;`-separated |
 | `ProjectID`, `OrgCode` | Project and organization the job is charged to |
 | `OnDemandLicenseSeller` | On-demand license seller |
-| `LicenseFeatureName`, `LicensesPerJob` | User-defined license feature and how many seats the job takes. `LicensesPerJob` is an integer and fails the load as `row N: invalid LicensesPerJob: <value>` if it is not one. The two columns go together: a name with no positive count, or a non-zero count with no name, is refused with a message naming which half is missing. `pur run` and `pur resume` refuse such a row as the CSV loads, `--dry-run` included, before anything is archived or uploaded: `job N (<name>): license feature "<feature>" needs a licenses-per-job count greater than zero`, or `job N (<name>): licenses per job is set to <n> but no license feature name was given`. Together they produce a single `featureSets` entry, `USER_SPECIFIED_0`, in the job request |
-| `CIDRRule`, `PublicKey`, `SSHPort` | Inbound SSH access. `CIDRRule` and `PublicKey` are passed through verbatim; `SSHPort` must parse as an integer, and a row that fails fails the load with `row N: invalid SSHPort: <value>` |
+| `LicenseFeatureName`, `LicensesPerJob` | User-defined license feature and how many seats the job takes. `LicensesPerJob` is an integer and fails the load as `row N: invalid LicensesPerJob: <value>` if it is not one. The two columns go together: a name with no positive count, or a non-zero count with no name, is refused with a message naming which half is missing. `pur run`, `pur resume` and `pur submit-existing` refuse such a row as the CSV loads, including `--dry-run` for `pur run` and `pur resume`, before anything is archived, uploaded or created: `job N (<name>): license feature "<feature>" needs a licenses-per-job count greater than zero`, or `job N (<name>): licenses per job is set to <n> but no license feature name was given`. A run the app starts from the PUR tab, also right after **Load Jobs File**, or from Single Job refuses such a job with the same text before anything is archived or uploaded. Together they produce a single `featureSets` entry, `USER_SPECIFIED_0`, in the job request |
+| `CIDRRule`, `PublicKey`, `SSHPort` | Inbound SSH access. `CIDRRule` and `PublicKey` are passed through verbatim; `SSHPort` must parse as an integer, and a row that fails fails the load with `row N: invalid SSHPort: <value>`. A `PublicKey` must be of a type the platform accepts (`ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `ssh-dss` or `ssh-rsa`) with the key after its type; `pur run`, `pur resume` and `pur submit-existing` refuse any other as the CSV loads, and a run the app starts refuses it, as for the license pair: `job N (<name>): public key type "<type>" is not one the platform accepts; use one of …` |
 | `NoDecompress`, `IsLowPriority` | Booleans; `true`, `yes` or `1` mean true, anything else false |
 | `Submit` | Whether the created job is also submitted. `yes`, `true`, `submit` or `create_and_submit` submit it; `no`, `false`, `create_only` or `draft` create it and stop. Empty or absent means submit. Matching ignores case and surrounding spaces. Anything else is rejected — see below |
 
@@ -2924,7 +2981,8 @@ rescale-int pur plan --jobs-csv FILE [--validate-coretype]
 - `--validate-coretype` - Validate core type with Rescale API
 
 `pur plan` checks each row against the jobs-CSV rules — required fields, value
-ranges, the `Submit` values, the license-feature pairing — and, with
+ranges, the `Submit` values, the license-feature pairing, the SSH public key's
+type — and, with
 `--validate-coretype`, each row's core type against the platform. A `Directory`
 that does not exist is a warning, not a failure. It does not build the job
 requests, resolve `--common-input-files`, resolve a `--folder` target or look at
@@ -3061,7 +3119,9 @@ file can pass this check.
 
 **Common input files transfer once per invocation, not once per batch.** Local
 files given to `--common-input-files`, those a folder adds included, are uploaded
-before any row is processed, and their file IDs are not recorded in the state file.
+before any row is processed, and their file IDs are not recorded in the state file;
+the run prints the IDs of all its common input files at its end, `Common input file
+IDs: <id>, …`.
 A resumed run therefore uploads them again, even when every job it would attach them
 to is already done. Entries given as `id:<fileId>` are referenced as they are: not
 uploaded, not moved into `--folder`, and not tagged by `--file-tags`.
@@ -3093,11 +3153,28 @@ reconciled against the platform before resuming.
 **Run PUR with `--verbose` when you need these warnings.** The pipeline's own
 per-job messages — the metadata warnings above, the skip notice below, the
 storage retry notices — all go through the standard logger, which is discarded at
-default verbosity. What a default run shows is the progress display, the
-end-of-run failure count and, on stderr, one line per failed job with its reason
-(`✗ <job name>: <reason>`, credentials removed): at most ten, then `... and N more
-(--verbose lists them all)`. The final error names unconfirmed jobs without
-reproducing the detailed text.
+default verbosity. What a default run shows is the progress display, a line
+`✓ <job name>: created job <ID>` as each job is created, the end-of-run failure count
+and, on stderr, one line per failed job with its reason (`✗ <job name>: <reason>`,
+credentials removed): at most ten, then `... and N more (--verbose lists them all)`.
+The final error names unconfirmed jobs without reproducing the detailed text.
+
+**A run you cancel says how far it got.** Ctrl-C stops `pur run`, `pur resume` and
+`pur submit-existing --jobs-csv` without the success line. Once the pipeline has
+started, the run names on stderr each job it leaves failed, as above, then the batch's
+problems, such as `3 of 5 job(s) failed` or `1 job(s) could not be confirmed as
+created: <names>`, and prints `Cancelled: N of M job(s) finished, K did not`. A job
+counts as finished once it is created and, where its row asks, submitted; the count
+covers the whole batch, jobs a previous run finished included, and a job whose submit
+failed or is still pending, or whose creation could not be confirmed, counts as not
+finished. The command then exits `1` with `Error: run cancelled: context canceled`,
+and writes no error report. A cancel before its local common input files were uploaded
+ends instead with that upload's error, such as `Error: pipeline failed: failed to
+resolve shared files: …`. A cancel during the `--folder` setup ends before the run
+starts, with `Error: failed to resolve upload folder: …` and no `Cancelled:` line, and
+`pur submit-existing --ids` reports each submission itself and prints no `Cancelled:`
+line. A submit the cancel cut off stays pending, and the next resume submits it (see
+[`pur resume`](#pur-resume)).
 
 **Jobs a previous run could not confirm.** If a create request went out and no
 answer came back, the job may be running on the platform under a name this run
@@ -3174,19 +3251,23 @@ creation could not be confirmed are listed by name under their own heading,
 `Could not be confirmed as created: N`, and are not counted as work unless
 `--recreate-indeterminate` is given.
 
-The counts recognise a stage only where the state file records it as `success`.
-A stage that was legitimately skipped is recorded as `skipped`, and the counts
-sort such rows by the first stage they are missing rather than by how much work
-is really left:
+Each job is counted at the step the resume itself would start it at:
 
-- A row with no `Directory`, whose tar and upload never ran, is counted under
-  `Need tar` — even when its job was created and submitted.
-- A `create_only` row that archived, uploaded and was created is counted under
-  `Need submit`, because its submit is recorded as `skipped` rather than
-  `success`. It will not be submitted by a resume either.
+- A job with an archive of its own resumes at the first of tar, upload and create
+  that the state file does not record as done. Once created, it counts under
+  `Need submit` only if its row asks for a submit that is still pending: never tried,
+  or cut off by a cancel. A `create_only` job therefore counts as `Already complete`.
+  A job whose submit failed is counted on a line of its own,
+  `Submit failed:    N (a resume does not retry these)`, shown only when there are
+  such jobs and not part of `Remaining`.
+- A job without an archive of its own, such as a DOE case or a job whose inputs are
+  already on Rescale, counts under `Need job create` until it is created, then under
+  `Need submit` while its row asks for a submit that has not succeeded, a failed one
+  included, which a resume submits again.
 
-Read the counts as "not recorded as done", not as "work the resume will actually
-redo".
+A submit that a cancel cut off is not recorded as failed: it stays pending, and the
+next resume submits it. If the platform had already taken that submit, the resume's
+submit is refused with the platform's own text, `This job has already been submitted.`
 
 Archives, the archive directory and the treatment of unconfirmed jobs are the same
 as for [`pur run`](#pur-run).
@@ -3230,11 +3311,12 @@ command up front, naming the row. It runs the same pipeline as `pur run` with th
 tar and upload stages skipped, so it honours the `Submit` column — a
 `create_only` row is created and not submitted — and it honours the state file,
 so a row a previous run already created or submitted is not done again. The same
-two preflight checks as `pur run` apply: a worker count below 1 in the
-configuration and an unrecognized `Submit` value are both refused before the API
-client is built. With `--ids` it creates nothing — it submits jobs that already
-exist, printing `[SUBMIT] <id> -> OK` or `-> FAILED` per ID and exiting non-zero
-if any of them failed.
+preflight checks as `pur run` apply: a worker count below 1 in the configuration,
+an unrecognized `Submit` value, half a license pair and an SSH public key of a type
+the platform does not accept are all refused before the API client is built. With
+`--ids` it creates nothing — it submits jobs that already exist, printing
+`[SUBMIT] <id> -> OK` or `-> FAILED` per ID and exiting non-zero if any of them
+failed.
 
 **Examples:**
 ```bash
@@ -3321,8 +3403,9 @@ not a mystery; there is no reason to run them by hand.
   meant to be typed.
 - Compatibility mode carries its own generated **`completion`** group —
   `bash`, `zsh`, `fish`, `powershell` — each of which takes `--no-descriptions`
-  (default false) to emit a script without completion descriptions. The native
-  `completion` commands documented below take no flags of their own.
+  (default false) to emit a script without completion descriptions. Like `help`, it
+  needs no API key and makes no network call. The native `completion` commands
+  documented below take no flags of their own.
 
 ## Shell Completion
 
@@ -3429,7 +3512,9 @@ flags and does not inherit this one.
 
 ### Credential Resolution
 
-Credentials are resolved in this order:
+`check-for-update`, `help`, `completion` and the deferred `spub` commands use no
+account: they need no API key and make no network call. Every other command needs a
+key, and credentials are resolved in this order:
 1. `-p` flag (explicit)
 2. `RESCALE_API_KEY` environment variable
 3. apiconfig INI file (`--profile` section or `[default]`)
@@ -3630,9 +3715,9 @@ does not fail on an unknown flag.
 
 An unrecognized flag produces a standard Cobra error with exit code 33. The
 `spub` tree is the exception: `spub` and its five subcommands accept unknown
-flags rather than rejecting them, so such a call proceeds into credential
-resolution and then into the deferral message — an unknown-flag typo there is
-reported as whatever it reaches next, not as an unknown flag.
+flags rather than rejecting them, so such a call goes straight to the deferral
+message — an unknown-flag typo there is reported as the deferral, not as an
+unknown flag.
 
 ### Behavioral Compatibility
 
@@ -4045,9 +4130,11 @@ rescale-int upload input.txt --verbose
 If a command fails in a way Interlink can report, it writes a diagnostic report
 file. Mistakes you can fix yourself, such as conflicting flags, an output file that
 already exists, a jobs CSV row with half a license pair or a `Submit` value Interlink
-cannot read, a job script that `jobs submit --script` refuses, or an upload refused by
-another transfer's lock, print only the error and write no report. Credentials in a
-report are redacted.
+cannot read, a job script that `jobs submit --script` refuses, a platform URL
+Interlink does not accept, or an upload refused by another transfer's lock, print only
+the error and write no report. Credentials in a report are redacted. Each report is a
+file of its own, `report-<date>T<time>-<first eight characters of its Error ID>.json`,
+so reports written in the same second do not replace one another.
 Look for it under `%LOCALAPPDATA%\Rescale\Interlink\reports` on Windows,
 `~/Library/Application Support/rescale/reports` on macOS and
 `~/.config/rescale/reports` on Linux — where, unlike the config file, the

@@ -80,7 +80,7 @@ All production builds are compiled with `GOFIPS140=certified` (the CMVP-validate
 
 ### List
 - List all files in library with ID, name, size, upload date
-- Client-side include/exclude glob filters and a filename search term
+- Include/exclude glob filters, checked by the CLI, and filename search terms, run by the platform; both cover the whole library, and `--limit` counts the files that match (`0` lists all)
 
 ### Tags
 - `files tags list | add | remove | set` — read, extend, prune, or replace a file's tags. `set` with no tags clears them
@@ -271,7 +271,7 @@ Batch job submission pipeline for parallel computational studies.
 - `make-dirs-csv` — Auto-generate jobs CSV from directory structure
 - `scan-files` — Scan a tree for primary input files plus optional secondary attachments, render each job's command from its own file (`{{file}}`, `{{base}}`, `{{ext}}`, `{{dir}}`, `{{index}}`), and optionally generate a jobs CSV from a template. Each job uploads only its own primary plus secondary files. `--recursive` searches subfolders too, as `**/` in front of the pattern does
 - `plan` — Validate pipeline (dry-run)
-- `resume` — Resume interrupted pipeline from state file. Failure markers belonging to stages being retried are cleared, so a run that failed at tar and then resumed cleanly reports success instead of the previous run's failures. A job whose tar and upload both succeeded keeps its submit failure, which is a real unretried outcome
+- `resume` — Resume interrupted pipeline from state file. Failure markers belonging to stages being retried are cleared, so a run that failed at tar and then resumed cleanly reports success instead of the previous run's failures. A job whose tar and upload both succeeded keeps its submit failure, which is a real unretried outcome; a submit that a cancel cut off stays pending, and the next resume submits it
 - `submit-existing` — Submit jobs using previously uploaded files
 
 ### GUI PUR Tab
@@ -323,7 +323,7 @@ Behavior that applies across the native CLI rather than to one command.
 `1` covers partial outcomes: a batch that transferred some files and failed others exits
 non-zero, `pur run` fails when any job in the pipeline failed, and choosing **Abort** at a
 prompt stops the batch rather than continuing through the rest of the files. A cancelled
-PUR run is not a failure; a cancelled download or `files upload` is.
+PUR run, download or `files upload` exits `1`.
 
 ### Visible, Bounded Retries
 Transient storage and API failures are retried automatically and reported from the second

@@ -40,10 +40,13 @@ Most of this release is fixes, but some of them change what a script or a routin
   - `folders upload-dir` and `pur run` when any item failed, and choosing Abort at a
     prompt, which now stops the batch;
   - a cancelled `files download`, `jobs download`, `files upload` or
-    `folders download-dir`;
+    `folders download-dir`, and a cancelled `pur run`, `pur resume` or
+    `pur submit-existing --jobs-csv` (see [PUR pipeline fixes](#pur-pipeline-fixes));
   - `folders download-dir` when a file conflict could not be resolved, and any download
     that refused a file name (see [Downloads](#download-integrity-and-safe-file-names));
   - `jobs watch` when a job's last download pass failed or was cancelled;
+  - `daemon run --once` when its scan failed: the jobs, or the workspace folders, could
+    not be listed;
   - `daemon stop` when the daemon is still running 10 seconds after the request, and when
     a daemon it finds does not answer and `--force` is not given.
 
@@ -77,8 +80,10 @@ Most of this release is fixes, but some of them change what a script or a routin
   to run it as "Unnamed Job" on the default core type with one core for 48 hours; in that
   spelling `#RESCALE_CORES=8` asks for 8 cores, while Interlink's `#RESCALE_CORES emerald`
   still names the core type. `jobs submit --files` adds its uploads to the input files a
-  `--job-file` or a script names, instead of replacing them. See
-  [Compat mode](#compat-mode-reads-rescale-clis-job-scripts).
+  `--job-file` or a script names, instead of replacing them. A job script's
+  `#RESCALE_PUBLIC_KEY` and a job file's `publicKey` now reach the platform, which does
+  not take Ed25519 keys: such a script or file is refused before anything is uploaded.
+  Use an ECDSA or RSA key. See [Compat mode](#compat-mode-reads-rescale-clis-job-scripts).
 - **Transfer diagnostics are hidden by default.** They could corrupt the progress bars.
   Add `--verbose` (or `--debug`, or set `RESCALE_DEBUG`) to see them; rate-limit and
   retry notices are always shown. Please include `--verbose` output when you report a
@@ -103,7 +108,8 @@ Most of this release is fixes, but some of them change what a script or a routin
   see [Job template](#job-template-project-picker-and-coretype-aware-core-stepper)); the
   File Browser's Shared Jobs tab, which never worked (#65); and on Windows the service
   controls in the app and the tray, and the `service install`, `start`, `stop`, `status`
-  and `install-and-start` commands.
+  and `install-and-start` commands, which now exit 1 with a message saying that
+  auto-download runs from the Interlink app or with `rescale-int daemon run`.
 - **Commands printed for you to run are quoted for macOS and Linux shells.** In Windows
   `cmd.exe`, replace the single quotes around a path with double quotes.
 
@@ -261,6 +267,25 @@ paths and `id:<fileId>` references. `pur run` and `pur resume` take a folder in
   folder. Its final line counts them. It used to drop them silently.
 - `pur scan-files --json` prints only the JSON on standard output; if the scan fails,
   standard output is empty and the command exits 1.
+- `pur resume --dry-run` counts each job at the step the resume itself would start it at.
+  A created job whose row does not ask for a submit counts as complete, where it was
+  counted under `Need submit`; a job without an archive of its own, such as one whose
+  input files are already on Rescale, is counted by the step it needs instead of under
+  `Need tar`; and a job with an archive whose submit failed is counted on a line of its
+  own, `Submit failed`, since a resume does not submit it again.
+- When Ctrl-C stops a running pipeline in `pur run`, `pur resume` or
+  `pur submit-existing --jobs-csv`, it prints `Cancelled: N of M job(s) finished, K did
+  not` instead of the success line, after naming jobs left failed or unconfirmed, and
+  exits 1 with `Error: run cancelled: context canceled`, where it exited 0; a cancel
+  that had already failed the run keeps that run's own error, as before. A submit the
+  cancel cut off stays pending, and the next resume submits it. After **Cancel
+  Pipeline**, the app's activity log ends `Pipeline stopped by user` instead of
+  `Pipeline completed successfully`.
+- `pur run` and `pur resume` print each job's ID as it is created
+  (`✓ <job name>: created job <ID>`) and, at the end, the IDs of the common input files,
+  which no state file records; neither needs `--verbose`.
+- A resume that creates a job whose creation had failed records it as created, without
+  the old failure.
 
 ### Linux GUI: blank window fixed (#31)
 
@@ -287,8 +312,12 @@ headers; the other views keep their existing client-side column sorting. Contrib
 @jbeardslee-rescale ([PR #65](https://github.com/rescale-labs/Rescale_Interlink/pull/65));
 the maintainers added paging of search results through the full result set.
 
-A failed legacy listing is reported as an error instead of shown as an empty library.
-The non-functional Shared Jobs tab was removed.
+A failed listing is reported as an error instead of shown as an empty folder or library,
+in My Library and My Jobs as in Legacy. In My Library and My Jobs, a search that finds
+nothing says "No files match your search." A search or a Refresh made right after
+opening a folder, clicking a breadcrumb or switching views acts on the folder the
+breadcrumb names, which shows that folder at once. The non-functional Shared Jobs tab was
+removed.
 
 ### Transfers: cancellation and status accuracy (#24, #27, #28)
 
@@ -315,7 +344,7 @@ The non-functional Shared Jobs tab was removed.
 - The remote file picker forgets its resolved workspace, listing and selection when the
   API key changes, so a job cannot be submitted with file IDs from the previous account,
   and a slow folder listing that arrives after you have navigated away no longer replaces
-  the newer view.
+  the newer view. A folder it cannot list shows the error, where it used to look empty.
 - Changing the API key drops the coretype, project, software and automation catalogs so
   the pickers cannot show the previous account's entries.
 - A job whose creation is rejected counts as failed at once, in the header and the stats
@@ -334,6 +363,9 @@ The non-functional Shared Jobs tab was removed.
 - **Save logs to file** also records transfer and engine messages, the same entries the
   Activity tab shows, each once.
 - An empty folder in the File Browser's remote pane says "This folder is empty".
+- A **New Folder** that is refused, for example for a name already in use, keeps its
+  dialog open with the name as typed and shows the reason; the dialog used to close and
+  show nothing.
 - File Browser error messages follow the status the platform returned, when it returned
   one, rather than words in a file or folder name: a folder named `timeout_study` no
   longer turns an error into "Request timed out". A status other than 401, 403, 404, 429
@@ -357,18 +389,27 @@ The non-functional Shared Jobs tab was removed.
   `--job-id`, `daemon config edit` with no editor, and a `daemon stop` that timed out or
   found a daemon it could not reach; `jobs submit` given both `--job-file` and
   `--script`, or a job specification and `--job-id`; a PUR template that cannot be
-  loaded; a jobs CSV row refused as it loads, for half a license pair (`pur run`,
-  `pur resume`) or a `Submit` value Interlink cannot read (those and
+  loaded; a worker count below 1 in the configuration; a jobs CSV row refused as it
+  loads, for half a license pair, an SSH public key of a type the platform does not
+  accept or a `Submit` value Interlink cannot read (`pur run`, `pur resume` and
   `pur submit-existing`); a job script that `jobs submit --script` refuses, for a
   directive Interlink cannot carry out, a value that does not fit, a missing required
-  directive or a project you do not have; a missing conflict mode; a download refused
-  because its destination is a symbolic link; an API key that `config test` or
-  `daemon config validate` rejects; and a workspace without the "Auto Download" field.
+  directive, a project you do not have or such a public key, and a job file with such a
+  key for `jobs submit --job-file`; a missing conflict mode; a download refused because
+  its destination is a symbolic link; an API key that `config test` or
+  `daemon config validate` rejects, and any other setting `config test` reports as an
+  invalid configuration; a platform URL Interlink does not accept, on any command; and a
+  workspace without the "Auto Download" field.
 - A failure whose file or folder name contains digits such as `503` or `404` is no longer
   mistaken for a server error: it is not retried as one and does not produce an error
   report.
 - `files delete` checks a file exists before hunting for its parent folder — deleting a
   nonexistent ID now fails in a single API call instead of walking the library.
+- `files list` lists up to `--limit` files that pass its filters, reading as many pages
+  as that takes, and `--limit 0` lists every file; `--search` is run by the platform over
+  the whole library. It used to read only the ten newest files, whatever the limit, and
+  filter only those. A listing that stopped at `--limit` ends with
+  `(Stopped at --limit N. Use --limit to change, 0 for all)`.
 - Rate limiting: a cooldown the platform imposes while requests are already queued is
   honored instead of ignored, degraded mode is announced once on entry and once on exit,
   and a detached daemon's rate-limit and API retry notices reach its log.
@@ -377,6 +418,12 @@ The non-functional Shared Jobs tab was removed.
 - A rejected file tag reports the server's explanation instead of a bare status code.
 - Exported log files carry a date-and-time name, so two exports on one day no longer
   collide, and per-request proxy routing lines are logged only with `RESCALE_DEBUG`.
+- Error reports written in the same second no longer replace one another: a report's
+  file name ends with the first eight characters of its Error ID,
+  `report-<date>T<time>-<8 characters>.json`, and an existing report is never
+  overwritten. A failed `jobs list`, `jobs listfiles`, `jobs download` or `jobs watch`,
+  or a job download by auto-download, is filed under the category `transfer` instead of
+  `job_create`.
 - `files upload --dry-run` never uploads. With duplicate checking off, which is the
   default whenever the command runs without a terminal, the preview used to upload for
   real; every mode now prints the destination and each file that would be uploaded, and
@@ -388,6 +435,17 @@ The non-functional Shared Jobs tab was removed.
 - `folders download-dir` lists the remote folder tree up to eight folders at a time
   instead of one at a time, and its `Scanning:` line shows cumulative counts across the
   scan instead of restarting for each folder.
+- Creating a folder whose name is already in use in that place, also by a folder in
+  Trash, which listings do not show, says so and what to do: `a folder of that name
+  already exists in this location, possibly in Trash (restore it or delete it
+  permanently from Trash in the Rescale web UI, or use another name)`. This applies to
+  `folders create`, `folders upload-dir` and the upload folder of `pur run` and
+  `pur resume`, and in the app to a folder upload, **New Folder** and a PUR run's upload
+  folder. `folders create` and `folders upload-dir` used to pass on the platform's own
+  error text.
+- `folders upload-dir` names each failed file relative to the uploaded folder, also when
+  the folder was given through a link or as a relative path, where it could print a path
+  climbing out of it (`../../…`).
 - `jobs tail` refuses an interval below one second instead of crashing, and Ctrl+C now
   ends it.
 - The hint printed after an interrupted upload now says truthfully that a rerun can
@@ -405,9 +463,14 @@ The non-functional Shared Jobs tab was removed.
   only when the destination already holds files, and `--dry-run` needs none.
 - `jobs download --file-id` honours `--skip`, `--overwrite`, `--resume` and
   `--skip-checksum` as a whole-job download does.
+- `files download` names each existing file it leaves in place,
+  `⊘ Skipping existing file: <name>`, as `jobs download` does; it printed only the
+  count.
 - The warning about several API keys appears only when they differ.
 - Compat mode: `submit -E` applies its download filters (`-f`, `--exclude`, `-s`), and the
-  help shows `JOB_ID` as the job ID's placeholder.
+  help shows `JOB_ID` as the job ID's placeholder. `completion`, `help` and the deferred
+  `spub` commands run without an API key and make no network call; they used to need a
+  key and to sign in first.
 
 ### Auto-download: workspace folders, several computers, job-named folders
 
@@ -557,7 +620,15 @@ row. Contributed by @bdobrzelecki-rescale ([PR #64](https://github.com/rescale-l
   create call instead of being silently dropped, and unknown top-level keys in a
   `--job-file` produce a warning (#43). The GUI's job template carries the same fields,
   so an SGE script's CIDR rule and public key survive the GUI (the SGE format has no
-  port directive).
+  port directive). A public key of a type the platform does not accept is refused before
+  anything is uploaded: by `jobs submit --job-file` and `--script`, compat mode's
+  `submit`, `pur run`, `pur resume` and `pur submit-existing`, and by a Single Job or PUR
+  run started in the app, a PUR run started right after **Load Jobs File** included,
+  with the CLI's text and no error report; `pur plan` reports it. The platform takes
+  `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521`, `ssh-dss` and
+  `ssh-rsa` keys.
+- `jobs submit --script` states in its summary the slot count the job is sent with:
+  `1 slot` when the script sets none, where it said `0 slots`.
 - Template fields no longer die silently on the GUI's load paths: the tar subpath and the
   input file list were dropped on every template load and emptied on a CSV round trip
   (the CSV fix contributed by @ctusa-rescale).
@@ -677,10 +748,15 @@ disk-full.
 - In a folder download, a file conflict that cannot be resolved counts as a failure and
   prints its cause; it used to be reported as success. Without `--continue-on-error` the
   first failure stops the download, and Abort always does. No file is removed once the
-  download has stopped, and files the stop kept from starting are counted as such. The
-  summary counts merged folders correctly.
+  download has stopped. The files the stop cut off or kept from starting are counted
+  under `Not downloaded:`, and the summary says the download stopped. The summary counts
+  merged folders correctly.
 - Paginated listings that hit the page limit return an error instead of a truncated
-  result presented as success.
+  result presented as success. `jobs list` reads 200 jobs a page, and the listings of a
+  job's or a run's files read 1,000 files a page, where each read 10, so they list up to
+  200,000 jobs or 1,000,000 files instead of stopping at 10,000, and their error says how
+  many entries were listed. A job with tens of thousands of files lists in a few dozen
+  requests.
 
 ### Transfer hardening: resume, cancellation and object identity
 
@@ -723,6 +799,12 @@ disk-full.
   When a failed download has kept its resume state, the CLI says so and how to go on
   (run the same command again; for `folders download-dir`, run it again with `--merge`),
   and `--resume` says how far the download had got; these messages never appeared before.
+- A cancelled `files upload`, `files download` or `jobs download`, or a cancelled
+  transfer of `jobs submit`, ends with one line that says so and how many files never
+  started, such as `upload cancelled: 4 file(s) not started: context canceled`, without
+  the advice to check access to the job. When a file had already failed or been
+  refused, the line is `upload cancelled after an earlier failure:` or
+  `download cancelled after an earlier failure:`, followed by that failure.
 - Concurrent downloads bound how far they fetch ahead of a slow part, so a stalled part
   no longer holds the rest of the file in memory.
 - Rejected storage credentials are refreshed once for the whole transfer instead of
@@ -818,7 +900,7 @@ exits with an error instead of panicking.
 }
 ```
 
-Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. `pur run` and `pur resume` refuse such a row as the jobs CSV loads, `--dry-run` included, before anything is archived or uploaded. Clearing the feature name in the GUI releases the count. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
+Both fields are optional, but only meaningful together: a name without a count, or a count without a name — including a negative count in a jobs CSV — is rejected rather than submitted as a job that quietly takes no license. `pur run`, `pur resume` and `pur submit-existing` refuse such a row as the jobs CSV loads, including `--dry-run` for `pur run` and `pur resume`, before anything is archived, uploaded or created, and a Single Job or PUR run started in the app, a PUR run started right after **Load Jobs File** included, refuses such a job with the same text before anything is archived or uploaded. Clearing the feature name in the GUI releases the count. Jobs CSVs carry them in new `LicenseFeatureName` and `LicensesPerJob` columns, and CSVs written before those columns still load.
 
 An SGE script gives the same object in `#RESCALE_USER_DEFINED_LICENSE_SETTINGS`, written with a space or, as rescale-cli writes it, with `=`, and `jobs submit --script` and compat mode's `submit` send it as that object, with one or more feature sets; it used to go out as text, and the `=` spelling was ignored. A value that is not that object, or a feature that lacks a name or a count above zero, is refused with its line number before anything is uploaded; left empty after `=`, as rescale-cli allows, it sets nothing. Saving a job template as an SGE script writes its feature and count as the directive, and loading an SGE script reads a directive with one feature set holding one feature back into them; any other shape is refused, naming the line.
 

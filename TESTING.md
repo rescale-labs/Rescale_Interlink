@@ -86,8 +86,8 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-270 Go test files (267 under `internal/`, two under `installer/` and one under `cmd/rescale-int-tray/`) across 57 packages,
-plus 15 frontend vitest files. Grouped by functional area:
+294 Go test files (291 under `internal/`, two under `installer/` and one under `cmd/rescale-int-tray/`) across 57 packages,
+plus 16 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
 
@@ -209,8 +209,8 @@ plus 15 frontend vitest files. Grouped by functional area:
 | `components/widgets/TemplateBuilder.test.tsx` | License UX — CUSTOM/RLM preset auto-switch and its hint lifecycle |
 | `components/widgets/RemoteFilePicker.test.tsx` | Workspace invalidation on API key change, discarding stale listings |
 
-Also: `jobStore`, the PUR, Setup and Single Job tabs, and the `ErrorSummary` and
-`StatsBar` widgets.
+Also: `jobStore`, the PUR, Setup and Single Job tabs, and the `ErrorSummary`,
+`RemoteBrowser` and `StatsBar` widgets.
 
 ### Coverage Goals
 
@@ -585,11 +585,11 @@ for releases), and performance regression detection.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 270 test files across 57 packages — roughly 1,475 top-level test
+- **Go suite**: 294 test files across 57 packages — roughly 1,520 top-level test
   functions, plus subtests. Don't treat any of the reported case totals as a
   checksum: some tests branch on `runtime.GOOS`, so what `make test` counts, and what it
   skips, depends on the platform you measure on. 9 of the project's own packages have no test files.
-- **Frontend suite**: 15 vitest files.
+- **Frontend suite**: 16 vitest files.
 - **CI**: the `verify` job in `.github/workflows/release.yml` runs both suites, plus
   `go vet -tags fips` and the frontend lint and build, on every release run. The
   platform builds are gated on it. `.github/workflows/test.yml` runs the Go suite
