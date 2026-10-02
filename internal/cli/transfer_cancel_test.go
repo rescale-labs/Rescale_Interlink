@@ -335,20 +335,35 @@ func TestCancelledTransfersSayHowTheyEnded(t *testing.T) {
 // earlier failure. A download is judged on its first error alone, so its ending
 // never shows a cut file's error, nor the advice that comes with it.
 func TestCancelledTransfersAtTwoWorkersKeepTheirRules(t *testing.T) {
-	failsAfterTheCancel := func(ctx context.Context, _ func()) error {
-		<-ctx.Done()
-		time.Sleep(50 * time.Millisecond) // the cut file's error is recorded first, the order a wrong rule fails in
-		return errors.New("unexpected response from storage")
+	// both is a run in which the two files are in flight together, whatever the
+	// processor count: f0's transfer cancels only once f1's has started, and
+	// f1's then fails for a reason of its own. Each run has its own signal.
+	both := func() transferRun {
+		started := make(chan struct{})
+		return transferRun{files: []string{"f0.dat", "f1.dat"}, workers: 2, steps: map[string]transferStep{
+			"f0.dat": func(ctx context.Context, cancel func()) error {
+				select {
+				case <-started:
+				case <-time.After(10 * time.Second):
+					t.Error("f1's transfer did not start while f0's ran")
+				}
+				return stepCancels(ctx, cancel)
+			},
+			"f1.dat": func(ctx context.Context, _ func()) error {
+				close(started)
+				<-ctx.Done()
+				time.Sleep(50 * time.Millisecond) // the cut file's error is recorded first, the order a wrong rule fails in
+				return errors.New("unexpected response from storage")
+			},
+		}}
 	}
-	both := transferRun{files: []string{"f0.dat", "f1.dat"}, workers: 2,
-		steps: map[string]transferStep{"f0.dat": stepCancels, "f1.dat": failsAfterTheCancel}}
 
-	up := both.upload(t)
+	up := both().upload(t)
 	if got := fmt.Sprint(up.err); !up.report ||
 		!strings.HasPrefix(got, "upload cancelled after an earlier failure: upload failed: 2 file(s) failed (first error: ") {
 		t.Errorf("upload ended %q, report filed %v; want an earlier failure named, and a report", got, up.report)
 	}
-	down := both.jobsDownload(t)
+	down := both().jobsDownload(t)
 	if got := fmt.Sprint(down.err); down.err == nil || strings.Contains(got, "Cause: context canceled") {
 		t.Errorf("download ended %q; want no cut file's error in it", got)
 	}
