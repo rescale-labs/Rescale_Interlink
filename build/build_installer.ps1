@@ -35,7 +35,7 @@ $MsiPath = Join-Path $WorkDir $MsiName
 
 # WiX only warns when the webview2 folder it harvests is missing or empty, and
 # a failed build_dist.ps1 can leave a partial one; it writes the marker last.
-$WebView2Bundled = (Test-Path (Join-Path $BuildDir "webview2-bundled.txt") -PathType Leaf) -and (Test-Path (Join-Path $BinDir "webview2\msedgewebview2.exe") -PathType Leaf)
+$WebView2Bundled = (Test-Path (Join-Path $BuildDir "webview2-bundled.txt") -PathType Leaf) -and (Test-Path (Join-Path $BinDir "webview2\msedgewebview2.exe") -PathType Leaf) -and (Test-Path (Join-Path $BinDir "webview2\msedge.dll") -PathType Leaf)
 if (-not $WebView2Bundled) { throw "Not building the MSI: WebView2 runtime missing or incomplete in $BinDir\webview2 (run build_dist.ps1 first)" }
 Write-Host "Building MSI: $MsiPath"
 

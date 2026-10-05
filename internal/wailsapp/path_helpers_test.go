@@ -1,6 +1,7 @@
 package wailsapp
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -61,6 +62,41 @@ func TestStripJobIOPrefix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := stripJobIOPrefix(tt.input); got != tt.want {
 				t.Errorf("stripJobIOPrefix(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// The bundled runtime is used only when its engine is there too. One that lacks
+// msedge.dll cannot start, and the system runtime is tried instead.
+func TestBundledWebView2DirNeedsTheEngine(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files []string
+		want  bool
+	}{
+		{name: "no runtime folder"},
+		{name: "browser executable without the engine", files: []string{"msedgewebview2.exe", "msedge.dll.sig"}},
+		{name: "engine without the browser executable", files: []string{"msedge.dll"}},
+		{name: "complete runtime", files: []string{"msedgewebview2.exe", "msedge.dll"}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exeDir := t.TempDir()
+			dir := filepath.Join(exeDir, "webview2")
+			for _, f := range tc.files {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := ""
+			if tc.want {
+				want = dir
+			}
+			if got := bundledWebView2Dir(exeDir); got != want {
+				t.Errorf("bundledWebView2Dir = %q, want %q", got, want)
 			}
 		})
 	}

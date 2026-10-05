@@ -51,6 +51,8 @@ jobs:
           name: rescale-interlink-linux-amd64
           path: /tmp/build/rescale-interlink-*-linux-amd64.tar.gz*
           if-no-files-found: error
+          # Only carries files to the later jobs of this run.
+          retention-days: 1
 
   publish:
     name: Attach to the draft release

@@ -271,6 +271,8 @@ jobs:
           path: |
             rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.*
             !rescale-interlink-${{ env.RELEASE_VERSION }}-win_amd64.wixpdb
+          # Only carries files to the later jobs of this run.
+          retention-days: 1
 
   macos-build:
     needs: [verify]
@@ -492,6 +494,8 @@ jobs:
           name: rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64
           path: |
             rescale-interlink-${{ env.RELEASE_VERSION }}-macos_aarch64.*
+          # Only carries files to the later jobs of this run.
+          retention-days: 1
 
       - name: Cleanup keychain
         if: always()

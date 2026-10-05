@@ -476,18 +476,18 @@ func getWebView2BrowserPath() string {
 		return "" // Fall back to system WebView2
 	}
 
-	exeDir := filepath.Dir(exePath)
+	return bundledWebView2Dir(filepath.Dir(exePath))
+}
 
-	// Check for bundled WebView2 runtime in webview2/ folder
+// bundledWebView2Dir returns the webview2/ folder beside the executable when it
+// holds both the runtime's browser executable and its engine, and "" otherwise.
+// A runtime without its engine cannot start, while a system runtime usually can.
+func bundledWebView2Dir(exeDir string) string {
 	webview2Dir := filepath.Join(exeDir, "webview2")
-	if info, err := os.Stat(webview2Dir); err == nil && info.IsDir() {
-		// Check if it contains the expected runtime files
-		// The Fixed Version Runtime contains msedgewebview2.exe
-		runtimeExe := filepath.Join(webview2Dir, "msedgewebview2.exe")
-		if _, err := os.Stat(runtimeExe); err == nil {
-			return webview2Dir // Use bundled runtime
+	for _, name := range []string{"msedgewebview2.exe", "msedge.dll"} {
+		if info, err := os.Stat(filepath.Join(webview2Dir, name)); err != nil || !info.Mode().IsRegular() {
+			return "" // Use system WebView2
 		}
 	}
-
-	return "" // Use system WebView2
+	return webview2Dir
 }

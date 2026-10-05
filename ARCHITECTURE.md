@@ -1184,7 +1184,7 @@ The concurrency tier turns at 100MB and 1GB, but threads-per-file turns at 500MB
 
 **Architecture**: Wails v2 with React/TypeScript frontend.
 - **Main Process** (Go): Runs the Wails app, handles API calls, file I/O
-- **Renderer** (the platform's own webview): Runs the React UI — WebView2 on Windows, where `WebviewBrowserPath` points at the bundled fixed-version runtime when one is present; WebKitGTK on Linux, bundled into the AppImage with its helper processes; WKWebView on macOS
+- **Renderer** (the platform's own webview): Runs the React UI — WebView2 on Windows, where `WebviewBrowserPath` points at the bundled fixed-version runtime when a complete one is present (`msedgewebview2.exe` and `msedge.dll`), and the system runtime is used otherwise; WebKitGTK on Linux, bundled into the AppImage with its helper processes; WKWebView on macOS
 - **IPC**: Automatic method binding via Wails runtime
 
 **Event Bridge Pattern** (`internal/wailsapp/event_bridge.go`):

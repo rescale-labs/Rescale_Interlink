@@ -86,7 +86,7 @@ go test -v ./internal/watch/...
 
 ### Current Coverage by Area
 
-294 Go test files (291 under `internal/`, two under `installer/` and one under `cmd/rescale-int-tray/`) across 57 packages,
+295 Go test files (292 under `internal/`, two under `installer/` and one under `cmd/rescale-int-tray/`) across 57 packages,
 plus 16 frontend vitest files. Grouped by functional area:
 
 #### CLI & Commands
@@ -585,7 +585,7 @@ for releases), and performance regression detection.
 
 ### Current State (v4.9.9)
 
-- **Go suite**: 294 test files across 57 packages — roughly 1,520 top-level test
+- **Go suite**: 295 test files across 57 packages — roughly 1,520 top-level test
   functions, plus subtests. Don't treat any of the reported case totals as a
   checksum: some tests branch on `runtime.GOOS`, so what `make test` counts, and what it
   skips, depends on the platform you measure on. 9 of the project's own packages have no test files.

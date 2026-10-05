@@ -296,10 +296,14 @@ Get-ChildItem $BinDir
 Write-Host ""
 Write-Host "[4.5/7] Bundling WebView2 Fixed Version Runtime..."
 
-# Pinned WebView2.Runtime.X64 package. Change both lines together: the SHA-256
-# is of the .nupkg that api.nuget.org serves for this version.
-$WebView2Version = "152.0.4191.62"
-$WebView2Sha256 = "f6db2fa2038d7e7398cf33ca3113c86187b76cb6906c6a3abdb4aee8a042b376"
+# Pinned Fixed Version runtime, the .cab Microsoft publishes for it on the
+# WebView2 download page. Change the three lines together: the SHA-256 is of
+# the .cab at this URL. The community NuGet repackage used before is not
+# complete from 152 on: it moved msedge.dll into a second package and leaves
+# out the shader compilers.
+$WebView2Version = "154.0.4258.62"
+$WebView2CabUrl = "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/b92cd7d9-6976-4f34-9708-47e80937c287/Microsoft.WebView2.FixedVersionRuntime.154.0.4258.62.x64.cab"
+$WebView2Sha256 = "e8f55a4bde27c7f82512402b56a58539b5ec8928be4e500e077b6f66c9ef4668"
 
 $WebView2Dir = Join-Path $BinDir "webview2"
 $RuntimeExtract = Join-Path $BuildDir "webview2-runtime-extract"
@@ -307,91 +311,64 @@ $RuntimeExtract = Join-Path $BuildDir "webview2-runtime-extract"
 # any earlier extraction or copy first keeps stale or partial runtimes out of the MSI.
 $WebView2Marker = Join-Path $BuildDir "webview2-bundled.txt"
 Get-Item $WebView2Marker, $RuntimeExtract, $WebView2Dir -Force -ErrorAction Ignore | Remove-Item -Recurse -Force
-New-Item -ItemType Directory -Force -Path $WebView2Dir | Out-Null
+New-Item -ItemType Directory -Force -Path $WebView2Dir, $RuntimeExtract | Out-Null
+$RuntimeCab = Join-Path $BuildDir "webview2-runtime.cab"
 
-# Download WebView2 Fixed Version Runtime from NuGet
-# IMPORTANT: Use WebView2.Runtime.X64 package (contains actual runtime files)
-# NOT Microsoft.Web.WebView2 (which is just the SDK with WebView2Loader.dll)
-# See: https://github.com/ProKn1fe/WebView2.Runtime
-$RuntimeNuGetUrl = "https://api.nuget.org/v3-flatcontainer/webview2.runtime.x64/$WebView2Version/webview2.runtime.x64.$WebView2Version.nupkg"
-$RuntimePkg = Join-Path $BuildDir "webview2-runtime.zip"
+Write-Host "Downloading WebView2 Fixed Version Runtime $WebView2Version..."
 
-Write-Host "Downloading WebView2 Fixed Version Runtime (WebView2.Runtime.X64 $WebView2Version)..."
-
-# Any failure below stops the build. Without the bundled runtime, the GUI offers to
-# download an Evergreen runtime where none is installed, and cannot start without one.
+# Any failure below stops the build. Without a complete bundled runtime the GUI
+# cannot start where no system runtime is installed.
 try {
-    (New-Object System.Net.WebClient).DownloadFile($RuntimeNuGetUrl, $RuntimePkg)
-    Write-Host "WebView2.Runtime.X64 package downloaded successfully"
-    $pkgSize = (Get-Item $RuntimePkg).Length / 1MB
-    Write-Host "Package size: $([math]::Round($pkgSize, 1)) MB"
+    (New-Object System.Net.WebClient).DownloadFile($WebView2CabUrl, $RuntimeCab)
+    Write-Host "Package size: $([math]::Round((Get-Item $RuntimeCab).Length / 1MB, 1)) MB"
 
-    $RuntimePkgSha256 = (Get-FileHash -Path $RuntimePkg -Algorithm SHA256).Hash
-    if ($RuntimePkgSha256 -ne $WebView2Sha256.ToUpper()) {
-        throw "checksum mismatch for ${RuntimeNuGetUrl}: expected $WebView2Sha256, got $RuntimePkgSha256"
+    $RuntimeCabSha256 = (Get-FileHash -Path $RuntimeCab -Algorithm SHA256).Hash
+    if ($RuntimeCabSha256 -ne $WebView2Sha256.ToUpper()) {
+        throw "checksum mismatch for ${WebView2CabUrl}: expected $WebView2Sha256, got $RuntimeCabSha256"
     }
-    Write-Host "Checksum OK: $RuntimePkgSha256"
+    Write-Host "Checksum OK: $RuntimeCabSha256"
 
-    # Extract the NuGet package
-    Expand-Archive -Path $RuntimePkg -DestinationPath $RuntimeExtract -Force
+    # Microsoft's documented way to unpack the Fixed Version .cab
+    & expand.exe $RuntimeCab -F:* $RuntimeExtract | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "expand.exe exited $LASTEXITCODE" }
 
-    Write-Host "Searching for runtime files..."
-
-    # Find msedgewebview2.exe in the extracted package
     $runtimeExe = Get-ChildItem -Path $RuntimeExtract -Recurse -Filter "msedgewebview2.exe" | Select-Object -First 1
+    if (-not $runtimeExe) { throw "msedgewebview2.exe not found in the Fixed Version runtime" }
+    Write-Host "Found runtime at: $($runtimeExe.DirectoryName)"
+    Copy-Item -Path "$($runtimeExe.DirectoryName)\*" -Destination $WebView2Dir -Recurse -Force
 
-    if ($runtimeExe) {
-        $RuntimeSourceDir = $runtimeExe.DirectoryName
-        Write-Host "Found runtime at: $RuntimeSourceDir"
+    # Strip what Interlink does not use: DRM for video, the 32-bit host, Edge's
+    # Copilot programs, and every UI language but US English (the browser falls
+    # back to it).
+    $strip = @(@("WidevineCdm", "EBWebView\x86", "copilotapp.exe", "mscopilot.exe", "Installer\copilot_setup.exe") |
+        ForEach-Object { Join-Path $WebView2Dir $_ } | Where-Object { Test-Path $_ })
+    $strip += @(Get-ChildItem -Path (Join-Path $WebView2Dir "Locales") -File | Where-Object { $_.Name -ne "en-US.pak" } |
+        ForEach-Object { $_.FullName })
+    $strippedSize = ($strip | ForEach-Object { Get-ChildItem -Path $_ -Recurse -File -Force } | Measure-Object -Property Length -Sum).Sum
+    $strip | ForEach-Object { Remove-Item -Path $_ -Recurse -Force }
+    Write-Host "Stripped $($strip.Count) unused entries ($([math]::Round($strippedSize / 1MB, 1)) MB)"
 
-        # Copy all runtime files
-        Copy-Item -Path "$RuntimeSourceDir\*" -Destination $WebView2Dir -Recurse -Force
-
-        # Strip unnecessary components to avoid path length issues and reduce size
-        # - WidevineCdm: DRM for video playback - not needed for Interlink
-        # - EBWebView/x86: 32-bit components - Interlink is 64-bit only
-        Write-Host "Stripping unnecessary WebView2 components..."
-        $strippedSize = 0
-
-        $widevinePath = Join-Path $WebView2Dir "WidevineCdm"
-        if (Test-Path $widevinePath) {
-            $wvSize = (Get-ChildItem -Path $widevinePath -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
-            Remove-Item -Recurse $widevinePath -Force -ErrorAction SilentlyContinue
-            Write-Host "  Removed WidevineCdm/ ($([math]::Round($wvSize, 1)) MB)"
-            $strippedSize += $wvSize
-        }
-
-        $x86Path = Join-Path $WebView2Dir "EBWebView\x86"
-        if (Test-Path $x86Path) {
-            $x86Size = (Get-ChildItem -Path $x86Path -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
-            Remove-Item -Recurse $x86Path -Force -ErrorAction SilentlyContinue
-            Write-Host "  Removed EBWebView/x86/ ($([math]::Round($x86Size, 1)) MB)"
-            $strippedSize += $x86Size
-        }
-
-        if ($strippedSize -gt 0) {
-            Write-Host "  Total stripped: $([math]::Round($strippedSize, 1)) MB"
-        }
-
-        # Verify
-        $copiedExe = Join-Path $WebView2Dir "msedgewebview2.exe"
-        if (Test-Path $copiedExe) {
-            Write-Host "SUCCESS: WebView2 $WebView2Version bundled for MSI (msedgewebview2.exe $((Get-Item $copiedExe).VersionInfo.FileVersion))"
-            $fileCount = (Get-ChildItem -Path $WebView2Dir -Recurse).Count
-            $totalSize = (Get-ChildItem -Path $WebView2Dir -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
-            Write-Host "WebView2 runtime: $fileCount files, $([math]::Round($totalSize, 1)) MB total"
-        } else {
-            throw "Failed to copy msedgewebview2.exe"
-        }
-    } else {
-        Get-ChildItem -Path $RuntimeExtract -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object FullName | Out-Host
-        throw "msedgewebview2.exe not found in WebView2.Runtime.X64 package"
+    # A runtime missing any of these does not start, and nothing but launching the
+    # GUI on Windows would show it. A signature file without its binary means a
+    # file was lost on the way.
+    foreach ($required in @("msedgewebview2.exe", "msedge.dll", "EBWebView\x64\EmbeddedBrowserWebView.dll",
+                            "resources.pak", "icudtl.dat", "Locales\en-US.pak")) {
+        if (-not (Test-Path (Join-Path $WebView2Dir $required) -PathType Leaf)) { throw "the runtime lacks $required" }
     }
+    $unpaired = @(Get-ChildItem -Path $WebView2Dir -Recurse -File -Filter "*.sig" |
+        Where-Object { -not (Test-Path ($_.FullName -replace '\.sig$', '') -PathType Leaf) })
+    if ($unpaired.Count -gt 0) { throw "signature files without their binary: $($unpaired.Name -join ', ')" }
+    $engineSize = (Get-Item (Join-Path $WebView2Dir "msedge.dll")).Length
+    if ($engineSize -lt 100MB) { throw "msedge.dll is $engineSize bytes, too small to be the browser engine" }
+    $exeVersion = (Get-Item (Join-Path $WebView2Dir "msedgewebview2.exe")).VersionInfo.FileVersion
+    if ($exeVersion -ne $WebView2Version) { throw "msedgewebview2.exe is version $exeVersion, expected $WebView2Version" }
+
+    $files = Get-ChildItem -Path $WebView2Dir -Recurse -File
+    Write-Host "SUCCESS: WebView2 $WebView2Version bundled: $($files.Count) files, $([math]::Round(($files | Measure-Object -Property Length -Sum).Sum / 1MB, 1)) MB"
 
     Set-Content -Path $WebView2Marker -Value $WebView2Version
 
-    # Cleanup
-    Remove-Item $RuntimePkg -Force -ErrorAction SilentlyContinue
+    Remove-Item $RuntimeCab -Force -ErrorAction SilentlyContinue
     Remove-Item $RuntimeExtract -Recurse -Force -ErrorAction SilentlyContinue
 
 } catch {
