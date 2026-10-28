@@ -23,14 +23,21 @@
 #      libGL, libX11/xcb, libdrm and friends) are expected from the host.
 #   3. build/linux/bundle-webkit.sh's manifest claims match reality - the env
 #      export it says it wrote is really in the AppRun hook, or the binary
-#      patch it says it applied is really in the library.
+#      patch it says it applied is really in the library - and the bundled
+#      library loads its own injected bundle through the patched path.
 #   4. The GTK immodules cache holds no build-host absolute paths.
-#   5. Best effort, and never fatal on its own: launch the thing and confirm a
-#      real WebKitWebProcess starts from inside the extracted bundle.
+#   5. In every bundled 64-bit ELF with a dynamic section, DT_INIT, DT_FINI and
+#      all code still sit in executable code: older patchelf versions moved
+#      .init and left DT_INIT behind.
+#   6. Launch the thing and wait for the frontend to start, then for the app
+#      and a web process to stay up a few seconds more; otherwise the gate
+#      fails. Whether the WebKitWebProcess ran from inside the extracted bundle
+#      is reported but never fatal on its own.
 #
-# Hard assertion failures exit non-zero, which fails the build job. The runtime
-# check reports RUNTIME-VERIFIED or RUNTIME-CHECK-INCONCLUSIVE and never fails
-# the gate by itself - a headless build node is not a reliable GUI host.
+# Hard assertion failures exit non-zero, which fails the build job. Without a
+# display the runtime check reports RUNTIME-CHECK-INCONCLUSIVE instead, and its
+# process attribution is advisory - a headless build node is not a reliable
+# GUI host.
 #
 # Extraction happens in its own mktemp directory, deliberately NOT in the build
 # directory: the build job juggles several 'squashfs-root' directories of its
@@ -108,6 +115,9 @@ echo "Started:  $(date)"
 section "Extracting"
 
 TMPD="$(mktemp -d "${TMPDIR:-/tmp}/rs-appimage-verify.XXXXXX")"
+# Physical path: Check 6 compares it with /proc/<pid>/exe, which resolves
+# symlinks, and /tmp is one on some hosts.
+TMPD="$(cd "$TMPD" && pwd -P)"
 cd "$TMPD"
 
 if ! "$APPIMAGE" --appimage-extract > "$TMPD/extract.log" 2>&1; then
@@ -363,6 +373,38 @@ case "$PATH_STRATEGY" in
         ;;
 esac
 
+# The bundled library must load its own injected bundle through the patched
+# path. WEBKIT_INJECTED_BUNDLE_PATH is not an option: a host libwebkit2gtk that
+# LD_LIBRARY_PATH loads ahead of the bundle reads it too, and a bundle built for
+# another WebKit can kill that host's web process.
+INJECTED_STRATEGY=""
+if [ -f "$MANIFEST" ]; then
+    INJECTED_STRATEGY="$(sed -n 's/^injected_strategy=//p' "$MANIFEST" | head -1)"
+fi
+if ls "$ROOT"/usr/libexec/injected-bundle/libwebkit2gtkinjectedbundle.so >/dev/null 2>&1; then
+    pass "injected bundle present: usr/libexec/injected-bundle/libwebkit2gtkinjectedbundle.so"
+else
+    fail "no usr/libexec/injected-bundle/libwebkit2gtkinjectedbundle.so in the AppImage"
+fi
+case "$INJECTED_STRATEGY" in
+    patch)
+        if [ -f "$HOOKFILE" ] && grep -q -E '^[[:space:]]*export WEBKIT_INJECTED_BUNDLE_PATH=' "$HOOKFILE"; then
+            fail "hook exports WEBKIT_INJECTED_BUNDLE_PATH although the library is patched"
+        else
+            pass "hook does not export WEBKIT_INJECTED_BUNDLE_PATH"
+        fi
+        if [ -n "$BUNDLED_LIB" ] && [ -n "$PATCH_LINK_DIR" ] \
+            && grep -q -a -F -- "$PATCH_LINK_DIR/injected-bundle" "$BUNDLED_LIB"; then
+            pass "bundled library loads its injected bundle from $PATCH_LINK_DIR/injected-bundle"
+        else
+            fail "manifest says injected_strategy=patch but the library has no '$PATCH_LINK_DIR/injected-bundle'"
+        fi
+        ;;
+    *)
+        fail "injected bundle wiring is '${INJECTED_STRATEGY:-missing}', not the patched path"
+        ;;
+esac
+
 # =============================================================================
 # Check 4: immodules cache holds no build-host paths
 # =============================================================================
@@ -443,9 +485,106 @@ else
 fi
 
 # =============================================================================
-# Check 5: best-effort runtime check (never fatal on its own)
+# Check 5: every ELF's startup code is intact
 # =============================================================================
-section "Check 5: runtime check (best effort)"
+# patchelf grows the program-header table when it adds an RPATH. Before 0.19.0
+# it could move .init out of the table's way without updating DT_INIT
+# (NixOS/patchelf#639), and the loader then jumps into header bytes: the
+# library crashes the moment anything loads it. 'ldd -r' cannot see this,
+# because it never runs an initializer.
+section "Check 5: startup code intact in every bundled ELF"
+
+if ! command -v python3 >/dev/null 2>&1; then
+    fail "python3 is needed to inspect the bundled ELF files"
+elif ELF_REPORT="$(find "$ROOT" -type f -print0 | python3 -c '
+import struct, sys
+
+def problems(data):
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        return None
+    phoff, shoff = struct.unpack_from("<QQ", data, 0x20)
+    phentsize, phnum, shentsize, shnum = struct.unpack_from("<HHHH", data, 0x36)
+    loads, dyn = [], None
+    for i in range(phnum):
+        ph = struct.unpack_from("<IIQQQQQQ", data, phoff + i * phentsize)
+        if ph[0] == 1:
+            loads.append(ph)
+        elif ph[0] == 2:
+            dyn = ph
+    if dyn is None:
+        return None
+    entries = {}
+    for j in range(dyn[5] // 16):
+        tag, val = struct.unpack_from("<qQ", data, dyn[2] + 16 * j)
+        if tag == 0:
+            break
+        if tag in (12, 13):  # DT_INIT, DT_FINI
+            entries[tag] = val
+    # Executable sections, when the file has section headers. Checked against
+    # these rather than .init itself: some libraries point DT_INIT at their own
+    # function with -Wl,-init.
+    code = None
+    if shoff and shnum:
+        code = []
+        for k in range(shnum):
+            sh = struct.unpack_from("<IIQQQQIIQQ", data, shoff + k * shentsize)
+            if sh[2] & 0x4 and sh[5]:  # SHF_EXECINSTR
+                code.append((sh[3], sh[3] + sh[5]))
+    found = []
+    # patchelf can move .plt or .text along with .init.
+    for lo, hi in code or []:
+        if not any(ph[1] & 1 and ph[3] <= lo and hi <= ph[3] + ph[6] for ph in loads):
+            found.append("code at %#x-%#x is not in an executable segment" % (lo, hi))
+    table = None
+    for ph in loads:
+        if ph[2] <= phoff < ph[2] + ph[5]:
+            table = (ph[3] + phoff - ph[2], ph[3] + phoff - ph[2] + phnum * phentsize)
+            break
+    for tag, name in ((12, "DT_INIT"), (13, "DT_FINI")):
+        if tag not in entries:
+            continue
+        addr = entries[tag]
+        seg = [ph for ph in loads if ph[3] <= addr < ph[3] + ph[6]]
+        if not seg or not seg[0][1] & 1:
+            found.append("%s %#x is not in an executable segment" % (name, addr))
+        if code is not None and not any(lo <= addr < hi for lo, hi in code):
+            found.append("%s %#x is not inside any executable section" % (name, addr))
+        if table and table[0] <= addr < table[1]:
+            found.append("%s %#x lies inside the program-header table" % (name, addr))
+    return found
+
+checked = bad = 0
+for path in sys.stdin.buffer.read().split(b"\0"):
+    if not path:
+        continue
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        continue
+    try:
+        found = problems(data)
+    except struct.error:
+        found = ["ELF headers point past the end of the file"]
+    if found is None:
+        continue
+    checked += 1
+    for problem in found:
+        bad += 1
+        print("%s: %s" % (path.decode(errors="replace"), problem))
+print("checked %d dynamic ELF files" % checked)
+sys.exit(1 if bad or not checked else 0)
+' 2>&1)"; then
+    pass "${ELF_REPORT##*$'\n'}: DT_INIT and DT_FINI all point at executable code"
+else
+    fail "bundled ELF files whose startup code patchelf damaged:"
+    printf '%s\n' "$ELF_REPORT" | sed "s#$ROOT/##; s/^/        /"
+fi
+
+# =============================================================================
+# Check 6: runtime check
+# =============================================================================
+section "Check 6: runtime check"
 
 runtime_check() {
     local disp="${DISPLAY:-}"
@@ -471,14 +610,21 @@ runtime_check() {
         return 0
     fi
 
+    # RESCALE_DEBUG makes the app log "Frontend requested app info"
+    # (config_bindings.go GetAppInfo), which the React app calls as it starts:
+    # WebKit loaded the page and its scripts ran. Wails' own "DOM ready" is not
+    # enough, because WebKit also reports a load that failed as finished.
     note "launching $ROOT/AppRun"
-    DISPLAY="$disp" "$ROOT/AppRun" >"$TMPD/apprun.log" 2>&1 &
+    DISPLAY="$disp" RESCALE_DEBUG=1 "$ROOT/AppRun" >"$TMPD/apprun.log" 2>&1 &
     local app_pid=$!
 
+    local started=0
     local found=0
     local outside=0
     local waited=0
+    local start_time=$SECONDS
     local webkit_pids=""
+    local web_alive=0
 
     # ppid of a pid, read from /proc/<pid>/stat. Field 2 is the comm value in
     # parentheses and may itself contain spaces or parentheses, so everything up
@@ -514,10 +660,10 @@ runtime_check() {
         return 1
     }
 
-    while [ "$waited" -lt 12 ]; do
-        sleep 1
-        waited=$((waited + 1))
-
+    # Records every descendant WebKitWebProcess and sets web_alive to how many
+    # are running now.
+    scan_web_processes() {
+        web_alive=0
         for procdir in /proc/[0-9]*; do
             exe="$(readlink "$procdir/exe" 2>/dev/null || true)"
             case "$exe" in
@@ -526,6 +672,10 @@ runtime_check() {
                     if ! is_descendant "$pid"; then
                         continue
                     fi
+                    web_alive=$((web_alive + 1))
+                    case " $webkit_pids " in
+                        *" $pid "*) continue ;;
+                    esac
                     webkit_pids="$webkit_pids $pid"
                     case "$exe" in
                         "$TMPD"/*)
@@ -541,8 +691,17 @@ runtime_check() {
                     ;;
             esac
         done
+    }
 
-        if [ "$found" -eq 1 ]; then
+    while [ "$waited" -lt 45 ]; do
+        sleep 1
+        waited=$((SECONDS - start_time))
+        scan_web_processes
+
+        if grep -q -F 'Frontend requested app info' "$TMPD/apprun.log" 2>/dev/null; then
+            started=1
+        fi
+        if [ "$started" -eq 1 ] && { [ "$found" -eq 1 ] || [ "$waited" -ge 12 ]; }; then
             break
         fi
         if ! kill -0 "$app_pid" 2>/dev/null; then
@@ -550,6 +709,17 @@ runtime_check() {
             break
         fi
     done
+
+    # A crash right after the first frame must not pass: both the app and a
+    # web process have to outlive the start by a few seconds.
+    local survived=0
+    if [ "$started" -eq 1 ]; then
+        sleep 5
+        scan_web_processes
+        if kill -0 "$app_pid" 2>/dev/null && [ "$web_alive" -gt 0 ]; then
+            survived=1
+        fi
+    fi
 
     # Tear down whatever is still running.
     kill "$app_pid" 2>/dev/null || true
@@ -561,8 +731,18 @@ runtime_check() {
         kill "$xvfb_pid" 2>/dev/null || true
     fi
 
-    if [ "$found" -eq 1 ]; then
-        echo "  RUNTIME-VERIFIED (WebKitWebProcess ran from inside the bundle)"
+    # A frontend that never starts, or dies right after, fails the gate. Which
+    # WebKitWebProcess ran stays advisory, as below.
+    if [ "$started" -eq 0 ]; then
+        fail "the frontend never started in ${waited}s - WebKit did not load the page or its scripts did not run"
+        note "last 20 lines of the application log:"
+        tail -20 "$TMPD/apprun.log" 2>/dev/null | sed 's/^/        /' || true
+    elif [ "$survived" -eq 0 ]; then
+        fail "the app or its web process died within 5s of the frontend starting"
+        note "last 20 lines of the application log:"
+        tail -20 "$TMPD/apprun.log" 2>/dev/null | sed 's/^/        /' || true
+    elif [ "$found" -eq 1 ]; then
+        echo "  RUNTIME-VERIFIED (the frontend started; WebKitWebProcess ran from inside the bundle)"
     elif [ "$outside" -eq 1 ]; then
         # Suspicious, but not a verdict: this runs on a headless build node with
         # a matching host WebKit installed, so process attribution here is not
@@ -573,9 +753,7 @@ runtime_check() {
         note "last 20 lines of the application log:"
         tail -20 "$TMPD/apprun.log" 2>/dev/null | sed 's/^/        /' || true
     else
-        echo "  RUNTIME-CHECK-INCONCLUSIVE (no WebKitWebProcess observed in ${waited}s)"
-        note "last 20 lines of the application log:"
-        tail -20 "$TMPD/apprun.log" 2>/dev/null | sed 's/^/        /' || true
+        echo "  RUNTIME-CHECK-INCONCLUSIVE (the frontend started, but no WebKitWebProcess was seen)"
     fi
     return 0
 }
@@ -597,8 +775,9 @@ fi
 
 echo "FAIL: AppImage verification gate ($FAILURES failed assertion(s))"
 echo "=============================================="
-echo "This AppImage must not be shipped. The most likely cause is that"
+echo "This AppImage must not be shipped. The most likely causes are that"
 echo "build/linux/bundle-webkit.sh did not run, or ran against a different"
-echo "AppDir than the one appimagetool packaged."
+echo "AppDir than the one appimagetool packaged, or that a patchelf older"
+echo "than 0.19.0 rewrote the bundled files (Check 5)."
 echo "Finished: $(date)"
 exit 1

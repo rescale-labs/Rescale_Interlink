@@ -38,6 +38,9 @@
 #            that the AppRun hook symlinks to this bundle at launch.
 #        (c) Otherwise: fail the build loudly rather than ship a GUI that
 #            cannot render.
+#      The injected-bundle directory compiled into the library gets the same
+#      patch under (b), or the build fails, and the AppRun hook clears any
+#      inherited WEBKIT_INJECTED_BUNDLE_PATH, which would override the patch.
 #
 #   4. Regenerates the GTK immodules cache. The gtk plugin strips module paths
 #      down to bare build-host filenames ("im-ibus.so"), which do not resolve
@@ -321,7 +324,8 @@ step "Step 4: setting \$ORIGIN-relative RPATH on copied binaries"
 
 command -v patchelf >/dev/null 2>&1 || die "'patchelf' not found.
 It is required to point the copied WebKit binaries at the bundled libraries.
-Install patchelf on the build node (the release wrapper yum-installs it)."
+Put patchelf 0.19.0 or newer on PATH (build-release.sh downloads a pinned
+copy); older versions damage the files they rewrite."
 
 echo "  RPATH to set: $RPATH_VALUE"
 
@@ -553,7 +557,7 @@ else
     if [ "$N_EMBEDDED_ANY" -eq 0 ]; then
         # ------------------------------------------------------------ rung (c)
         #
-        # TODO(human): neither path-resolution rung is available on this
+        # TODO: neither path-resolution rung is available on this
         # WebKit build. The documented fallback is an LD_PRELOAD shim that
         # intercepts the helper spawn - interpose execv/execvp/posix_spawn (or
         # g_subprocess_launcher_spawnv), rewrite an argv[0] of
@@ -650,17 +654,18 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Injected-bundle wiring, using whichever mechanism this build supports.
+# Injected-bundle wiring: the embedded-path patch, or no build.
 # ---------------------------------------------------------------------------
+# WEBKIT_INJECTED_BUNDLE_PATH is no substitute, even where the library reads
+# it: it is read by whichever libwebkit2gtk the process loads, including a
+# host one that LD_LIBRARY_PATH puts ahead of the bundle (some managed
+# desktops set it to the system library directories), and a bundle built for
+# another WebKit can kill that host's web process before it paints anything.
+# The patch changes only the bundled library, so a host library keeps loading
+# its own bundle.
 INJECTED_STRATEGY="none"
 if [ "$INJECTED_BUNDLED" = "yes" ]; then
-    if [ "$N_INJECTED_ENV" -gt 0 ]; then
-        INJECTED_STRATEGY="env"
-        echo "  injected bundle: library reads WEBKIT_INJECTED_BUNDLE_PATH, exporting it."
-        cat >> "$HOOK_ADD" <<EOF
-export WEBKIT_INJECTED_BUNDLE_PATH="\$APPDIR/${INJECTED_REL}"
-EOF
-    elif [ "$PATH_STRATEGY" = "patch" ]; then
+    if [ "$PATH_STRATEGY" = "patch" ]; then
         # Same trick as the helpers: rewrite the compiled-in directory to sit
         # under the /tmp symlink. Shorter than the original, so it is
         # NUL-padded back to the original length.
@@ -678,15 +683,15 @@ EOF
                 break
             fi
         done
-        if [ "$INJECTED_STRATEGY" = "none" ]; then
-            echo "  WARNING: injected bundle is bundled but its compiled-in path was not"
-            echo "  WARNING: found in the library, so it stays pointed at the host."
-        fi
-    else
-        echo "  WARNING: injected bundle is bundled but this library supports neither"
-        echo "  WARNING: WEBKIT_INJECTED_BUNDLE_PATH nor a patchable path; it stays"
-        echo "  WARNING: pointed at the host's copy."
     fi
+    [ "$INJECTED_STRATEGY" = "patch" ] || die "the bundled library's injected-bundle directory could not be patched
+(helper path strategy: $PATH_STRATEGY). Without the patch its web processes
+would load a host injected bundle built for another WebKit."
+    # WebKit prefers the variable over the patched path, so a value inherited
+    # from the user's environment must not reach it.
+    cat >> "$HOOK_ADD" <<'EOF'
+unset WEBKIT_INJECTED_BUNDLE_PATH
+EOF
 fi
 
 # =============================================================================

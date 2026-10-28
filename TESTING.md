@@ -541,8 +541,8 @@ needs them both):
 - macOS build (Apple Silicon, Developer ID signed + notarized)
 
 The Linux build runs in `.github/workflows/release-linux.yml`, in an `almalinux:8`
-container, through `build/linux/build-release.sh`; it runs no test suite. Go, Node.js
-and the AppImage tools it downloads are checked against pinned SHA-256 sums, the Wails
+container, through `build/linux/build-release.sh`; it runs no test suite. Go, Node.js,
+patchelf and the AppImage tools it downloads are checked against pinned SHA-256 sums, the Wails
 CLI comes through `go install`, and the system packages from the AlmaLinux and EPEL
 repositories through `dnf`; `ldd -r` resolves the GUI and its WebKit helper executables, and the build fails if any shipped binary
 needs a GLIBC newer than 2.28. Its AppImage carries its own gate:
@@ -550,7 +550,9 @@ needs a GLIBC newer than 2.28. Its AppImage carries its own gate:
 AppDir with `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then
 extracts the **finished AppImage** — deliberately the image rather than the AppDir — and
 fails the release before the artifact ships if the helpers are missing, not executable,
-or resolve their WebKit/GTK dependencies from outside the bundle.
+or resolve their WebKit/GTK dependencies from outside the bundle, if a bundled
+library's startup code no longer points at executable code, or if the launched app's
+frontend never starts.
 
 **`.github/workflows/test.yml`** runs on pull requests and on pushes to `release/**`: the
 Go suite (without the root package, which embeds `frontend/dist`) natively on

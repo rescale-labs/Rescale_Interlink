@@ -51,6 +51,16 @@ GTK_PLUGIN_SHA256="b0f4cbc684a0103a9651f0955b635eaea0096b3a66c0f5a2c2aa337960375
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
 APPIMAGETOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
 
+# linuxdeploy and bundle-webkit.sh both rewrite RPATHs with patchelf. EPEL's
+# patchelf 0.12, and the one inside the linuxdeploy above, move .init out of
+# the way of the grown program-header table without updating DT_INIT
+# (NixOS/patchelf#639, fixed in 0.19.0). WebKitGTK 2.54's libraries and the
+# injected bundle keep .init right after the headers, so builds made with those
+# patchelf versions ship libraries that crash the moment they load.
+PATCHELF_VERSION="0.19.2"
+PATCHELF_URL="https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-x86_64.tar.gz"
+PATCHELF_SHA256="2abdc34fbe949c995a1baa4ec310896a085588a45a99cd0d726851bdfac2a4bb"
+
 # Given to appimagetool as --runtime-file. Without it, appimagetool downloads
 # the runtime from the 'continuous' release at build time, unverified.
 RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
@@ -85,16 +95,16 @@ cd "$BUILDDIR"
 # =============================================================================
 echo "[1/6] Installing build packages..."
 
-# patchelf and ImageMagick come from EPEL, which relies on PowerTools. The last
-# line is not needed to compile: the gtk plugin copies input-method and GTK
-# modules, pixbuf loaders and GSettings schemas from this host into the
-# AppImage, and these packages supply the ones the hand-built AppImage carried.
+# ImageMagick comes from EPEL, which relies on PowerTools. The last line is not
+# needed to compile: the gtk plugin copies input-method and GTK modules, pixbuf
+# loaders and GSettings schemas from this host into the AppImage, and these
+# packages supply the ones the hand-built AppImage carried.
 dnf -y install epel-release dnf-plugins-core
 dnf config-manager --set-enabled powertools
 dnf -y install \
     gcc gcc-c++ make binutils python3 file findutils tar gzip \
     gtk3-devel webkit2gtk3-devel glib2-devel gdk-pixbuf2-devel pango-devel cairo-devel \
-    desktop-file-utils xorg-x11-server-Xvfb patchelf ImageMagick \
+    desktop-file-utils xorg-x11-server-Xvfb ImageMagick \
     ibus-gtk3 libcanberra-gtk3 gsettings-desktop-schemas gdk-pixbuf2-modules librsvg2
 
 # Wails runs the application to generate its bindings, and the gate's runtime
@@ -123,6 +133,14 @@ fetch "$GTK_PLUGIN_URL" "$GTK_PLUGIN_SHA256" linuxdeploy-plugin-gtk.sh
 fetch "$APPIMAGETOOL_URL" "$APPIMAGETOOL_SHA256" appimagetool-x86_64.AppImage
 fetch "$RUNTIME_URL" "$RUNTIME_SHA256" runtime-x86_64
 chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh appimagetool-x86_64.AppImage
+
+fetch "$PATCHELF_URL" "$PATCHELF_SHA256" patchelf.tar.gz
+mkdir -p /usr/local/patchelf
+tar -C /usr/local/patchelf -xzf patchelf.tar.gz
+# PATCHELF replaces the patchelf inside linuxdeploy; PATH serves bundle-webkit.sh.
+export PATCHELF=/usr/local/patchelf/bin/patchelf
+export PATH="/usr/local/patchelf/bin:$PATH"
+"$PATCHELF" --version
 
 go version
 echo "node $(node --version), npm $(npm --version)"
@@ -265,8 +283,9 @@ CLI Mode:
   ./rescale-int jobs list
   ./rescale-int upload file.txt
 
-The GUI (AppImage) is self-contained with all dependencies bundled, but
-running it requires FUSE (fusermount), which most desktop distributions
+The GUI (AppImage) bundles WebKitGTK, GTK and their helper processes; the C
+library, graphics and display libraries come from the host. Running it
+requires FUSE (fusermount), which most desktop distributions
 provide by default. On a minimal or locked-down host without FUSE, run:
   ./rescale-int-gui.AppImage --appimage-extract-and-run
 

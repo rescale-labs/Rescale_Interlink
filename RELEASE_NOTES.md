@@ -292,8 +292,10 @@ paths and `id:<fileId>` references. `pur run` and `pur resume` take a folder in
 The Linux AppImage bundled WebKit's library but relied on the host system for WebKit's
 helper executables (`WebKitWebProcess`, `WebKitNetworkProcess`). On hosts where the two
 didn't match — or the helpers didn't exist — the GUI launched to a blank window. The
-AppImage now ships the helper processes alongside the library and points the library at
-the bundled copies, so the GUI renders regardless of what WebKit the host has installed.
+AppImage now ships the helper processes and WebKit's injected bundle alongside the
+library, and the bundled library loads only those copies. If `LD_LIBRARY_PATH` makes the
+AppImage use the host's WebKit instead, that WebKit keeps its own helpers. The blank
+window was not a graphics problem: the GUI renders on machines without a GPU.
 The input-method cache is also regenerated inside the bundle, removing a cosmetic ibus
 warning at startup.
 
@@ -882,7 +884,7 @@ Go and frontend test suites before packaging, and pushes to release branches and
 requests also run the Go tests natively on Windows and Linux, and the frontend tests,
 lint and build and `go vet` on macOS. The release workflow refuses a tag that does not
 match the version in the source. The Linux release can now be built in GitHub Actions on
-AlmaLinux 8, with Go, Node.js and the AppImage tools it downloads checked against
+AlmaLinux 8, with Go, Node.js, patchelf and the AppImage tools it downloads checked against
 pinned SHA-256 sums, and its system packages installed from the AlmaLinux and EPEL
 repositories. Every release asset, including the Windows zip, now has a `.sha256` file
 that `shasum -a 256 -c` accepts. On Windows, a failure to re-launch the GUI's helper process

@@ -73,14 +73,16 @@ a maintainer's manual run from any branch, with the following controls:
   Linux tarball) is published with a `.sha256` that `shasum -a 256 -c` accepts, and
   every binary is built with `-trimpath`, so it records no build-machine paths.
 - **Linux AppImage self-check.** The Linux build runs in
-  `.github/workflows/release-linux.yml`, in an `almalinux:8` container. Go, Node.js and
-  the AppImage tools it downloads are checked against pinned SHA-256 sums, and its system
+  `.github/workflows/release-linux.yml`, in an `almalinux:8` container. Go, Node.js,
+  patchelf and the AppImage tools it downloads are checked against pinned SHA-256 sums, and its system
   packages come from the AlmaLinux and EPEL repositories through `dnf`. Its packaging step bundles WebKit's helper
   executables into the AppDir with `$ORIGIN`-relative RPATHs, and `build/linux/verify-appimage.sh` then inspects the
   finished AppImage — deliberately the built image rather than the AppDir, so a missing
   RPATH cannot hide behind a matching host WebKit — and fails the release before the
   artifact ships if the helpers are missing, not executable, or resolve their WebKit/GTK
-  dependencies from the host instead of the bundle. Without this, WebKit forks the host's
+  dependencies from the host instead of the bundle, if a bundled library's startup code
+  no longer points at executable code, or if the launched app's frontend never starts.
+  Without this, WebKit forks the host's
   `WebKitWebProcess` from a compiled-in path and a mismatched build breaks its IPC.
 
 ### S3 FIPS Endpoints (ITAR Platforms)

@@ -37,7 +37,7 @@ This document catalogs what Rescale Interlink can do. For full command syntax, s
 
 **Release artifacts** (what a tagged release publishes):
 - macOS (darwin/arm64) — signed and notarized `.zip`
-- Linux (amd64) — `.tar.gz` holding the CLI and an AppImage GUI. The AppImage bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. The Linux build gates the AppImage on `build/linux/verify-appimage.sh` before packaging the tarball, so helpers that are missing or resolve against the host fail the build. It is built by `.github/workflows/release-linux.yml` in an `almalinux:8` container, and fails if a binary needs a GLIBC newer than 2.28
+- Linux (amd64) — `.tar.gz` holding the CLI and an AppImage GUI. The AppImage bundles WebKit's helper executables with `$ORIGIN`-relative RPATHs, so the window renders on hosts whose own WebKit build differs. The Linux build gates the AppImage on `build/linux/verify-appimage.sh` before packaging the tarball, so helpers that are missing or resolve against the host, damaged library startup code, or a frontend that never starts fail the build. It is built by `.github/workflows/release-linux.yml` in an `almalinux:8` container, and fails if a binary needs a GLIBC newer than 2.28
 - Windows (amd64) — portable `.zip` and `.msi`; the executables are signed before zipping and the MSI is signed after it is built
 - Every asset is published with a `.sha256` beside it
 

@@ -39,6 +39,9 @@ type AppInfoDTO struct {
 
 // GetAppInfo returns version, build time, FIPS status, and platform info.
 func (a *App) GetAppInfo() AppInfoDTO {
+	// The frontend calls this as it starts. build/linux/verify-appimage.sh waits
+	// for this exact message to know the page loaded and its scripts ran.
+	wailsLogger.Debug().Msg("Frontend requested app info")
 	info := AppInfoDTO{
 		Version:             cli.Version,
 		BuildTime:           cli.BuildTime,
