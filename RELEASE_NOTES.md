@@ -1433,7 +1433,7 @@ On a fresh Windows install (subprocess mode), the auto-download daemon failed si
 - **File**: `internal/daemon/ipc_handler_windows.go`
 
 **Fix 3: Windows username format mismatch**
-- Daemon returned `"DESKTOP-PC\Peter Klein"` but GUI compared with `"Peter Klein"`. Direct equality failed.
+- Daemon returned `"HOSTNAME\username"` but GUI compared with `"username"`. Direct equality failed.
 - Added `matchesWindowsUsername()` helper handling `DOMAIN\user`, `user@domain` (UPN), and case-insensitive comparisons.
 - Added subprocess hardening: in single-user mode, if exactly 1 user is returned and no match is found, treat it as the current user.
 - **File**: `internal/wailsapp/daemon_bindings_windows.go`
@@ -1527,7 +1527,7 @@ This release fixes seven interrelated bugs that rendered the PUR (Parallel Uploa
 - **Files**: `internal/models/job.go`, `internal/wailsapp/job_bindings.go`, `internal/core/engine.go`, `internal/pur/pipeline/pipeline.go`, `frontend/src/stores/jobStore.ts`, `frontend/src/components/tabs/PURTab.tsx`, `frontend/src/components/tabs/SetupTab.tsx`
 
 **Fix 7: Tar File Naming — Readable with Collision-Safe Suffix**
-- Root cause: `GenerateTarPath()` replaced all path separators with underscores, producing unreadable names like `Users_pklein_data_Run_1.tar.gz`.
+- Root cause: `GenerateTarPath()` replaced all path separators with underscores, producing unreadable names like `Users_username_data_Run_1.tar.gz`.
 - Fix: Uses last 1-2 path components plus a short FNV-32a hash for collision safety. Produces: `Testing_Run_6_a1b2c3d4.tar.gz`.
 - **Files**: `internal/util/tar/tar.go`
 
@@ -4577,7 +4577,7 @@ This release achieves a **99% reduction in API overhead** for job downloads by e
 Verified with real job downloads:
 - ✅ Build successful
 - ✅ Version check: 2.4.8
-- ✅ Integration test: Downloaded 5 files from job wemvxd
+- ✅ Integration test: Downloaded 5 files from a test job
 - ✅ No rate limit waits
 - ✅ Checksum validation passed
 - ✅ All unit tests passing
@@ -4773,8 +4773,8 @@ This release fixes two bugs: a critical issue preventing Azure users from downlo
 
 #### Testing
 
-Verified with Azure account (API key ending in ...4555) downloading job WVieAd:
-- ✅ Single file download successful (file ywiybh)
+Verified with an Azure account downloading a job's output files:
+- ✅ Single file download successful
 - ✅ Batch download successful (10 files with nested directories)
 - ✅ All files receive S3 credentials correctly
 - ✅ No 404 errors or credential mismatches
@@ -4918,8 +4918,8 @@ Error: invalid filename from API for file ABC123: filename cannot contain '..': 
 - ✅ Build succeeds on all platforms
 - ✅ Zero regressions detected
 - ✅ 40 new tests added (1,593 lines of test code)
-- ✅ Tested with S3 backend (API key: 91cb2a...)
-- ✅ Tested with Azure backend (API key: 8f6cb2...)
+- ✅ Tested with S3 backend
+- ✅ Tested with Azure backend
 
 **Version Information**:
 ```bash
@@ -4978,8 +4978,8 @@ This release adds full proxy support for direct S3 and Azure Blob Storage operat
 #### Testing
 
 **Tested with Real Backends**:
-- ✅ S3: File upload, download, folder upload (API key: 91cb2a...)
-- ✅ Azure: File upload, download, folder upload (API key: 8f6cb2...)
+- ✅ S3: File upload, download, folder upload
+- ✅ Azure: File upload, download, folder upload
 - ✅ GUI launches successfully
 - ✅ CLI commands work for both backends
 - ✅ No regressions in existing functionality
@@ -5317,17 +5317,17 @@ Major release adding full upload/download resume capability for both S3 and Azur
 {
   "local_path": "/tmp/test_medium_300mb.dat",
   "encrypted_path": "/tmp/.test_medium_300mb.dat-447006073.encrypted",
-  "object_key": "user/user_HjDBeb/test_medium_300mb.dat-HoxI7mRQgLqk7fpUWSbhqT",
-  "upload_id": "Z5ZRKz5eBYZiXDIA.Tfhrc5_iN4cwNZtXgK...",
+  "object_key": "user/user_<id>/test_medium_300mb.dat-<random_suffix>",
+  "upload_id": "<multipart upload ID>",
   "total_size": 314572816,
   "original_size": 314572800,
   "uploaded_bytes": 67108864,
   "completed_parts": [{"PartNumber": 1, "ETag": "..."}],
-  "encryption_key": "lBklWCPNOP9LkkSqjegNIXEVH+gAUY/g74Gf+M2UuMc=",
-  "iv": "r2vm4sl81G8gbS2b+IP3Tg==",
-  "random_suffix": "HoxI7mRQgLqk7fpUWSbhqT",
-  "created_at": "2025-11-15T15:57:19.572637-05:00",
-  "last_update": "2025-11-15T15:57:19.572638-05:00",
+  "encryption_key": "<base64 AES-256 key>",
+  "iv": "<base64 IV>",
+  "random_suffix": "<random_suffix>",
+  "created_at": "2025-11-15T15:57:19Z",
+  "last_update": "2025-11-15T15:57:19Z",
   "storage_type": "S3Storage"
 }
 ```
