@@ -477,10 +477,11 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 		}
 	}()
 	// Joined, not just signalled, for the reason given in downloadStreamingConcurrent.
-	defer func() {
+	stopProgress := sync.OnceFunc(func() {
 		close(progressDone)
 		<-progressStopped
-	}()
+	})
+	defer stopProgress()
 
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
@@ -591,6 +592,7 @@ func DownloadChunkedConcurrent(ctx context.Context, params ChunkedConcurrentPara
 
 	state.DeleteDownloadState(params.LocalPath)
 
+	stopProgress()
 	if params.ProgressCallback != nil {
 		params.ProgressCallback(1.0)
 	}

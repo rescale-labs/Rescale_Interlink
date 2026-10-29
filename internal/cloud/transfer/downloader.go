@@ -907,10 +907,11 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 		}
 	}()
 	// Join it, not just signal it — see downloadStreamingConcurrent.
-	defer func() {
+	stopProgress := sync.OnceFunc(func() {
 		close(progressDone)
 		<-progressStopped
-	}()
+	})
+	defer stopProgress()
 
 	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {
@@ -997,6 +998,7 @@ func (d *Downloader) downloadCBCStreaming(ctx context.Context, prep *DownloadPre
 	// hand the hash back the same way.
 	prep.ComputedHash = hex.EncodeToString(hasher.Sum(nil))
 
+	stopProgress()
 	// Report 100% at end
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(1.0)
@@ -1227,10 +1229,13 @@ func (d *Downloader) downloadStreamingConcurrent(
 	// Join it, not just signal it: the callback belongs to the caller, and one
 	// that runs after this download has returned reports progress for a transfer
 	// that is over — to a progress bar that may already have been torn down.
-	defer func() {
+	// The final 100% report stops it first, so that report never runs
+	// alongside a tick.
+	stopProgress := sync.OnceFunc(func() {
 		close(progressDone)
 		<-progressStopped
-	}()
+	})
+	defer stopProgress()
 
 	// Report 0% progress immediately so users see the transfer has started.
 	if prep.Params.ProgressCallback != nil {
@@ -1453,6 +1458,7 @@ func (d *Downloader) downloadStreamingConcurrent(
 	}
 	renamed = true
 
+	stopProgress()
 	// Report 100% progress
 	if prep.Params.ProgressCallback != nil {
 		prep.Params.ProgressCallback(1.0)
